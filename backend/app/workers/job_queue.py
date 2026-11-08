@@ -1,23 +1,26 @@
-import threading
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict
 from sqlalchemy.orm import Session
+from fastapi import HTTPException, status
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.models.analysis import Analysis, AnalysisStatus, TERMINAL_STATES, VALID_STATE_TRANSITIONS
+from app.models.analysis import Analysis, AnalysisStatus, TERMINAL_STATES
 from app.workers.pipeline_worker import PipelineWorker
 
 class JobQueueManager:
     """
-    Persistent, bounded background job queue manager.
+    In-process bounded sequential job queue manager.
     Enforces WORKER_CONCURRENCY=1 by default and coordinates safe task execution,
     lifecycle state transitions, cancellation signals, and crash recovery.
+    Cannot be bypassed by public run_sync execution.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
+        self._worker_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
         self._active_job_id: Optional[str] = None
@@ -49,6 +52,34 @@ class JobQueueManager:
         with self._lock:
             return self._active_job_id
 
+    def execute_sync(self, analysis_id: str, db: Session, timeout: float = 60.0) -> Analysis:
+        """
+        Executes an analysis job synchronously while strictly enforcing WORKER_CONCURRENCY=1.
+        Blocks until the worker concurrency lock is acquired.
+        Guarantees that public run_sync=true requests cannot bypass execution limits.
+        """
+        acquired = self._worker_lock.acquire(timeout=timeout)
+        if not acquired:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Worker concurrency limit (1) exceeded. Another analysis task is currently executing."
+            )
+
+        cancel_event = threading.Event()
+        with self._lock:
+            self._active_job_id = analysis_id
+            self._cancellation_events[analysis_id] = cancel_event
+
+        try:
+            worker = PipelineWorker(db, cancel_event=cancel_event)
+            return worker.execute_pipeline(analysis_id)
+        finally:
+            with self._lock:
+                self._cancellation_events.pop(analysis_id, None)
+                if self._active_job_id == analysis_id:
+                    self._active_job_id = None
+            self._worker_lock.release()
+
     def recover_stale_jobs(self, db: Session) -> int:
         """
         Recovers jobs left in intermediate non-terminal states during an abrupt crash or restart.
@@ -72,11 +103,10 @@ class JobQueueManager:
         )
 
         recovered_count = 0
-        now = datetime.now(timezone.utc)
         for job in stale_jobs:
             job.status = AnalysisStatus.FAILED.value
             job.error_message = "Analysis interrupted by process shutdown or worker restart. Recovered safely."
-            job.completed_at = now
+            job.completed_at = datetime.now(timezone.utc)
             recovered_count += 1
 
         if recovered_count > 0:
@@ -88,6 +118,7 @@ class JobQueueManager:
         """
         Cancels a queued or currently executing analysis task.
         Propagates cancellation event to worker and updates persistent state.
+        Guarantees race-free state transitions against concurrent job completion.
         """
         analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
         if not analysis:
@@ -99,11 +130,15 @@ class JobQueueManager:
             return False
 
         with self._lock:
-            # 1. If currently running, signal cancellation event
+            # 1. If currently running, signal cancellation event immediately
             if analysis_id in self._cancellation_events:
                 self._cancellation_events[analysis_id].set()
 
-            # 2. Update persistent status to CANCELLED
+            # 2. Re-verify database status under lock
+            db.refresh(analysis)
+            if AnalysisStatus(analysis.status) in TERMINAL_STATES:
+                return False
+
             analysis.status = AnalysisStatus.CANCELLED.value
             analysis.completed_at = datetime.now(timezone.utc)
             if not analysis.error_message:
@@ -113,7 +148,7 @@ class JobQueueManager:
             return True
 
     def _worker_loop(self) -> None:
-        """Continuous consumer loop polling for QUEUED analyses."""
+        """Continuous consumer loop polling for QUEUED analyses while enforcing WORKER_CONCURRENCY=1."""
         while not self._stop_event.is_set():
             job_id_to_run = None
             db = SessionLocal()
@@ -138,24 +173,40 @@ class JobQueueManager:
                 time.sleep(settings.JOB_POLL_INTERVAL_SECONDS)
                 continue
 
-            # Process job with concurrency=1
-            cancel_event = threading.Event()
-            with self._lock:
-                self._active_job_id = job_id_to_run
-                self._cancellation_events[job_id_to_run] = cancel_event
+            # Acquire worker concurrency lock
+            if not self._worker_lock.acquire(blocking=False):
+                # Worker slot busy (e.g., executing synchronous task), back off
+                time.sleep(settings.JOB_POLL_INTERVAL_SECONDS)
+                continue
 
-            worker_db = SessionLocal()
             try:
-                pipeline_worker = PipelineWorker(worker_db, cancel_event=cancel_event)
-                pipeline_worker.execute_pipeline(job_id_to_run)
-            except Exception as e:
-                pass
-            finally:
-                worker_db.close()
+                # Verify job is still queued before starting
+                check_db = SessionLocal()
+                try:
+                    target_job = check_db.query(Analysis).filter(Analysis.id == job_id_to_run).first()
+                    if not target_job or target_job.status != AnalysisStatus.QUEUED.value:
+                        continue
+                finally:
+                    check_db.close()
+
+                cancel_event = threading.Event()
                 with self._lock:
-                    self._cancellation_events.pop(job_id_to_run, None)
-                    if self._active_job_id == job_id_to_run:
-                        self._active_job_id = None
+                    self._active_job_id = job_id_to_run
+                    self._cancellation_events[job_id_to_run] = cancel_event
+
+                worker_db = SessionLocal()
+                try:
+                    pipeline_worker = PipelineWorker(worker_db, cancel_event=cancel_event)
+                    pipeline_worker.execute_pipeline(job_id_to_run)
+                except Exception:
+                    pass
+                finally:
+                    worker_db.close()
+                    with self._lock:
+                        self._cancellation_events.pop(job_id_to_run, None)
+                        if self._active_job_id == job_id_to_run:
+                            self._active_job_id = None
+            finally:
+                self._worker_lock.release()
 
 job_queue_manager = JobQueueManager()
-

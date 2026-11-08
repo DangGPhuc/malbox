@@ -155,3 +155,71 @@ def test_detection_engine_c2_contextual_threshold(db_session):
     findings_post, assessment = engine.evaluate_behavior(analysis.id)
     assert any(f.rule_id == "RULE_C2_HTTP_EXFILTRATION" for f in findings_post)
 
+
+def test_lone_ransom_note_without_encrypted_files_not_mass_encryption(db_session):
+    """A lone ransom note must NOT trigger RULE_MASS_FILE_ENCRYPTION without encrypted file evidence."""
+    sample = Sample(
+        sha256="lone" + "0" * 60, md5="l" * 32, sha1="l" * 40,
+        file_name="note_only.exe", file_size=50, quarantine_path="/tmp/l.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    analysis = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    # Single ransom note, zero encrypted files
+    ev_note = AnalysisEvent(
+        analysis_id=analysis.id, category="file", action="write",
+        timestamp=datetime.now(timezone.utc), process_id=500,
+        target_path="C:\\Users\\test\\Desktop\\how_to_decrypt.txt",
+        attributes={"is_ransom_note": True}
+    )
+    db_session.add(ev_note)
+    db_session.commit()
+
+    engine = DetectionEngine(db_session)
+    findings, assessment = engine.evaluate_behavior(analysis.id)
+
+    # Must NOT trigger mass file encryption
+    matched_rules = [f.rule_id for f in findings]
+    assert "RULE_MASS_FILE_ENCRYPTION" not in matched_rules
+
+
+def test_normal_http_post_not_c2_exfiltration(db_session):
+    """A normal HTTP POST (even with HTTP 200) must NOT automatically trigger RULE_C2_HTTP_EXFILTRATION."""
+    sample = Sample(
+        sha256="post" + "0" * 60, md5="p" * 32, sha1="p" * 40,
+        file_name="post_benign.exe", file_size=50, quarantine_path="/tmp/p.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    analysis = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    # Benign telemetry API call with HTTP 200
+    ev_normal_post = AnalysisEvent(
+        analysis_id=analysis.id, category="http", action="post",
+        timestamp=datetime.now(timezone.utc), process_id=600,
+        target_path="https://telemetry.microsoft.com/v10/events",
+        attributes={"method": "POST", "status_code": 200}
+    )
+    db_session.add(ev_normal_post)
+    db_session.commit()
+
+    engine = DetectionEngine(db_session)
+    findings, _ = engine.evaluate_behavior(analysis.id)
+
+    matched_rules = [f.rule_id for f in findings]
+    assert "RULE_C2_HTTP_EXFILTRATION" not in matched_rules
+
+

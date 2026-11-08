@@ -270,3 +270,127 @@ def test_cape_polling_lifecycle_mocked(monkeypatch):
         report = cape.collect_results("123")
         assert "metadata" in report
         assert report["metadata"]["cape_id"] == 1
+
+
+def test_operator_token_fail_closed_when_empty(client, monkeypatch):
+    """When OPERATOR_TOKEN is empty string (default), live mode is blocked (fail-closed HTTP 403)."""
+    monkeypatch.setattr(settings, "LIVE_MODE_ENABLED", True)
+    monkeypatch.setattr(settings, "OPERATOR_TOKEN", "")
+
+    res_sample = client.post("/api/v1/samples", files={"file": ("op_test.exe", io.BytesIO(b"MZ_OP_TEST"))})
+    sample_id = res_sample.json()["id"]
+
+    payload = {
+        "sample_id": sample_id,
+        "backend_type": "cape",
+        "live_mode": True,
+        "approved_by_user": True,
+        "timeout_seconds": 60,
+    }
+    # Even if client passes a token, server must fail closed if OPERATOR_TOKEN is empty
+    res = client.post("/api/v1/analyses", json=payload, headers={"X-Operator-Token": "some_token"})
+    assert res.status_code == 403
+    assert "Live detonation is blocked: Server operator security token is unconfigured" in res.json()["detail"]
+
+
+def test_operator_token_auth_flow(client, monkeypatch):
+    """When OPERATOR_TOKEN is configured, verify 401 on missing/wrong token and 200 on valid token."""
+    monkeypatch.setattr(settings, "LIVE_MODE_ENABLED", True)
+    monkeypatch.setattr(settings, "OPERATOR_TOKEN", "valid-super-secret-token-12345")
+
+    res_sample = client.post("/api/v1/samples", files={"file": ("op_auth.exe", io.BytesIO(b"MZ_OP_AUTH"))})
+    sample_id = res_sample.json()["id"]
+
+    payload = {
+        "sample_id": sample_id,
+        "backend_type": "cape",
+        "live_mode": True,
+        "approved_by_user": True,
+        "timeout_seconds": 60,
+    }
+
+    # Missing header -> 401
+    res_missing = client.post("/api/v1/analyses", json=payload)
+    assert res_missing.status_code == 401
+
+    # Wrong header -> 401
+    res_wrong = client.post("/api/v1/analyses", json=payload, headers={"X-Operator-Token": "wrong-token"})
+    assert res_wrong.status_code == 401
+
+    # Valid header -> 201 (created)
+    res_valid = client.post("/api/v1/analyses", json=payload, headers={"X-Operator-Token": "valid-super-secret-token-12345"})
+    assert res_valid.status_code == 201
+
+
+def test_replay_scenario_validation_strict(client):
+    """Replay scenario validation rejects path traversal and unknown scenario IDs."""
+    res_sample = client.post("/api/v1/samples", files={"file": ("scen_test.exe", io.BytesIO(b"MZ_SCEN_TEST"))})
+    sample_id = res_sample.json()["id"]
+
+    # 1. Path traversal rejected
+    payload_traversal = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "live_mode": False,
+        "replay_scenario_id": "../../etc/passwd",
+        "timeout_seconds": 60,
+    }
+    res_trav = client.post("/api/v1/analyses", json=payload_traversal)
+    assert res_trav.status_code == 400
+    assert "path traversal" in res_trav.json()["detail"]
+
+    # 2. Unknown scenario ID rejected
+    payload_unknown = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "live_mode": False,
+        "replay_scenario_id": "malicious_unregistered_scenario",
+        "timeout_seconds": 60,
+    }
+    res_unk = client.post("/api/v1/analyses", json=payload_unknown)
+    assert res_unk.status_code == 400
+    assert "Unknown replay scenario identifier" in res_unk.json()["detail"]
+
+    # 3. Registered scenario accepted
+    payload_valid = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "live_mode": False,
+        "replay_scenario_id": "ransomware_wannacry_mock",
+        "timeout_seconds": 60,
+    }
+    res_ok = client.post("/api/v1/analyses", json=payload_valid)
+    assert res_ok.status_code == 201
+    assert res_ok.json()["replay_scenario_id"] == "ransomware_wannacry_mock"
+
+
+def test_live_analysis_cancellation_requires_operator_token(client, db_session, monkeypatch):
+    """Cancelling a live analysis requires a valid operator token."""
+    monkeypatch.setattr(settings, "OPERATOR_TOKEN", "cancel-secret-token")
+
+    res_sample = client.post("/api/v1/samples", files={"file": ("cancel_live.exe", io.BytesIO(b"MZ_LIVE_CANCEL"))})
+    sample_id = res_sample.json()["id"]
+
+    # Insert a live analysis directly
+    live_analysis = Analysis(
+        sample_id=sample_id,
+        backend_type=SandboxBackendType.CAPE.value,
+        status=AnalysisStatus.RUNNING.value,
+        live_mode=True,
+        approved_by_user=True,
+    )
+    db_session.add(live_analysis)
+    db_session.commit()
+
+    # Cancel without token -> 401
+    res_no_tok = client.post(f"/api/v1/analyses/{live_analysis.id}/cancel")
+    assert res_no_tok.status_code == 401
+
+    # Cancel with valid token -> 200
+    res_auth = client.post(
+        f"/api/v1/analyses/{live_analysis.id}/cancel",
+        headers={"X-Operator-Token": "cancel-secret-token"}
+    )
+    assert res_auth.status_code == 200
+    assert res_auth.json()["status"] == AnalysisStatus.CANCELLED.value
+

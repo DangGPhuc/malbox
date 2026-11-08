@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models.analysis import Analysis
@@ -105,9 +105,13 @@ class ReportGenerator:
         if analysis.backend_type == "replay":
             guest_os_str = env_meta.get("guest_os", "Windows 10 x64 (Simulated Replay Environment)")
             confinement_str = "Isolated Replay Sandbox"
+            scenario_id = env_meta.get("scenario_id") or analysis.replay_scenario_id or "unknown"
+            fixture_ver = env_meta.get("fixture_version") or "1.0"
         else:
             guest_os_str = env_meta.get("guest_os") or "Not reported by sandbox backend"
             confinement_str = env_meta.get("confinement") or "Live Hypervisor Guest"
+            scenario_id = None
+            fixture_ver = None
 
         analysis_env = {
             "backend": analysis.backend_type,
@@ -116,6 +120,8 @@ class ReportGenerator:
             "live_mode": analysis.live_mode,
             "guest_os": guest_os_str,
             "confinement": confinement_str,
+            "replay_scenario_id": scenario_id,
+            "fixture_version": fixture_ver,
         }
 
         # Activity summaries

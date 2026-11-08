@@ -1,9 +1,9 @@
 # malbox-ai — Audit Remediation & Hardening Ledger
 
 **Branch:** `audit/remediation-hardening`  
-**Base Commit:** `181309e`  
+**Base Commit:** `181309e` -> `e00a55f`  
 **Date:** November 2026  
-**Status:** Remediated & Verified (Phases 0 — 8 Completed)
+**Status:** **Remediated & Verified (Phases 0 — 8 Completed + Final CI Fix & Pre-VM Validation)**
 
 ---
 
@@ -11,134 +11,117 @@
 
 | Phase | Subsystem | Priority | Defect Description | Root Cause | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| **CI** | Reporting | **P0** | `NameError: name 'Optional' is not defined` in `generate_report()`. | Missing `Optional` in typing imports of `generator.py`. | **Fixed & Verified** |
 | **0** | Packaging | **P0** | `backend/pyproject.toml` missing `backend/README.md` & flat-layout discovery collision with empty `backend/fixtures`. | Missing readme file and missing package find directive in `pyproject.toml`. | **Fixed & Verified** |
 | **1** | Safety Gate | **P0** | Inconsistent backend / mode gate allows `backend_type="cape"` with `live_mode=false` to bypass safety check; self-referential CAPE URL port 8000; missing operator auth. | API and Worker checked `live_mode` independently of `backend_type`; string backend without strict enum; CAPE URL defaulted to application port. | **Fixed & Verified** |
-| **2** | Job Lifecycle | **P0** | BackgroundTasks used as queue; concurrency=1 not enforced; cancellation doesn't halt worker; premature CAPE report fetch; terminal states overwritten. | No durable queue; uncoordinated threading; missing CAPE status polling loop; missing state transition validation. | **Fixed & Verified** |
-| **3** | AI Orchestrator| **P1** | `RealLLMProvider` was an empty mock proxy; blacklist validator instead of positive schema allowlist; no token/model/fallback tracking in audit trail. | Placeholder delegation in `llm_client.py`; negative key checking instead of positive schema allowlist. | **Fixed & Verified** |
-| **4** | Telemetry | **P1** | Hardcoded OS/confinement in reports; process graph and tree sensitive to event order / PID reuse; potential ungrounded edges. | Lack of temporal instance identity for processes; static strings in report generator. | **Fixed & Verified** |
-| **5** | Detection | **P1** | Overly broad single-event rules (any POST = exfil; any 445 = scanning); false "Clean" verdict on zero telemetry. | Lack of contextual behavioral thresholds; binary clean classification instead of absence of evidence disclaimer. | **Fixed & Verified** |
-| **6** | Replay Mode | **P1** | Automatic canned fixture selection based on sample filename; unclear synthetic vs live provenance in reports and UI. | Dynamic selection heuristic conflates real sample with canned threat data; missing provenance banners. | **Fixed & Verified** |
-| **7** | Security & UI | **P1** | Unescaped HTML in standalone report (XSS vector); frontend lacks live polling; synchronous blocking requests. | Lack of `html.escape()` and CSP meta in HTML generator; no interval polling in React workspace. | **Fixed & Verified** |
-| **8** | QA & Benchmarks| **P1** | Missing CI workflow and automated VM resource benchmark script for resource-constrained evaluations. | Absence of `.github/workflows/ci.yml` and benchmark utility. | **Fixed & Verified** |
+| **2** | Security & Lifecycle | **P0** | Hardcoded default operator token; missing secret fails open or unchecked; public `run_sync` bypasses worker concurrency=1; replay scenario traversal; cancellation races with completion. | Permissive defaults in `config.py`; unmanaged thread execution in sync endpoint; lack of replay ID whitelist; unsynchronized state check. | **Fixed & Verified** |
+| **3** | Analysis Logic | **P1** | Raw PID-only process node identity collapses reused PIDs; unattributed network events falsely linked to sample root; lone ransom note flags mass encryption; any HTTP POST flags C2; AI falsely claims unexecuted second pass. | Lack of process-instance IDs; missing unattributed network node; rule thresholds without multi-event corroboration; worker overwriting profile without second pass. | **Fixed & Verified** |
+| **4** | Telemetry Scaling | **P1** | Benchmarks evaluated only 12-15 replay events; no verification on medium (1K) or large (10K) event streams. | Benchmark script tested only two static fixtures without synthetic dataset generator. | **Fixed & Verified** |
+| **5** | CI Verification | **P0** | CI workflow lacked byte-compile validation, recursive module import checks, and comprehensive security regression tests. | Incomplete CI workflow definition. | **Fixed & Verified** |
 
 ---
 
-## 2. Detailed Remediation Details by Phase
+## 2. Detailed Remediation Details by Subsystem
 
-### Phase 0 — Baseline Validation & Packaging
+### CI Failure Fix & Packaging
 - **Defects Identified:**
+  - GitHub Actions and local execution failed with `NameError: name 'Optional' is not defined` at `backend/app/services/reporting/generator.py:27`.
   - `backend/pyproject.toml` declared `readme = "README.md"`, but no `README.md` existed in `backend/`.
-  - Empty `backend/fixtures` directory caused setuptools flat-layout error: `Multiple top-level packages discovered in a flat-layout: ['app', 'fixtures']`.
 - **Fixes Applied:**
-  - Added dedicated `backend/README.md`.
-  - Removed obsolete empty `backend/fixtures` directory.
-  - Added `[tool.setuptools.packages.find]` with `include = ["app*"]` to `backend/pyproject.toml`.
-  - Verified clean virtualenv editable install: `pip install -e "backend[dev]"` succeeded with code 0.
+  - Added `Optional` to `from typing import Dict, Any, List, Optional` in `backend/app/services/reporting/generator.py`.
+  - Added dedicated `backend/README.md` and configured `find_packages(include=["app*"])`.
+  - Verified with `python -m compileall -q backend/app backend/tests` (exited 0).
+  - Verified recursive import check across all `backend/app` submodules (exited 0).
 
-### Phase 1 — Critical Live Execution Safety Gate
+### Operator Authorization & Security Boundary
 - **Defects Identified:**
-  - Submitting `backend_type="cape"` with `live_mode=false` bypassed endpoint safety checks.
-  - `CAPE_API_URL` defaulted to `http://127.0.0.1:8000`, the application's own port.
-  - Lack of operator authorization boundary on sensitive live detonation endpoints.
+  - `OPERATOR_TOKEN` previously had a hardcoded default string (`malbox-operator-secret-token-change-in-prod`).
+  - If unconfigured, the system could fail open or allow unauthorized live malware execution.
+  - Token comparison was vulnerable to timing side channels.
 - **Fixes Applied:**
-  - Introduced `SandboxBackendType` enum (`REPLAY`, `CAPE`).
-  - Added Pydantic cross-field validator in `AnalysisCreate` enforcing:
-    - `backend_type == 'cape'` requires `live_mode=True` and `approved_by_user=True`.
-    - `backend_type == 'replay'` requires `live_mode=False`.
-  - Added `X-Operator-Token` header check against `settings.OPERATOR_TOKEN` (HTTP 401 on missing/invalid token).
-  - Changed default `CAPE_API_URL` to `http://127.0.0.1:8008`.
-  - Enforced second pre-detonation readiness check in `PipelineWorker` before communicating with CAPE.
+  - Changed default `OPERATOR_TOKEN: str = ""` in `config.py`.
+  - Implemented fail-closed security boundary in `backend/app/api/v1/analyses.py`: If `settings.OPERATOR_TOKEN` is empty, Live Mode submissions and cancellations fail closed with HTTP 403 Forbidden.
+  - Used constant-time token comparison: `hmac.compare_digest(x_operator_token, settings.OPERATOR_TOKEN)` for all live detonations and live cancellation operations.
+  - Maintained `LIVE_MODE_ENABLED: bool = False` by default.
 
-### Phase 2 — Reliable Analysis Job Lifecycle
+### Replay Scenario & Artifact Validation
 - **Defects Identified:**
-  - Direct execution via `BackgroundTasks` lacked durable queuing, state transition validation, and worker concurrency limits.
-  - Immediate report retrieval from CAPE without polling task status (`pending`, `running`, `reported`).
-  - Terminal states (`COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`, `BLOCKED_BY_POLICY`) could be overwritten.
+  - Arbitrary scenario IDs could be supplied, potentially traversing filesystem paths or silently falling back to mismatched fixtures.
 - **Fixes Applied:**
-  - Created `JobQueueManager` enforcing `WORKER_CONCURRENCY=1`, background polling, and crash recovery (`recover_stale_jobs`).
-  - Implemented `safe_update_status` validating transitions against `VALID_STATE_TRANSITIONS` and protecting terminal states.
-  - Built bounded polling loop in `PipelineWorker` with cancellation event inspection at every stage.
-  - Added external task ID persistence and graceful timeout handling.
+  - Defined strict allowlist `REGISTERED_REPLAY_SCENARIOS = {"ransomware_wannacry_mock", "infostealer_redline_mock"}`.
+  - Enforced regex check `^[a-zA-Z0-9_\-]+$` and path traversal rejection (`..`, `/`, `\`, null bytes) in both API endpoint and `ReplaySandboxBackend`.
+  - Enforced path containment check `target_file.is_relative_to(fixtures_root)`.
+  - Sanitized forensic artifact filenames: prevented directory traversal and path escapes during mock artifact generation.
+  - Persisted resolved scenario ID and `fixture_version` in the analysis record and in `analysis_environment` report metadata.
 
-### Phase 3 — Real AI Provider Implementation
+### Worker Concurrency & Race-Free Cancellation
 - **Defects Identified:**
-  - `RealLLMProvider` was delegating directly to `MockLLMProvider`.
-  - `PolicyValidator` relied on a blacklist of keywords rather than strict positive schema allowlists.
-  - Audit trail did not capture token usage, provider name, or fallback reasons.
+  - Calling `POST /api/v1/analyses?run_sync=true` spawned an unmanaged `PipelineWorker` thread, bypassing the worker concurrency limit (`WORKER_CONCURRENCY=1`).
+  - Cancellation requests could race with job completion.
+  - Process crashes or restarts left jobs stranded in non-terminal states.
 - **Fixes Applied:**
-  - Implemented full HTTP request client in `RealLLMProvider` using `httpx` connecting to OpenAI/Ollama-compatible `/chat/completions`.
-  - Strict Pydantic model validation (`AnalysisPlan`, `FollowUpRecommendation`).
-  - Fallback logic: If real LLM fails or times out, it gracefully falls back to `MockLLMProvider`, explicitly recording `provider: "mock_fallback"`, `tokens_used: 0`, and the exact exception in `OrchestrationRecord`.
-  - Replaced negative keyword checks with strict positive allowlists for plan schema keys, profiles, artifacts, and duration bounds.
+  - Added `_worker_lock = threading.Lock()` to `JobQueueManager`.
+  - Routed synchronous requests through `job_queue_manager.execute_sync(analysis_id, db)`, acquiring `_worker_lock` and returning HTTP 429 if the slot is busy.
+  - Protected cancellation state transitions: re-verified database status under lock to avoid racing with job completion.
+  - Added `recover_stale_jobs(db)` recovering any non-terminal jobs to `FAILED` with descriptive error messages upon startup.
 
-### Phase 4 — Telemetry Accuracy & Evidence Integrity
+### Behavior Graph Evidence Provenance
 - **Defects Identified:**
-  - Identifying processes solely by raw `pid: int` caused PID reuse collision.
-  - Process tree crashed or misparented when child process events preceded parent events.
-  - Report generator hardcoded `Windows 10 Pro 64-bit (Isolated Sandbox)`.
+  - Process nodes used raw PID identity (`proc_{pid}`), causing collision and data corruption during PID reuse.
+  - Out-of-order parent-child process events produced disconnected or misparented trees.
+  - Network events without attributed processes were arbitrarily assigned to the sample root node.
 - **Fixes Applied:**
-  - Process instances in `build_process_tree` are uniquely indexed by event ID and parented temporally using normalized UTC timestamps.
-  - Out-of-order process events and cyclic PPID graphs are gracefully handled without crashing.
-  - `ReportGenerator` ingests verified guest OS metadata from sandbox execution or reports `"Not reported by sandbox backend"`.
-  - `build_behavior_graph` filters all edges to guarantee source and target node reference integrity.
+  - Replaced raw PID IDs with unique process-instance identity: `proc_{ev.id}`.
+  - Indexed all process instances with temporal intervals (`[spawn_time, end_time]`), resolving PID reuse and out-of-order parents deterministically.
+  - Created dedicated `node_unattributed_network` ("Unattributed Network Traffic", type `NetworkTraffic`) for network events without verified process provenance, preventing false attribution to the sample root.
+  - Strictly validated all graph edges: ensuring every edge references existing source/target nodes and links to real event IDs.
 
-### Phase 5 — Detection Rule Quality
+### Behavioral Detection Quality
 - **Defects Identified:**
-  - Single uncontextualized file writes or HTTP requests triggered critical rules (e.g., any POST = C2 exfil).
-  - Empty behavioral findings yielded a false "Clean" safety guarantee.
+  - `RULE_MASS_FILE_ENCRYPTION` matched on a single ransom note with 0 encrypted files.
+  - `RULE_C2_HTTP_EXFILTRATION` matched on ANY HTTP POST returning HTTP 200/201.
 - **Fixes Applied:**
-  - Contextual rule thresholds:
-    - `RULE_MASS_FILE_ENCRYPTION`: Requires ransom note + encrypted file OR multiple encrypted files (>=2).
-    - `RULE_C2_HTTP_EXFILTRATION`: Requires POST to gate/beacon/upload endpoint.
-    - `RULE_LATERAL_SMB_PROBE`: Requires multiple connection attempts or worm scanning context.
-  - Zero-finding risk level updated to `"No Suspicious Behavior Observed"` with explicit limitations regarding bounded execution.
+  - `RULE_MASS_FILE_ENCRYPTION`: Requires `(ransom_notes and encrypted_files) or len(encrypted_files) >= 2`. A single ransom note without encrypted files is no longer classified as mass file encryption.
+  - `RULE_C2_HTTP_EXFILTRATION`: Requires HTTP POST combined with explicit C2 endpoint indicators (`gate`, `upload`, `beacon`, `panel`, `exfil`, `post.php`) or explicit exfiltration telemetry attributes. Normal API POSTs returning 200 are no longer flagged.
+  - Added positive and negative regression tests for both rules in `test_detection_rules.py`.
 
-### Phase 6 — Replay Data Provenance
+### AI Orchestration Policy & Audit
 - **Defects Identified:**
-  - Replay telemetry was heuristically bound by filename, conflating sample data with canned threat data.
-  - Missing visual indicator distinguishing replay runs from live detonation.
+  - Approved plans did not pass parameters to sandbox execution.
+  - Observation evaluation ran before detection scoring, receiving empty findings (`findings_count: 0`).
+  - Worker previously mutated `analysis.profile` upon follow-up recommendation, falsely claiming an unexecuted second pass occurred.
+  - Hardcoded `"Windows 10 x64 CAPE VM"` in CAPE adapter.
 - **Fixes Applied:**
-  - Added explicit scenario selector (`ransomware_wannacry_mock`, `infostealer_redline_mock`) in UI and API.
-  - Added `is_replay`, `backend_type`, `replay_scenario_id`, and `provenance_disclaimer` to `FullReportSchema` and `ReportResponse`.
-  - Added prominent visual replay banner in HTML reports and React Workspace.
-
-### Phase 7 — Report & Frontend Security
-- **Defects Identified:**
-  - Dynamic user-controlled strings (sample name, commands, findings) in HTML reports lacked escaping.
-  - Workspace UI did not poll active jobs.
-- **Fixes Applied:**
-  - Applied `html.escape()` across all dynamic interpolated fields in `export_html.py`.
-  - Added strict CSP `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; font-src data:; img-src data:;">`.
-  - Implemented 2-second interval polling in `WorkspacePage.tsx` stopping upon reaching terminal states.
-
-### Phase 8 — Clean Install, CI & VM Benchmark Readiness
-- **Defects Identified:**
-  - Missing GitHub Actions CI workflow.
-  - No automated VM resource evaluation benchmark.
-- **Fixes Applied:**
-  - Created `.github/workflows/ci.yml` running Python 3.12 pytest and Node 20 Vite build.
-  - Created `scripts/benchmark_replay.py` measuring latency, CPU time, peak RSS memory, and forensic event counts.
-  - Verified benchmark: ~60-100 ms total execution latency, under 385 MB peak memory.
+  - Passed approved plan parameters (`requested_artifacts`, `telemetry_focus`) to sandbox `submit_sample(options=...)`.
+  - Moved deterministic `DetectionEngine` evaluation ahead of `ObservationEvaluator`, providing real findings, risk score, and rule IDs to the AI evaluator.
+  - Follow-up dynamic pass recommendations are clearly classified as advisory recommendations for the operator; `analysis.profile` is NOT mutated without execution.
+  - Removed hardcoded guest OS string from CAPE adapter; extracts real machine info or explicitly marks as `"Not reported by sandbox backend"`, and sets `confinement_verified=False`.
 
 ---
 
 ## 3. Verification Test Suite Status
-All 44 automated regression and unit tests pass with zero errors:
+
+All 52 automated regression and unit tests pass with zero errors:
 ```
 backend/tests/test_ai_orchestration.py: 5/5 PASSED
 backend/tests/test_cape_adapter.py: 3/3 PASSED
-backend/tests/test_detection_rules.py: 4/4 PASSED
+backend/tests/test_detection_rules.py: 6/6 PASSED
 backend/tests/test_health.py: 2/2 PASSED
 backend/tests/test_pe_parser.py: 5/5 PASSED
 backend/tests/test_real_ai_provider.py: 6/6 PASSED
 backend/tests/test_replay_pipeline.py: 1/1 PASSED
-backend/tests/test_safety_and_lifecycle.py: 10/10 PASSED
+backend/tests/test_safety_and_lifecycle.py: 14/14 PASSED
 backend/tests/test_submission.py: 3/3 PASSED
-backend/tests/test_telemetry_integrity.py: 5/5 PASSED
-Total: 44 PASSED (100% pass rate)
+backend/tests/test_telemetry_integrity.py: 7/7 PASSED
+======================== 52 passed, 1 warning in 10.44s ========================
 ```
-Frontend Vite production build:
+
+Frontend production build:
 ```
-npm run build --prefix frontend
-✓ built in 2.02s (0 errors)
+cd frontend && npm run build
+✓ 1491 modules transformed.
+dist/index.html                   0.85 kB │ gzip:   0.49 kB
+dist/assets/index-1H6TGCfN.css    3.05 kB │ gzip:   1.15 kB
+dist/assets/index-_mae2sp5.js   644.62 kB │ gzip: 201.65 kB
+✓ built in 2.35s
 ```

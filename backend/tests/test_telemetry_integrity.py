@@ -215,3 +215,90 @@ def test_reporting_no_fabricated_guest_os(db_session):
 
     # Must NOT fabricate "Windows 10 Enterprise x64"
     assert report.full_report_json["analysis_environment"]["guest_os"] == "Not reported by sandbox backend"
+
+
+def test_behavior_graph_unique_process_instance_identity_pid_reuse(db_session):
+    """Behavior graph creates distinct nodes for distinct process instances reusing the same PID."""
+    sample = Sample(
+        sha256="reuse" + "0" * 59, md5="u" * 32, sha1="u" * 40,
+        file_name="reuse_pid.exe", file_size=100, quarantine_path="/tmp/u.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    analysis = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.CORRELATING.value
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    t1 = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 1, 10, 5, 0, tzinfo=timezone.utc)
+
+    # Process 1: PID 5555 running at t1
+    ev_proc1 = AnalysisEvent(
+        analysis_id=analysis.id, category="process", action="spawn",
+        timestamp=t1, process_id=5555, process_name="first_run.exe",
+        attributes={"command_line": "first_run.exe", "end_time": "2026-01-01T10:02:00Z"}
+    )
+    # Process 2: PID 5555 reused at t2
+    ev_proc2 = AnalysisEvent(
+        analysis_id=analysis.id, category="process", action="spawn",
+        timestamp=t2, process_id=5555, process_name="second_run.exe",
+        attributes={"command_line": "second_run.exe"}
+    )
+    db_session.add_all([ev_proc1, ev_proc2])
+    db_session.commit()
+
+    graph = build_behavior_graph(analysis.id, db_session)
+    proc_nodes = [n for n in graph.nodes if n.data.type == "Process"]
+
+    # Must produce TWO distinct nodes, not overwrite/collapse into one
+    assert len(proc_nodes) == 2
+    node_ids = {n.data.id for n in proc_nodes}
+    assert f"proc_{ev_proc1.id}" in node_ids
+    assert f"proc_{ev_proc2.id}" in node_ids
+
+
+def test_behavior_graph_unattributed_network_not_assigned_to_sample(db_session):
+    """Network events with unknown/missing process must connect to unattributed network node, not sample root."""
+    sample = Sample(
+        sha256="net" + "0" * 61, md5="n" * 32, sha1="n" * 40,
+        file_name="net_unattrib.exe", file_size=100, quarantine_path="/tmp/n.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    analysis = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.CORRELATING.value
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    # Network event with no process_id
+    ev_net = AnalysisEvent(
+        analysis_id=analysis.id, category="network", action="connect",
+        timestamp=datetime.now(timezone.utc), process_id=None,
+        target_path="198.51.100.44:443",
+        attributes={"protocol": "TCP"}
+    )
+    db_session.add(ev_net)
+    db_session.commit()
+
+    graph = build_behavior_graph(analysis.id, db_session)
+
+    # Find the edge connecting to this network node
+    net_edges = [e for e in graph.edges if e.data.label == "CONNECTED_TO"]
+    assert len(net_edges) == 1
+
+    # Must connect from node_unattributed_network, NOT node_sample_root
+    assert net_edges[0].data.source == "node_unattributed_network"
+    assert net_edges[0].data.source != "node_sample_root"
+
+    # Edge must link valid existing nodes
+    all_node_ids = {n.data.id for n in graph.nodes}
+    assert net_edges[0].data.source in all_node_ids
+    assert net_edges[0].data.target in all_node_ids
+

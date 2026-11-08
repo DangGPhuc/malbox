@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_BYTES: int = 33554432  # 32 MB
     LIVE_MODE_ENABLED: bool = False
     REQUIRE_EXPLICIT_APPROVAL: bool = True
-    OPERATOR_TOKEN: str = "malbox-dev-operator-key-9988"
+    OPERATOR_TOKEN: str = ""  # Must be explicitly configured via MALBOX_OPERATOR_TOKEN to enable live operations
     WORKER_CONCURRENCY: int = 1
     DEFAULT_ANALYSIS_TIMEOUT_SECONDS: int = 120
     JOB_POLL_INTERVAL_SECONDS: float = 0.5

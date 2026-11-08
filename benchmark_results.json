@@ -1,0 +1,98 @@
+{
+  "timestamp": "2026-11-08T23:03:58.492069+00:00",
+  "standard_replay": [
+    {
+      "benchmark_type": "standard_replay",
+      "scenario": "ransomware_wannacry_mock",
+      "label": "WannaCry Ransomware",
+      "events_count": 15,
+      "submission_ms": 12.16,
+      "pipeline_ms": 74.87,
+      "cpu_time_ms": 51.1,
+      "peak_rss_mb": 402.11,
+      "graph_ms": 3.67,
+      "graph_nodes": 17,
+      "graph_edges": 16,
+      "findings_count": 4,
+      "risk_score": 100,
+      "risk_level": "Malicious"
+    },
+    {
+      "benchmark_type": "standard_replay",
+      "scenario": "infostealer_redline_mock",
+      "label": "RedLine Infostealer",
+      "events_count": 12,
+      "submission_ms": 0.51,
+      "pipeline_ms": 51.61,
+      "cpu_time_ms": 33.62,
+      "peak_rss_mb": 402.11,
+      "graph_ms": 2.16,
+      "graph_nodes": 14,
+      "graph_edges": 13,
+      "findings_count": 3,
+      "risk_score": 80,
+      "risk_level": "Malicious"
+    }
+  ],
+  "synthetic_scaling": [
+    {
+      "benchmark_type": "synthetic_scaling",
+      "scale": "Small",
+      "events_count": 101,
+      "norm_duration_ms": 12.78,
+      "norm_throughput_eps": 7904.4,
+      "cpu_norm_ms": 11.16,
+      "detection_ms": 7.52,
+      "graph_ms": 5.76,
+      "cpu_graph_ms": 5.75,
+      "graph_nodes": 104,
+      "graph_edges": 103,
+      "report_duration_ms": 9.11,
+      "findings_count": 3,
+      "risk_score": 95,
+      "peak_rss_mb": 402.11
+    },
+    {
+      "benchmark_type": "synthetic_scaling",
+      "scale": "Medium",
+      "events_count": 1001,
+      "norm_duration_ms": 43.33,
+      "norm_throughput_eps": 23103.2,
+      "cpu_norm_ms": 40.92,
+      "detection_ms": 14.85,
+      "graph_ms": 20.5,
+      "cpu_graph_ms": 19.61,
+      "graph_nodes": 987,
+      "graph_edges": 986,
+      "report_duration_ms": 74.3,
+      "findings_count": 3,
+      "risk_score": 95,
+      "peak_rss_mb": 402.11
+    },
+    {
+      "benchmark_type": "synthetic_scaling",
+      "scale": "Large",
+      "events_count": 10001,
+      "norm_duration_ms": 533.59,
+      "norm_throughput_eps": 18742.8,
+      "cpu_norm_ms": 527.76,
+      "detection_ms": 144.71,
+      "graph_ms": 272.93,
+      "cpu_graph_ms": 272.94,
+      "graph_nodes": 8970,
+      "graph_edges": 9669,
+      "report_duration_ms": 614.37,
+      "findings_count": 3,
+      "risk_score": 95,
+      "peak_rss_mb": 402.11
+    }
+  ],
+  "api_latencies": {
+    "GET /health": 22.78,
+    "POST /samples (Upload)": 68.06,
+    "POST /analyses (Sync Replay)": 73.64,
+    "GET /analyses/{id}": 9.59,
+    "GET /analyses/{id}/graph": 13.42,
+    "GET /analyses/{id}/report": 8.48
+  }
+}

@@ -26,7 +26,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e "backend[dev]"
 
-      - name: Run Pytest
+      - name: Compile check (bytecode verification)
+        run: |
+          python -m compileall -q backend/app backend/tests
+
+      - name: Module import check
+        run: |
+          python -c "
+          import importlib, pkgutil, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('backend').resolve()))
+          import app
+          for m in pkgutil.walk_packages(app.__path__, app.__name__ + '.'):
+              importlib.import_module(m.name)
+          print('All backend app modules imported successfully.')
+          "
+
+      - name: Run Pytest Suite & Security Regression Tests
         run: |
           pytest -v backend/tests/
 
@@ -54,4 +70,3 @@ jobs:
         run: |
           cd frontend
           npm run build
-

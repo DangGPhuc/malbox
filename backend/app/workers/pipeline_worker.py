@@ -139,10 +139,16 @@ class PipelineWorker:
                     self.db.commit()
                     return analysis
 
+                sandbox_options = {
+                    "requested_artifacts": plan.requested_artifacts,
+                    "telemetry_focus": plan.telemetry_focus,
+                } if plan else None
+
                 backend_task_id = sandbox.submit_sample(
                     sample_path=sample_quarantine_path,
                     profile=analysis.profile,
                     timeout_seconds=analysis.timeout_seconds,
+                    options=sandbox_options,
                 )
                 analysis.external_task_id = backend_task_id
                 self.db.commit()
@@ -189,11 +195,17 @@ class PipelineWorker:
             else:
                 # Replay backend
                 sandbox = ReplaySandboxBackend()
+                sandbox_options = {
+                    "requested_artifacts": plan.requested_artifacts,
+                    "telemetry_focus": plan.telemetry_focus,
+                } if plan else None
+
                 backend_task_id = sandbox.submit_sample(
                     sample_path=sample_quarantine_path,
                     profile=analysis.profile,
                     timeout_seconds=analysis.timeout_seconds,
                     scenario_id=analysis.replay_scenario_id,
+                    options=sandbox_options,
                 )
                 analysis.external_task_id = backend_task_id
                 self.db.commit()
@@ -207,6 +219,12 @@ class PipelineWorker:
             # 4. COLLECTING
             safe_update_status(analysis, self.db, AnalysisStatus.COLLECTING)
             raw_results = sandbox.collect_results(backend_task_id)
+
+            if analysis.backend_type == SandboxBackendType.REPLAY.value:
+                resolved_scen = raw_results.get("metadata", {}).get("scenario_id")
+                if resolved_scen:
+                    analysis.replay_scenario_id = resolved_scen
+                    self.db.commit()
 
             artifacts_dir = settings.ARTIFACTS_DIR / analysis.id
             sandbox.generate_artifacts(backend_task_id, artifacts_dir)
@@ -228,8 +246,19 @@ class PipelineWorker:
                 self.db.commit()
                 return analysis
 
-            # 6. CORRELATING & AI OBSERVATION EVALUATION
+            # 6. CORRELATING & SCORING (Deterministic Behavioral Detection)
             safe_update_status(analysis, self.db, AnalysisStatus.CORRELATING)
+            safe_update_status(analysis, self.db, AnalysisStatus.SCORING)
+            detector = DetectionEngine(self.db)
+            findings, risk_assessment = detector.evaluate_behavior(analysis.id)
+
+            if self._is_cancelled():
+                safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
+                analysis.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return analysis
+
+            # 7. AI OBSERVATION EVALUATION (Evaluates Real Findings & Telemetry Gaps)
             events = analysis.events or []
             proc_events = [e for e in events if e.category == "process"]
             net_events = [e for e in events if e.category in ["network", "dns", "http"]]
@@ -239,24 +268,14 @@ class PipelineWorker:
                 "total_events": len(events),
                 "total_processes": len(proc_events),
                 "network_events_count": len(net_events),
-                "findings_count": len(analysis.findings or []),
+                "findings_count": len(findings),
+                "risk_score": risk_assessment.score,
+                "risk_level": risk_assessment.level,
+                "detected_rules": [f.rule_id for f in findings],
             }
+            # AI Evaluates telemetry and post-detection findings with policy enforcement
             follow_up, follow_up_validation = evaluator.evaluate_observations(analysis, telemetry_summary)
-            if follow_up_validation.is_allowed and follow_up.needs_second_pass and follow_up.recommended_profile:
-                # Dynamically apply approved follow-up recommendation
-                analysis.profile = follow_up.recommended_profile
-                self.db.commit()
-
-            if self._is_cancelled():
-                safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
-                analysis.completed_at = datetime.now(timezone.utc)
-                self.db.commit()
-                return analysis
-
-            # 7. SCORING
-            safe_update_status(analysis, self.db, AnalysisStatus.SCORING)
-            detector = DetectionEngine(self.db)
-            findings, risk_assessment = detector.evaluate_behavior(analysis.id)
+            # The follow-up is classified as an advisory recommendation only (no unexecuted second pass is claimed)
 
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
@@ -283,6 +302,12 @@ class PipelineWorker:
 
             reporter = ReportGenerator(self.db)
             raw_env = raw_results.get("metadata", {}).get("environment", {}) if "raw_results" in locals() and raw_results else {}
+            if "raw_results" in locals() and raw_results:
+                meta = raw_results.get("metadata", {})
+                if "scenario_id" in meta:
+                    raw_env["scenario_id"] = meta["scenario_id"]
+                if "fixture_version" in meta:
+                    raw_env["fixture_version"] = meta["fixture_version"]
             reporter.generate_report(
                 analysis.id,
                 risk_assessment,
@@ -290,6 +315,17 @@ class PipelineWorker:
                 ai_follow_up=follow_up.model_dump(),
                 env_metadata=raw_env,
             )
+
+            # Re-read status under lock to avoid race conditions with concurrent cancellation
+            if self._is_cancelled():
+                safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
+                analysis.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return analysis
+
+            self.db.refresh(analysis)
+            if AnalysisStatus(analysis.status) in TERMINAL_STATES:
+                return analysis
 
             # 9. COMPLETED
             safe_update_status(analysis, self.db, AnalysisStatus.COMPLETED)

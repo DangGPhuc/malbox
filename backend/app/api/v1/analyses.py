@@ -1,3 +1,4 @@
+import hmac
 from typing import List, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Header, status
@@ -8,7 +9,7 @@ from app.core.database import get_db, SessionLocal
 from app.models.analysis import Analysis, AnalysisStatus, SandboxBackendType, TERMINAL_STATES
 from app.models.sample import Sample
 from app.schemas.analysis import AnalysisCreate, AnalysisResponse, AnalysisDetailResponse
-from app.workers.pipeline_worker import PipelineWorker
+from app.services.sandbox.replay import REGISTERED_REPLAY_SCENARIOS
 from app.workers.job_queue import job_queue_manager
 
 router = APIRouter()
@@ -45,8 +46,13 @@ def create_analysis(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Live detonation requires explicit analyst approval."
             )
-        # Operator Authentication Boundary for sensitive live detonation
-        if settings.OPERATOR_TOKEN and x_operator_token != settings.OPERATOR_TOKEN:
+        # Operator Authentication Boundary for sensitive live detonation (fails closed if unconfigured)
+        if not settings.OPERATOR_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Live detonation is blocked: Server operator security token is unconfigured (fail closed)."
+            )
+        if not x_operator_token or not hmac.compare_digest(x_operator_token, settings.OPERATOR_TOKEN):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Unauthorized: Valid operator token required for live malware execution (X-Operator-Token)."
@@ -58,6 +64,18 @@ def create_analysis(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Inconsistent configuration: Replay backend cannot run in live mode (must have live_mode=false)."
             )
+        # Validate scenario ID if provided
+        if payload.replay_scenario_id:
+            if ".." in payload.replay_scenario_id or "/" in payload.replay_scenario_id or "\\" in payload.replay_scenario_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid replay scenario identifier: path traversal characters detected."
+                )
+            if payload.replay_scenario_id not in REGISTERED_REPLAY_SCENARIOS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unknown replay scenario identifier: '{payload.replay_scenario_id}'. Registered scenarios: {sorted(list(REGISTERED_REPLAY_SCENARIOS))}"
+                )
 
     analysis = Analysis(
         sample_id=payload.sample_id,
@@ -74,8 +92,8 @@ def create_analysis(
     db.refresh(analysis)
 
     if run_sync:
-        worker = PipelineWorker(db)
-        analysis = worker.execute_pipeline(analysis.id)
+        # Enforce concurrency=1 even for synchronous requests
+        analysis = job_queue_manager.execute_sync(analysis.id, db)
     else:
         # Start persistent worker thread if not already running
         job_queue_manager.start()
@@ -171,12 +189,26 @@ def get_analysis(
 @router.post("/analyses/{analysis_id}/cancel", response_model=AnalysisResponse, tags=["Analyses"])
 def cancel_analysis(
     analysis_id: str,
+    x_operator_token: Optional[str] = Header(None, alias="X-Operator-Token"),
     db: Session = Depends(get_db)
 ):
     """Cancels a pending or running analysis using the JobQueueManager."""
     a = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not a:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis task not found.")
+
+    # Protect sensitive live analysis cancellation operations
+    if a.live_mode:
+        if not settings.OPERATOR_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Live cancellation blocked: Server operator security token is unconfigured (fail closed)."
+            )
+        if not x_operator_token or not hmac.compare_digest(x_operator_token, settings.OPERATOR_TOKEN):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: Valid operator token required to cancel live malware analysis (X-Operator-Token)."
+            )
 
     success = job_queue_manager.request_cancellation(analysis_id, db)
     if not success:

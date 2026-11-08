@@ -40,6 +40,7 @@ class DetectionEngine:
                         matched_event_ids.append(ev_id)
 
             # 2. Mass File Encryption (T1486) - Contextual threshold required
+            # A single ransom note must NOT be classified as mass encryption without supporting encrypted file evidence.
             elif rule.rule_id == "RULE_MASS_FILE_ENCRYPTION":
                 encrypted_files = []
                 ransom_notes = []
@@ -51,8 +52,8 @@ class DetectionEngine:
                     if is_note:
                         ransom_notes.append(ev_id)
 
-                # Contextual requirement: either a ransom note + encrypted file, OR multiple encrypted files (>=2)
-                if (ransom_notes and encrypted_files) or len(encrypted_files) >= 2 or len(ransom_notes) >= 1:
+                # Contextual requirement: either (ransom note AND at least one encrypted file), OR multiple encrypted files (>=2)
+                if (ransom_notes and encrypted_files) or len(encrypted_files) >= 2:
                     matched_event_ids.extend(list(set(encrypted_files + ransom_notes)))
 
             # 3. Registry Run Key Persistence (T1547.001)
@@ -73,11 +74,17 @@ class DetectionEngine:
                     if attrs.get("is_credential_target") or any(target in path for target in ["login data", "key4.db", "logins.json", "web data"]):
                         matched_event_ids.append(ev_id)
 
-            # 6. C2 HTTP Exfiltration (T1071.001) - Contextual requirement: POST with gate or active data transmission
+            # 6. C2 HTTP Exfiltration (T1071.001) - Contextual requirement: POST with gate, beacon, panel, upload or exfiltration flags
+            # A successful HTTP POST must NOT automatically be classified as C2 exfiltration without C2 indicators.
             elif rule.rule_id == "RULE_C2_HTTP_EXFILTRATION":
                 for ev_id, url, attrs in http_reqs:
                     method = (attrs.get("method") or "").upper()
-                    if method == "POST" and ("gate" in url or "upload" in url or "beacon" in url or "panel" in url or attrs.get("status_code") in [200, 201]):
+                    has_c2_indicator = (
+                        any(k in url for k in ["gate", "upload", "beacon", "panel", "exfil", "post.php"])
+                        or bool(attrs.get("is_c2_exfiltration"))
+                        or bool(attrs.get("is_data_upload"))
+                    )
+                    if method == "POST" and has_c2_indicator:
                         matched_event_ids.append(ev_id)
 
             # 7. SMB Lateral Probe (T1046) - Contextual requirement: multiple connection attempts

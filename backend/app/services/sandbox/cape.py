@@ -266,11 +266,20 @@ class CapeSandboxBackend(SandboxBackend):
                 "timestamp": None,
             })
 
+        # Extract real sandbox metadata from CAPE info, or explicitly mark as unknown
+        machine_meta = info.get("machine", {}) if isinstance(info.get("machine"), dict) else {}
+        guest_os = machine_meta.get("name") or machine_meta.get("label") or "Not reported by sandbox backend"
+        duration = info.get("duration")
+
         return {
             "metadata": {
                 "cape_id": info.get("id"),
-                "duration_seconds": info.get("duration", 60),
-                "environment": {"guest_os": "Windows 10 x64 CAPE VM"},
+                "duration_seconds": duration,
+                "environment": {
+                    "guest_os": guest_os,
+                    "machine": machine_meta.get("name", "Unknown"),
+                    "confinement_verified": False,
+                },
             },
             "processes": processes,
             "filesystem": filesystem,
