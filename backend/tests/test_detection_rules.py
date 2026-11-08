@@ -154,3 +154,4 @@ def test_detection_engine_c2_contextual_threshold(db_session):
 
     findings_post, assessment = engine.evaluate_behavior(analysis.id)
     assert any(f.rule_id == "RULE_C2_HTTP_EXFILTRATION" for f in findings_post)
+

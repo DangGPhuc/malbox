@@ -159,3 +159,4 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/analyses \
   -d '{"sample_id": "<SAMPLE_ID>", "backend_type": "cape", "live_mode": true, "approved_by_user": true}' | jq .
 ```
 All safety violations are logged, blocked, and produce zero outbound network connections to external sandboxes.
+

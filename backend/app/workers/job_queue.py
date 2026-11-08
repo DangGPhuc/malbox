@@ -158,3 +158,4 @@ class JobQueueManager:
                         self._active_job_id = None
 
 job_queue_manager = JobQueueManager()
+

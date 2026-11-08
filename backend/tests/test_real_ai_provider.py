@@ -137,3 +137,4 @@ def test_orchestration_audit_includes_llm_metadata(client):
         assert "llm_metadata" in evidence
         assert "provider" in evidence["llm_metadata"]
         assert "model" in evidence["llm_metadata"]
+
