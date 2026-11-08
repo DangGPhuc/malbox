@@ -53,6 +53,7 @@ export const api = {
     timeout_seconds?: number;
     live_mode?: boolean;
     approved_by_user?: boolean;
+    replay_scenario_id?: string;
     scenario_id?: string;
     operator_token?: string;
     run_sync?: boolean;
@@ -62,10 +63,14 @@ export const api = {
     if (payload.operator_token) {
       headers['X-Operator-Token'] = payload.operator_token;
     }
+    const bodyPayload = {
+      ...payload,
+      replay_scenario_id: payload.replay_scenario_id || payload.scenario_id,
+    };
     const res = await fetch(`${BASE_URL}/analyses${query}`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify(bodyPayload),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Failed to create analysis' }));

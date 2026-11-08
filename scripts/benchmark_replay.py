@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """
-malbox-ai VM Evaluation Benchmark Suite
+malbox-ai Performance & Scalability Benchmark Suite
 Measures:
+- System hardware & environment specifications (Host/CI vs Target VM)
 - End-to-end pipeline latency and CPU time
-- Peak process RSS memory
-- Synthetic dataset scaling: Small (~100 events), Medium (~1,000 events), Large (~10,000 events)
+- Memory: Distinguishes per-scenario allocated memory (tracemalloc peak) from process-wide peak RSS (ru_maxrss)
+- Synthetic dataset scaling: Small (~100 events), Medium (~1,000 events), Large (~10,000 events) executed sequentially
 - Telemetry normalization throughput (events/sec)
 - Database write duration
 - Behavior graph construction duration, node count, and edge count
 - Report generation duration
 - API endpoint response latencies
+
+NOTE: This benchmark runs purely in safe Replay / Synthetic mode.
+No live malware is detonated and no external CAPE services are contacted.
 """
 
+import os
 import sys
 import time
 import resource
 import io
 import json
+import platform
+import tracemalloc
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, List
@@ -26,7 +33,7 @@ backend_dir = Path(__file__).resolve().parent.parent / "backend"
 sys.path.insert(0, str(backend_dir))
 
 from app.core.config import settings
-from app.core.database import SessionLocal, init_db, engine
+from app.core.database import SessionLocal, init_db
 from app.models.analysis import Analysis, AnalysisStatus, SandboxBackendType
 from app.models.sample import Sample
 from app.services.submission.service import SubmissionService
@@ -37,6 +44,29 @@ from app.services.reporting.generator import ReportGenerator
 from app.workers.pipeline_worker import PipelineWorker
 from starlette.testclient import TestClient
 from app.main import app
+
+
+def get_system_specifications() -> Dict[str, Any]:
+    """Inspects host machine specifications for accurate benchmark contextualization."""
+    mem_total_str = "Unknown"
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    kb = int(line.split()[1])
+                    mem_total_str = f"{kb / 1024:.1f} MB ({kb / (1024 * 1024):.2f} GB)"
+                    break
+    except Exception:
+        pass
+
+    return {
+        "os_platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
+        "python_version": f"{platform.python_implementation()} {platform.python_version()}",
+        "cpu_count": os.cpu_count() or 1,
+        "total_system_memory": mem_total_str,
+        "environment_type": "Host / CI Baseline Validation (Pre-VM)",
+        "disclaimer": "These measurements reflect baseline host execution. Target VM measurements should be gathered on the actual target VM instance.",
+    }
 
 
 def generate_synthetic_telemetry(target_events: int) -> Dict[str, Any]:
@@ -164,6 +194,8 @@ def run_standard_replay_benchmark(scenario_id: str, label: str) -> Dict[str, Any
     db.commit()
     db.refresh(analysis)
 
+    # Start memory tracing for this scenario
+    tracemalloc.start()
     cpu_start = time.process_time()
     t_start = time.perf_counter()
 
@@ -172,7 +204,14 @@ def run_standard_replay_benchmark(scenario_id: str, label: str) -> Dict[str, Any
 
     t_pipeline = (time.perf_counter() - t_start) * 1000
     cpu_time = (time.process_time() - cpu_start) * 1000
-    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+    # Capture per-scenario allocated memory
+    _current_mem, peak_alloc_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    scenario_peak_alloc_mb = peak_alloc_bytes / (1024 * 1024)
+
+    # Capture process-wide peak RSS
+    process_peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
     t_g0 = time.perf_counter()
     graph = build_behavior_graph(completed_analysis.id, db)
@@ -184,11 +223,12 @@ def run_standard_replay_benchmark(scenario_id: str, label: str) -> Dict[str, Any
     risk_score = report.risk_score if report else 0
     risk_level = report.risk_level if report else "N/A"
 
-    print(f"  -> Pipeline Time:    {t_pipeline:.2f} ms")
-    print(f"  -> CPU Time:         {cpu_time:.2f} ms")
-    print(f"  -> Peak RSS:         {peak_rss_mb:.2f} MB")
-    print(f"  -> Graph Build:      {t_graph:.2f} ms ({graph.total_nodes} nodes, {graph.total_edges} edges)")
-    print(f"  -> Events / Findings:{events_count} events / {findings_count} findings ({risk_level} {risk_score}/100)")
+    print(f"  -> Pipeline Time:        {t_pipeline:.2f} ms")
+    print(f"  -> CPU Time:             {cpu_time:.2f} ms")
+    print(f"  -> Scenario Peak Alloc:  {scenario_peak_alloc_mb:.2f} MB")
+    print(f"  -> Process Peak RSS:     {process_peak_rss_mb:.2f} MB")
+    print(f"  -> Graph Build:          {t_graph:.2f} ms ({graph.total_nodes} nodes, {graph.total_edges} edges)")
+    print(f"  -> Events / Findings:    {events_count} events / {findings_count} findings ({risk_level} {risk_score}/100)")
 
     db.close()
     return {
@@ -199,7 +239,8 @@ def run_standard_replay_benchmark(scenario_id: str, label: str) -> Dict[str, Any
         "submission_ms": round(t_submission, 2),
         "pipeline_ms": round(t_pipeline, 2),
         "cpu_time_ms": round(cpu_time, 2),
-        "peak_rss_mb": round(peak_rss_mb, 2),
+        "scenario_peak_alloc_mb": round(scenario_peak_alloc_mb, 2),
+        "process_peak_rss_mb": round(process_peak_rss_mb, 2),
         "graph_ms": round(t_graph, 2),
         "graph_nodes": graph.total_nodes,
         "graph_edges": graph.total_edges,
@@ -210,7 +251,7 @@ def run_standard_replay_benchmark(scenario_id: str, label: str) -> Dict[str, Any
 
 
 def run_synthetic_scale_benchmark(target_events: int, scale_label: str) -> Dict[str, Any]:
-    print(f"\n[*] Running Synthetic Scale Benchmark: {scale_label} (~{target_events:,} events)")
+    print(f"\n[*] Running Sequential Synthetic Scale Benchmark: {scale_label} (~{target_events:,} events)")
 
     init_db()
     db = SessionLocal()
@@ -242,7 +283,8 @@ def run_synthetic_scale_benchmark(target_events: int, scale_label: str) -> Dict[
     # 2. Generate synthetic raw data
     raw_telemetry = generate_synthetic_telemetry(target_events)
 
-    # 3. Benchmark Telemetry Normalization & DB Ingestion
+    # 3. Benchmark Telemetry Normalization & Ingestion with memory tracing
+    tracemalloc.start()
     normalizer = TelemetryNormalizer(db)
     t_norm_start = time.perf_counter()
     cpu_norm_start = time.process_time()
@@ -256,20 +298,25 @@ def run_synthetic_scale_benchmark(target_events: int, scale_label: str) -> Dict[
     actual_event_count = len(normalized_events)
     norm_throughput = actual_event_count / norm_duration_s
 
-    # 4. Benchmark Detection Engine Evaluation
+    # 4. Benchmark Database Commit / Flush
+    t_db_start = time.perf_counter()
+    db.commit()
+    db_write_ms = (time.perf_counter() - t_db_start) * 1000
+
+    # 5. Benchmark Detection Engine Evaluation
     detector = DetectionEngine(db)
     t_det_start = time.perf_counter()
     findings, assessment = detector.evaluate_behavior(analysis.id)
     t_det_ms = (time.perf_counter() - t_det_start) * 1000
 
-    # 5. Benchmark Behavior Graph Construction
+    # 6. Benchmark Behavior Graph Construction
     t_graph_start = time.perf_counter()
     cpu_graph_start = time.process_time()
     graph = build_behavior_graph(analysis.id, db)
     t_graph_ms = (time.perf_counter() - t_graph_start) * 1000
     cpu_graph_ms = (time.process_time() - cpu_graph_start) * 1000
 
-    # 6. Benchmark Report Generation
+    # 7. Benchmark Report Generation
     reporter = ReportGenerator(db)
     t_rep_start = time.perf_counter()
     report = reporter.generate_report(
@@ -281,14 +328,22 @@ def run_synthetic_scale_benchmark(target_events: int, scale_label: str) -> Dict[
     )
     t_rep_ms = (time.perf_counter() - t_rep_start) * 1000
 
-    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    # Capture per-scenario allocated memory
+    _current_mem, peak_alloc_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    scenario_peak_alloc_mb = peak_alloc_bytes / (1024 * 1024)
 
-    print(f"  -> Ingested Events:  {actual_event_count:,}")
-    print(f"  -> Norm Duration:    {norm_duration_ms:.2f} ms ({norm_throughput:,.1f} events/sec)")
-    print(f"  -> Detection Time:   {t_det_ms:.2f} ms ({len(findings)} findings)")
-    print(f"  -> Graph Build:      {t_graph_ms:.2f} ms ({graph.total_nodes:,} nodes, {graph.total_edges:,} edges)")
-    print(f"  -> Report Duration:  {t_rep_ms:.2f} ms")
-    print(f"  -> Peak RSS:         {peak_rss_mb:.2f} MB")
+    # Capture process-wide peak RSS
+    process_peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+    print(f"  -> Ingested Events:      {actual_event_count:,}")
+    print(f"  -> Norm Duration:        {norm_duration_ms:.2f} ms ({norm_throughput:,.1f} events/sec)")
+    print(f"  -> DB Write Time:        {db_write_ms:.2f} ms")
+    print(f"  -> Detection Time:       {t_det_ms:.2f} ms ({len(findings)} findings)")
+    print(f"  -> Graph Build Time:     {t_graph_ms:.2f} ms ({graph.total_nodes:,} nodes, {graph.total_edges:,} edges)")
+    print(f"  -> Report Duration:      {t_rep_ms:.2f} ms")
+    print(f"  -> Scenario Peak Alloc:  {scenario_peak_alloc_mb:.2f} MB")
+    print(f"  -> Process Peak RSS:     {process_peak_rss_mb:.2f} MB")
 
     db.close()
     return {
@@ -297,6 +352,7 @@ def run_synthetic_scale_benchmark(target_events: int, scale_label: str) -> Dict[
         "events_count": actual_event_count,
         "norm_duration_ms": round(norm_duration_ms, 2),
         "norm_throughput_eps": round(norm_throughput, 1),
+        "db_write_ms": round(db_write_ms, 2),
         "cpu_norm_ms": round(cpu_norm_ms, 2),
         "detection_ms": round(t_det_ms, 2),
         "graph_ms": round(t_graph_ms, 2),
@@ -306,7 +362,8 @@ def run_synthetic_scale_benchmark(target_events: int, scale_label: str) -> Dict[
         "report_duration_ms": round(t_rep_ms, 2),
         "findings_count": len(findings),
         "risk_score": assessment.score,
-        "peak_rss_mb": round(peak_rss_mb, 2),
+        "scenario_peak_alloc_mb": round(scenario_peak_alloc_mb, 2),
+        "process_peak_rss_mb": round(process_peak_rss_mb, 2),
     }
 
 
@@ -380,12 +437,22 @@ def main():
     print("      MALBOX-AI COMPREHENSIVE PERFORMANCE & SCALABILITY BENCHMARK      ")
     print("========================================================================")
 
+    # 0. System Specifications & Context
+    sys_specs = get_system_specifications()
+    print("\n[*] SYSTEM SPECIFICATIONS:")
+    print(f"  -> OS Platform:          {sys_specs['os_platform']}")
+    print(f"  -> Python Version:        {sys_specs['python_version']}")
+    print(f"  -> Logical CPU Cores:    {sys_specs['cpu_count']}")
+    print(f"  -> Total System Memory:  {sys_specs['total_system_memory']}")
+    print(f"  -> Benchmark Environment: {sys_specs['environment_type']}")
+    print(f"  -> Notice:               {sys_specs['disclaimer']}")
+
     # 1. Standard Replay Benchmarks
     replay_results = []
     replay_results.append(run_standard_replay_benchmark("ransomware_wannacry_mock", "WannaCry Ransomware"))
     replay_results.append(run_standard_replay_benchmark("infostealer_redline_mock", "RedLine Infostealer"))
 
-    # 2. Synthetic Dataset Scaling Benchmarks (Small: ~100, Medium: ~1,000, Large: ~10,000)
+    # 2. Sequential Synthetic Dataset Scaling Benchmarks (Small, Medium, Large)
     synthetic_results = []
     synthetic_results.append(run_synthetic_scale_benchmark(100, "Small"))
     synthetic_results.append(run_synthetic_scale_benchmark(1000, "Medium"))
@@ -394,33 +461,34 @@ def main():
     # 3. API Response Latency Measurements
     api_latencies = measure_api_latencies()
 
-    # 4. Summaries
-    print("\n\n========================================================================")
-    print("                 STANDARD REPLAY BENCHMARK SUMMARY TABLE                 ")
-    print("========================================================================")
-    print(f"| {'Scenario':<24} | {'Pipeline':<10} | {'CPU Time':<10} | {'Peak RSS':<10} | {'Events':<7} | {'Graph':<8} |")
-    print(f"|{'-'*26}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*9}|{'-'*10}|")
+    # 4. Formatted Summary Tables
+    print("\n\n================================================================================================")
+    print("                             STANDARD REPLAY BENCHMARK SUMMARY TABLE                             ")
+    print("================================================================================================")
+    print(f"| {'Scenario':<22} | {'Pipeline':<10} | {'CPU Time':<10} | {'Scen Alloc':<11} | {'Peak RSS':<10} | {'Events':<7} | {'Graph':<8} |")
+    print(f"|{'-'*24}|{'-'*12}|{'-'*12}|{'-'*13}|{'-'*12}|{'-'*9}|{'-'*10}|")
     for r in replay_results:
-        print(f"| {r['label']:<24} | {r['pipeline_ms']:>7} ms | {r['cpu_time_ms']:>7} ms | {r['peak_rss_mb']:>7} MB | {r['events_count']:>7} | {r['graph_ms']:>6} ms |")
+        print(f"| {r['label']:<22} | {r['pipeline_ms']:>7} ms | {r['cpu_time_ms']:>7} ms | {r['scenario_peak_alloc_mb']:>8.2f} MB | {r['process_peak_rss_mb']:>7.2f} MB | {r['events_count']:>7} | {r['graph_ms']:>6.2f} ms |")
 
-    print("\n========================================================================")
-    print("                 SYNTHETIC SCALING SUMMARY TABLE                         ")
-    print("========================================================================")
-    print(f"| {'Scale':<8} | {'Events':<8} | {'Norm (ms)':<10} | {'Throughput':<14} | {'Graph (ms)':<11} | {'Report (ms)':<12} |")
-    print(f"|{'-'*10}|{'-'*10}|{'-'*12}|{'-'*16}|{'-'*13}|{'-'*14}|")
+    print("\n================================================================================================")
+    print("                             SYNTHETIC SCALING SUMMARY TABLE                                    ")
+    print("================================================================================================")
+    print(f"| {'Scale':<8} | {'Events':<8} | {'Norm (ms)':<10} | {'Throughput':<14} | {'DB Write':<9} | {'Graph (ms)':<11} | {'Report (ms)':<12} |")
+    print(f"|{'-'*10}|{'-'*10}|{'-'*12}|{'-'*16}|{'-'*11}|{'-'*13}|{'-'*14}|")
     for s in synthetic_results:
-        print(f"| {s['scale']:<8} | {s['events_count']:>8,} | {s['norm_duration_ms']:>8.2f} ms | {s['norm_throughput_eps']:>9.1f} ev/s | {s['graph_ms']:>8.2f} ms | {s['report_duration_ms']:>9.2f} ms |")
+        print(f"| {s['scale']:<8} | {s['events_count']:>8,} | {s['norm_duration_ms']:>8.2f} ms | {s['norm_throughput_eps']:>9.1f} ev/s | {s['db_write_ms']:>6.2f} ms | {s['graph_ms']:>8.2f} ms | {s['report_duration_ms']:>9.2f} ms |")
 
-    print("\n========================================================================")
-    print("                 API RESPONSE LATENCY SUMMARY TABLE                      ")
-    print("========================================================================")
+    print("\n================================================================================================")
+    print("                             API RESPONSE LATENCY SUMMARY TABLE                                 ")
+    print("================================================================================================")
     for ep, lat in api_latencies.items():
         print(f"| {ep:<36} | {lat:>8.2f} ms |")
-    print("========================================================================\n")
+    print("================================================================================================\n")
 
     # Persist benchmark results to file for docs reference
     results_out = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "system_specifications": sys_specs,
         "standard_replay": replay_results,
         "synthetic_scaling": synthetic_results,
         "api_latencies": api_latencies,

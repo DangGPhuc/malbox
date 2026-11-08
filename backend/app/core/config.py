@@ -4,7 +4,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MALBOX_", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_prefix="MALBOX_",
+        env_file=(".env", "../.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
     PROJECT_NAME: str = "malbox-ai"
     VERSION: str = "0.1.0"

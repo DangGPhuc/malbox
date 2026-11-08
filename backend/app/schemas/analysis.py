@@ -20,6 +20,18 @@ class AnalysisCreate(BaseModel):
         default=None,
         description="Explicit replay scenario selection (e.g. ransomware_wannacry_mock, infostealer_redline_mock)"
     )
+    scenario_id: Optional[str] = Field(
+        default=None,
+        description="Alias for replay_scenario_id for backwards compatibility"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_scenario_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "scenario_id" in data and not data.get("replay_scenario_id"):
+                data["replay_scenario_id"] = data["scenario_id"]
+        return data
 
     @model_validator(mode="after")
     def validate_backend_mode_consistency(self) -> "AnalysisCreate":

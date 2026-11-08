@@ -89,3 +89,122 @@ def test_full_replay_analysis_pipeline(client):
     assert len(artifacts) >= 2
     art_names = [a["file_name"] for a in artifacts]
     assert any("pcap" in n for n in art_names)
+
+
+def test_replay_scenario_wannacry_independent_of_profile(client):
+    """Explicit replay_scenario_id='ransomware_wannacry_mock' takes precedence over profile."""
+    sample_bytes = b"MZ" + b"\x00" * 80 + b"WannaCry_Explicit_Test"
+    upload_res = client.post("/api/v1/samples", files={"file": ("wannacry_explicit.exe", io.BytesIO(sample_bytes))})
+    assert upload_res.status_code == 201
+    sample_id = upload_res.json()["id"]
+
+    # Use a non-ransomware profile ('infostealer_focus') to verify scenario_id takes precedence
+    payload = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "profile": "infostealer_focus",
+        "replay_scenario_id": "ransomware_wannacry_mock",
+        "timeout_seconds": 60,
+    }
+    create_res = client.post("/api/v1/analyses?run_sync=true", json=payload)
+    assert create_res.status_code == 201
+    analysis = create_res.json()
+    assert analysis["replay_scenario_id"] == "ransomware_wannacry_mock"
+
+    # Verify report displays correct scenario ID and provenance
+    report_res = client.get(f"/api/v1/analyses/{analysis['id']}/report")
+    assert report_res.status_code == 200
+    report = report_res.json()
+    assert report["replay_scenario_id"] == "ransomware_wannacry_mock"
+    assert report["is_replay"] is True
+    assert "REPLAY DATA PROVENANCE" in report["full_report"]["provenance_disclaimer"]
+    assert report["full_report"]["analysis_environment"]["replay_scenario_id"] == "ransomware_wannacry_mock"
+
+    # Verify WannaCry behavioral indicators occurred
+    findings_res = client.get(f"/api/v1/analyses/{analysis['id']}/findings")
+    assert findings_res.status_code == 200
+    findings = findings_res.json()
+    assert any(f["rule_id"] in ["RULE_SHADOW_COPY_DELETION", "RULE_MASS_FILE_ENCRYPTION"] for f in findings)
+
+
+def test_replay_scenario_redline_independent_of_profile(client):
+    """Explicit replay_scenario_id='infostealer_redline_mock' takes precedence over profile."""
+    sample_bytes = b"MZ" + b"\x00" * 80 + b"RedLine_Explicit_Test"
+    upload_res = client.post("/api/v1/samples", files={"file": ("redline_explicit.exe", io.BytesIO(sample_bytes))})
+    assert upload_res.status_code == 201
+    sample_id = upload_res.json()["id"]
+
+    # Use 'ransomware_focus' profile but explicit RedLine scenario
+    payload = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "profile": "ransomware_focus",
+        "replay_scenario_id": "infostealer_redline_mock",
+        "timeout_seconds": 60,
+    }
+    create_res = client.post("/api/v1/analyses?run_sync=true", json=payload)
+    assert create_res.status_code == 201
+    analysis = create_res.json()
+    assert analysis["replay_scenario_id"] == "infostealer_redline_mock"
+
+    # Verify report displays correct scenario ID and provenance
+    report_res = client.get(f"/api/v1/analyses/{analysis['id']}/report")
+    assert report_res.status_code == 200
+    report = report_res.json()
+    assert report["replay_scenario_id"] == "infostealer_redline_mock"
+    assert report["is_replay"] is True
+    assert "REPLAY DATA PROVENANCE" in report["full_report"]["provenance_disclaimer"]
+
+    # Verify RedLine infostealer findings (credential access / C2)
+    findings_res = client.get(f"/api/v1/analyses/{analysis['id']}/findings")
+    assert findings_res.status_code == 200
+    findings = findings_res.json()
+    assert any(f["rule_id"] in ["RULE_CREDENTIAL_VAULT_ACCESS", "RULE_C2_HTTP_EXFILTRATION"] for f in findings)
+
+
+def test_replay_scenario_alias_compatibility(client):
+    """Sending scenario_id as alias in create payload maps to replay_scenario_id."""
+    sample_bytes = b"MZ" + b"\x00" * 80 + b"Alias_Test"
+    upload_res = client.post("/api/v1/samples", files={"file": ("alias_test.exe", io.BytesIO(sample_bytes))})
+    sample_id = upload_res.json()["id"]
+
+    payload = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "scenario_id": "infostealer_redline_mock",  # using frontend legacy alias
+        "timeout_seconds": 60,
+    }
+    create_res = client.post("/api/v1/analyses?run_sync=true", json=payload)
+    assert create_res.status_code == 201
+    analysis = create_res.json()
+    assert analysis["replay_scenario_id"] == "infostealer_redline_mock"
+
+
+def test_replay_invalid_scenario_id_does_not_silently_fallback(client):
+    """Supplying an unknown or invalid explicit scenario ID fails closed with HTTP 400 (no silent fallback)."""
+    sample_bytes = b"MZ" + b"\x00" * 80 + b"Invalid_Scen_Test"
+    upload_res = client.post("/api/v1/samples", files={"file": ("invalid_scen.exe", io.BytesIO(sample_bytes))})
+    sample_id = upload_res.json()["id"]
+
+    # 1. Unknown scenario name
+    payload_fake = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "replay_scenario_id": "nonexistent_mock_scenario",
+        "timeout_seconds": 60,
+    }
+    res_fake = client.post("/api/v1/analyses", json=payload_fake)
+    assert res_fake.status_code == 400
+    assert "Unknown replay scenario identifier" in res_fake.json()["detail"]
+
+    # 2. Path traversal
+    payload_trav = {
+        "sample_id": sample_id,
+        "backend_type": "replay",
+        "replay_scenario_id": "../../../etc/passwd",
+        "timeout_seconds": 60,
+    }
+    res_trav = client.post("/api/v1/analyses", json=payload_trav)
+    assert res_trav.status_code == 400
+    assert "path traversal" in res_trav.json()["detail"]
+

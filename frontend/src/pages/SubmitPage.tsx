@@ -85,7 +85,7 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({ onAnalysisStarted }) => 
         timeout_seconds: timeoutSeconds,
         live_mode: isLive,
         approved_by_user: isLive ? approvedByUser : false,
-        scenario_id: backendType === 'replay' ? selectedScenario : undefined,
+        replay_scenario_id: backendType === 'replay' ? selectedScenario : undefined,
         operator_token: isLive ? operatorToken : undefined,
         run_sync: false, // Non-blocking job processing via JobQueueManager
       });

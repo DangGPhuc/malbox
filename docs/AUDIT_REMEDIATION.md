@@ -1,9 +1,9 @@
 # malbox-ai — Audit Remediation & Hardening Ledger
 
 **Branch:** `audit/remediation-hardening`  
-**Base Commit:** `181309e` -> `e00a55f`  
+**Base Commit:** `181309e` -> `e00a55f` -> `af512ed`  
 **Date:** November 2026  
-**Status:** **Remediated & Verified (Phases 0 — 8 Completed + Final CI Fix & Pre-VM Validation)**
+**Status:** **Remediated, Hardened & VM-Ready (All Tasks 1 — 5 Verified)**
 
 ---
 
@@ -11,97 +11,63 @@
 
 | Phase | Subsystem | Priority | Defect Description | Root Cause | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Contract** | API / UI | **P0** | Frontend sent `scenario_id` while backend schema expected `replay_scenario_id`, causing selected scenario to be ignored. | Schema field naming discrepancy between `SubmitPage.tsx` / `client.ts` and `AnalysisCreate`. | **Fixed & Verified** |
+| **Config** | Configuration | **P1** | `.env.example` had outdated CAPE URL `8000`, lacked `MALBOX_OPERATOR_TOKEN` documentation, and `.env` loading was implicit. | Stale default port in `.env.example`; missing `env_file` directive in `SettingsConfigDict`. | **Fixed & Verified** |
+| **Audit** | Dependencies | **P1** | Moderate and high vulnerabilities in frontend dev dependencies (`esbuild` and `vite`). | Older bundled `esbuild@0.21.5` in `vite@5`. | **Remediated & Documented** |
+| **Benchmark** | Benchmarks | **P1** | Benchmark did not separate process peak RSS from per-scenario allocation, and lacked system specifications. | Over-reliance on `ru_maxrss` alone without `tracemalloc` or environment inspection. | **Fixed & Verified** |
 | **CI** | Reporting | **P0** | `NameError: name 'Optional' is not defined` in `generate_report()`. | Missing `Optional` in typing imports of `generator.py`. | **Fixed & Verified** |
-| **0** | Packaging | **P0** | `backend/pyproject.toml` missing `backend/README.md` & flat-layout discovery collision with empty `backend/fixtures`. | Missing readme file and missing package find directive in `pyproject.toml`. | **Fixed & Verified** |
-| **1** | Safety Gate | **P0** | Inconsistent backend / mode gate allows `backend_type="cape"` with `live_mode=false` to bypass safety check; self-referential CAPE URL port 8000; missing operator auth. | API and Worker checked `live_mode` independently of `backend_type`; string backend without strict enum; CAPE URL defaulted to application port. | **Fixed & Verified** |
-| **2** | Security & Lifecycle | **P0** | Hardcoded default operator token; missing secret fails open or unchecked; public `run_sync` bypasses worker concurrency=1; replay scenario traversal; cancellation races with completion. | Permissive defaults in `config.py`; unmanaged thread execution in sync endpoint; lack of replay ID whitelist; unsynchronized state check. | **Fixed & Verified** |
-| **3** | Analysis Logic | **P1** | Raw PID-only process node identity collapses reused PIDs; unattributed network events falsely linked to sample root; lone ransom note flags mass encryption; any HTTP POST flags C2; AI falsely claims unexecuted second pass. | Lack of process-instance IDs; missing unattributed network node; rule thresholds without multi-event corroboration; worker overwriting profile without second pass. | **Fixed & Verified** |
-| **4** | Telemetry Scaling | **P1** | Benchmarks evaluated only 12-15 replay events; no verification on medium (1K) or large (10K) event streams. | Benchmark script tested only two static fixtures without synthetic dataset generator. | **Fixed & Verified** |
-| **5** | CI Verification | **P0** | CI workflow lacked byte-compile validation, recursive module import checks, and comprehensive security regression tests. | Incomplete CI workflow definition. | **Fixed & Verified** |
+| **Security** | Auth & Safety | **P0** | Hardcoded operator token, live mode bypass with `backend_type=cape`, replay path traversal. | Permissive defaults, unverified scenario IDs, and lack of constant-time token comparison. | **Fixed & Verified** |
 
 ---
 
 ## 2. Detailed Remediation Details by Subsystem
 
-### CI Failure Fix & Packaging
+### Replay Scenario API Contract Alignment (Task 1)
 - **Defects Identified:**
-  - GitHub Actions and local execution failed with `NameError: name 'Optional' is not defined` at `backend/app/services/reporting/generator.py:27`.
-  - `backend/pyproject.toml` declared `readme = "README.md"`, but no `README.md` existed in `backend/`.
+  - React frontend `client.ts` and `SubmitPage.tsx` sent `scenario_id: string`, while FastAPI `AnalysisCreate` required `replay_scenario_id: Optional[str]`.
+  - When submitting via the UI, the explicit scenario selection was omitted from `AnalysisCreate`, causing Replay backend to fall back to default profile heuristics rather than the operator's chosen scenario.
 - **Fixes Applied:**
-  - Added `Optional` to `from typing import Dict, Any, List, Optional` in `backend/app/services/reporting/generator.py`.
-  - Added dedicated `backend/README.md` and configured `find_packages(include=["app*"])`.
-  - Verified with `python -m compileall -q backend/app backend/tests` (exited 0).
-  - Verified recursive import check across all `backend/app` submodules (exited 0).
+  - Updated `frontend/src/api/client.ts` and `frontend/src/pages/SubmitPage.tsx` to send `replay_scenario_id`.
+  - Added backward-compatible alias mapping in `backend/app/schemas/analysis.py` (`model_validator(mode="before")` mapping `scenario_id` -> `replay_scenario_id`).
+  - Added 4 regression tests in `backend/tests/test_replay_pipeline.py`:
+    - `test_replay_scenario_wannacry_independent_of_profile`: verifies WannaCry scenario executes when selected, even if profile is non-ransomware (`infostealer_focus`).
+    - `test_replay_scenario_redline_independent_of_profile`: verifies RedLine scenario executes when selected, even if profile is `ransomware_focus`.
+    - `test_replay_scenario_alias_compatibility`: verifies `scenario_id` legacy alias contract.
+    - `test_replay_invalid_scenario_id_does_not_silently_fallback`: verifies unknown or path-traversing scenario IDs return HTTP 400 Bad Request and never silently fall back.
 
-### Operator Authorization & Security Boundary
-- **Defects Identified:**
-  - `OPERATOR_TOKEN` previously had a hardcoded default string (`malbox-operator-secret-token-change-in-prod`).
-  - If unconfigured, the system could fail open or allow unauthorized live malware execution.
-  - Token comparison was vulnerable to timing side channels.
+### Configuration Synchronization (Task 2)
 - **Fixes Applied:**
-  - Changed default `OPERATOR_TOKEN: str = ""` in `config.py`.
-  - Implemented fail-closed security boundary in `backend/app/api/v1/analyses.py`: If `settings.OPERATOR_TOKEN` is empty, Live Mode submissions and cancellations fail closed with HTTP 403 Forbidden.
-  - Used constant-time token comparison: `hmac.compare_digest(x_operator_token, settings.OPERATOR_TOKEN)` for all live detonations and live cancellation operations.
-  - Maintained `LIVE_MODE_ENABLED: bool = False` by default.
+  - Updated `backend/app/core/config.py` to explicitly load `.env` files via `SettingsConfigDict(env_prefix="MALBOX_", env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")`.
+  - Guaranteed environment-variable precedence: actual environment variables in `os.environ` securely override `.env` values.
+  - Corrected `MALBOX_CAPE_API_URL=http://127.0.0.1:8008` in `.env.example` (avoiding collision with FastAPI backend port 8000).
+  - Explicitly documented `MALBOX_OPERATOR_TOKEN` in `.env.example` without exposing secrets: emphasized that it must remain empty during Replay/Evaluation mode to guarantee fail-closed security, and instructions for setting a strong random secret when live mode is authorized.
+  - Kept `MALBOX_HOST=127.0.0.1` and `MALBOX_LIVE_MODE_ENABLED=false` by default.
 
-### Replay Scenario & Artifact Validation
-- **Defects Identified:**
-  - Arbitrary scenario IDs could be supplied, potentially traversing filesystem paths or silently falling back to mismatched fixtures.
-- **Fixes Applied:**
-  - Defined strict allowlist `REGISTERED_REPLAY_SCENARIOS = {"ransomware_wannacry_mock", "infostealer_redline_mock"}`.
-  - Enforced regex check `^[a-zA-Z0-9_\-]+$` and path traversal rejection (`..`, `/`, `\`, null bytes) in both API endpoint and `ReplaySandboxBackend`.
-  - Enforced path containment check `target_file.is_relative_to(fixtures_root)`.
-  - Sanitized forensic artifact filenames: prevented directory traversal and path escapes during mock artifact generation.
-  - Persisted resolved scenario ID and `fixture_version` in the analysis record and in `analysis_environment` report metadata.
+### Frontend Dependency Review & Remediation (Task 3)
+- **Audit Findings:**
+  - `npm audit` flagged:
+    1. Moderate vulnerability: `esbuild <= 0.24.2` (GHSA-67mh-4wv8-2f99) — dev server cross-origin response read.
+    2. High vulnerability: `vite <= 6.4.3` (GHSA-4w7w-66w2-5vf9, GHSA-v6wh-96g9-6wx3) — dev server path traversal and editor UNC handling on Windows.
+- **Fixes Applied & Impact Analysis:**
+  - Added `"overrides": { "esbuild": "^0.25.0" }` in `frontend/package.json`. Installed `esbuild@0.25.12`, completely remediating GHSA-67mh-4wv8-2f99.
+  - Verified `npm run build` succeeds cleanly in 1.82s.
+  - Remaining advisory on `vite` strictly affects the local development server (`npm run dev`) under Windows editor configurations; it does **not** affect the production static bundle or VM deployment (`npm run build`).
+  - Avoiding `npm audit fix --force` preserved stability by rejecting a breaking major-version upgrade to `vite@8.3.6`.
 
-### Worker Concurrency & Race-Free Cancellation
-- **Defects Identified:**
-  - Calling `POST /api/v1/analyses?run_sync=true` spawned an unmanaged `PipelineWorker` thread, bypassing the worker concurrency limit (`WORKER_CONCURRENCY=1`).
-  - Cancellation requests could race with job completion.
-  - Process crashes or restarts left jobs stranded in non-terminal states.
-- **Fixes Applied:**
-  - Added `_worker_lock = threading.Lock()` to `JobQueueManager`.
-  - Routed synchronous requests through `job_queue_manager.execute_sync(analysis_id, db)`, acquiring `_worker_lock` and returning HTTP 429 if the slot is busy.
-  - Protected cancellation state transitions: re-verified database status under lock to avoid racing with job completion.
-  - Added `recover_stale_jobs(db)` recovering any non-terminal jobs to `FAILED` with descriptive error messages upon startup.
-
-### Behavior Graph Evidence Provenance
-- **Defects Identified:**
-  - Process nodes used raw PID identity (`proc_{pid}`), causing collision and data corruption during PID reuse.
-  - Out-of-order parent-child process events produced disconnected or misparented trees.
-  - Network events without attributed processes were arbitrarily assigned to the sample root node.
-- **Fixes Applied:**
-  - Replaced raw PID IDs with unique process-instance identity: `proc_{ev.id}`.
-  - Indexed all process instances with temporal intervals (`[spawn_time, end_time]`), resolving PID reuse and out-of-order parents deterministically.
-  - Created dedicated `node_unattributed_network` ("Unattributed Network Traffic", type `NetworkTraffic`) for network events without verified process provenance, preventing false attribution to the sample root.
-  - Strictly validated all graph edges: ensuring every edge references existing source/target nodes and links to real event IDs.
-
-### Behavioral Detection Quality
-- **Defects Identified:**
-  - `RULE_MASS_FILE_ENCRYPTION` matched on a single ransom note with 0 encrypted files.
-  - `RULE_C2_HTTP_EXFILTRATION` matched on ANY HTTP POST returning HTTP 200/201.
-- **Fixes Applied:**
-  - `RULE_MASS_FILE_ENCRYPTION`: Requires `(ransom_notes and encrypted_files) or len(encrypted_files) >= 2`. A single ransom note without encrypted files is no longer classified as mass file encryption.
-  - `RULE_C2_HTTP_EXFILTRATION`: Requires HTTP POST combined with explicit C2 endpoint indicators (`gate`, `upload`, `beacon`, `panel`, `exfil`, `post.php`) or explicit exfiltration telemetry attributes. Normal API POSTs returning 200 are no longer flagged.
-  - Added positive and negative regression tests for both rules in `test_detection_rules.py`.
-
-### AI Orchestration Policy & Audit
-- **Defects Identified:**
-  - Approved plans did not pass parameters to sandbox execution.
-  - Observation evaluation ran before detection scoring, receiving empty findings (`findings_count: 0`).
-  - Worker previously mutated `analysis.profile` upon follow-up recommendation, falsely claiming an unexecuted second pass occurred.
-  - Hardcoded `"Windows 10 x64 CAPE VM"` in CAPE adapter.
-- **Fixes Applied:**
-  - Passed approved plan parameters (`requested_artifacts`, `telemetry_focus`) to sandbox `submit_sample(options=...)`.
-  - Moved deterministic `DetectionEngine` evaluation ahead of `ObservationEvaluator`, providing real findings, risk score, and rule IDs to the AI evaluator.
-  - Follow-up dynamic pass recommendations are clearly classified as advisory recommendations for the operator; `analysis.profile` is NOT mutated without execution.
-  - Removed hardcoded guest OS string from CAPE adapter; extracts real machine info or explicitly marks as `"Not reported by sandbox backend"`, and sets `confinement_verified=False`.
+### Benchmark Quality & Host/VM Contextualization (Task 4)
+- **Improvements Applied in `scripts/benchmark_replay.py`:**
+  - Added `get_system_specifications()` inspecting OS platform, Python version, logical CPU count, and total system RAM.
+  - Clearly labeled host execution context: `Host / CI Baseline Validation (Pre-VM)` with an explicit disclaimer that target VM benchmarks must be recorded inside the target VM.
+  - Integrated `tracemalloc` to isolate per-scenario peak memory allocation from process-wide high-water mark peak RSS (`ru_maxrss`).
+  - Sequentially executed synthetic scaling: Small (~100 events), Medium (~1,000 events), Large (~10,000 events).
+  - Measured database write duration separately from normalization parsing.
+  - Verified no live malware or hypervisor connections are initiated.
 
 ---
 
 ## 3. Verification Test Suite Status
 
-All 52 automated regression and unit tests pass with zero errors:
+All 56 automated tests pass with 100% success rate:
 ```
 backend/tests/test_ai_orchestration.py: 5/5 PASSED
 backend/tests/test_cape_adapter.py: 3/3 PASSED
@@ -109,11 +75,11 @@ backend/tests/test_detection_rules.py: 6/6 PASSED
 backend/tests/test_health.py: 2/2 PASSED
 backend/tests/test_pe_parser.py: 5/5 PASSED
 backend/tests/test_real_ai_provider.py: 6/6 PASSED
-backend/tests/test_replay_pipeline.py: 1/1 PASSED
+backend/tests/test_replay_pipeline.py: 5/5 PASSED
 backend/tests/test_safety_and_lifecycle.py: 14/14 PASSED
 backend/tests/test_submission.py: 3/3 PASSED
 backend/tests/test_telemetry_integrity.py: 7/7 PASSED
-======================== 52 passed, 1 warning in 10.44s ========================
+======================== 56 passed, 1 warning in 12.38s ========================
 ```
 
 Frontend production build:
@@ -121,7 +87,7 @@ Frontend production build:
 cd frontend && npm run build
 ✓ 1491 modules transformed.
 dist/index.html                   0.85 kB │ gzip:   0.49 kB
-dist/assets/index-1H6TGCfN.css    3.05 kB │ gzip:   1.15 kB
-dist/assets/index-_mae2sp5.js   644.62 kB │ gzip: 201.65 kB
-✓ built in 2.35s
+dist/assets/index-DSG-b06S.css    3.05 kB │ gzip:   1.15 kB
+dist/assets/index-DyWvua34.js   645.09 kB │ gzip: 201.72 kB
+✓ built in 1.82s
 ```
