@@ -30,3 +30,4 @@ class BehaviorGraphResponse(BaseModel):
     edges: List[GraphEdge] = Field(default_factory=list)
     total_nodes: int = 0
     total_edges: int = 0
+

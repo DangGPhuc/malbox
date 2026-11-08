@@ -268,3 +268,4 @@ export const ReportPage: React.FC<ReportPageProps> = ({ analysisId }) => {
     </div>
   );
 };
+

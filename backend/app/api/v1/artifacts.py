@@ -58,3 +58,4 @@ def download_artifact(
         filename=safe_name,
         media_type="application/octet-stream"
     )
+

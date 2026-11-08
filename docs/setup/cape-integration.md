@@ -73,3 +73,4 @@ print(cape.check_readiness())
 ```
 
 If the CAPE cluster is offline, `check_readiness()` gracefully reports `ready: false` with missing prerequisites and error details without crashing the platform.
+

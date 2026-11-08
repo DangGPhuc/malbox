@@ -15,3 +15,4 @@ def health_check():
         "default_backend": settings.DEFAULT_SANDBOX_BACKEND,
         "ai_provider": settings.AI_PROVIDER,
     }
+

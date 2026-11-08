@@ -41,3 +41,4 @@ def get_llm_provider() -> LLMProvider:
     if settings.AI_PROVIDER != "mock" and settings.AI_API_KEY:
         return RealLLMProvider(api_key=settings.AI_API_KEY, model=settings.AI_MODEL)
     return MockLLMProvider()
+

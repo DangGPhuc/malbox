@@ -191,3 +191,4 @@ class TelemetryNormalizer:
         self.db.add_all(events)
         self.db.commit()
         return events
+

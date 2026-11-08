@@ -44,3 +44,4 @@ class Analysis(Base):
     findings = relationship("BehavioralFinding", back_populates="analysis", cascade="all, delete-orphan")
     orchestration_records = relationship("OrchestrationRecord", back_populates="analysis", cascade="all, delete-orphan")
     report = relationship("AnalysisReport", back_populates="analysis", uselist=False, cascade="all, delete-orphan")
+

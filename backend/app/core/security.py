@@ -41,3 +41,4 @@ def sanitize_untrusted_input_for_ai(content: str, max_chars: int = 1000) -> str:
     neutralized = re.sub(r"(?i)human:\s*", "human_ref: ", neutralized)
     neutralized = re.sub(r"(?i)assistant:\s*", "assistant_ref: ", neutralized)
     return neutralized[:max_chars].strip()
+

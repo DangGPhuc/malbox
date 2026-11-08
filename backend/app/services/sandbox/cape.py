@@ -283,3 +283,4 @@ class CapeSandboxBackend(SandboxBackend):
                 {"name": "traffic.pcap", "type": "pcap", "description": "CAPE captured network traffic"}
             ],
         }
+

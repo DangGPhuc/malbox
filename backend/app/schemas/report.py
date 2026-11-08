@@ -51,3 +51,4 @@ class ReportResponse(BaseModel):
     risk_level: str
     full_report: FullReportSchema
     created_at: datetime
+

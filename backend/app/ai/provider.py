@@ -27,3 +27,4 @@ class LLMProvider(ABC):
     ) -> str:
         """Produces evidence-grounded analyst executive summary."""
         pass
+

@@ -40,3 +40,4 @@ def get_analysis_process_tree(
 
     tree = build_process_tree(analysis_id, db)
     return tree
+

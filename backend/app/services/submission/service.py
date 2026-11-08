@@ -81,3 +81,4 @@ class SubmissionService:
 
     def get_sample_by_hash(self, sha256: str) -> Optional[Sample]:
         return self.db.query(Sample).filter(Sample.sha256 == sha256).first()
+

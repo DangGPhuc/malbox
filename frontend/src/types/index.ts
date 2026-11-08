@@ -249,3 +249,4 @@ export interface ArtifactItem {
   artifact_type: string;
   relative_path: string;
 }
+

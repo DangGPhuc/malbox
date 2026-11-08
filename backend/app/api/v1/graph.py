@@ -20,3 +20,4 @@ def get_analysis_behavior_graph(
 
     graph = build_behavior_graph(analysis_id, db)
     return graph
+

@@ -38,3 +38,4 @@
   - Disabled by default (`MALBOX_LIVE_MODE_ENABLED=false`).
   - Requires explicit per-analysis user confirmation checkbox.
   - Requires external CAPE cluster configured with isolated non-bridged guest networking.
+

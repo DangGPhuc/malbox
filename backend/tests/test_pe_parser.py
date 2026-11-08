@@ -26,3 +26,4 @@ def test_parse_corrupted_pe():
     meta = parse_pe_metadata(data)
     assert meta["is_valid_pe"] is False
     assert meta["warning"] is not None
+

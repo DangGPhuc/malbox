@@ -321,3 +321,4 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
     </div>
   );
 };
+

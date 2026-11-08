@@ -63,3 +63,4 @@ class ObservationEvaluator:
         self.db.commit()
 
         return recommendation, validation
+

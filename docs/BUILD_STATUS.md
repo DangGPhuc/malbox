@@ -85,3 +85,4 @@
 1. Integrate real-time WebSocket event streaming for live log visualization during sandbox execution.
 2. Expand behavioral rule coverage for memory injection techniques (e.g., Process Hollowing, APC Injection).
 3. Connect live Gemini/OpenAI API keys for advanced semantic malware explanation when external egress is permitted.
+

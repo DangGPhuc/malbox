@@ -119,3 +119,4 @@ class MockLLMProvider(LLMProvider):
             "All findings are supported by verifiable execution events, reconstructed process ancestry, and filesystem telemetry."
         )
         return summary
+

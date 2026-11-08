@@ -12,3 +12,4 @@ def test_root_endpoint(client):
     data = response.json()
     assert data["status"] == "online"
     assert data["documentation"] == "/docs"
+

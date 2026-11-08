@@ -44,3 +44,4 @@ def get_sample(
     if not sample:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found.")
     return sample
+

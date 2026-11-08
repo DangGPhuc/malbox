@@ -169,3 +169,4 @@ def parse_pe_metadata(file_bytes: bytes) -> Dict[str, Any]:
         }
     finally:
         pe.close()
+

@@ -63,3 +63,4 @@ def test_create_and_retrieve_analysis(client):
     assert detail["id"] == analysis["id"]
     assert detail["sample_id"] == sample["id"]
     assert detail["sample_file_name"] == "replay_sample.exe"
+

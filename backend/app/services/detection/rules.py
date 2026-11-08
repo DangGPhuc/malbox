@@ -84,3 +84,4 @@ BEHAVIORAL_RULES: List[BehavioralRule] = [
         score_weight=15,
     ),
 ]
+

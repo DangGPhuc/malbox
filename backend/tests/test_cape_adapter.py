@@ -109,3 +109,4 @@ def test_cape_submission_and_report_transform(monkeypatch, tmp_path):
     assert transformed["registry"][0]["persistence"] is True
     assert len(transformed["network"]["dns"]) == 1
     assert transformed["network"]["dns"][0]["query"] == "c2-domain.com"
+

@@ -300,3 +300,4 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({ onAnalysisStarted }) => 
     </div>
   );
 };
+

@@ -157,3 +157,4 @@ All 19 tests pass:
 - AI orchestration planning & policy allowlist enforcement
 - Command injection rejection
 - CAPE Sandbox v2 API adapter error recovery & normalization
+

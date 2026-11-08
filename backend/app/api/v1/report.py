@@ -50,3 +50,4 @@ def get_analysis_report_html(
 
     html_content = generate_html_report(report_record.full_report_json)
     return HTMLResponse(content=html_content)
+

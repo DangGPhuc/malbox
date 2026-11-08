@@ -69,3 +69,4 @@ class AnalysisPlanner:
         self.db.commit()
 
         return final_plan, validation
+

@@ -79,3 +79,4 @@ def test_ai_orchestration_audit_trail_recorded(client):
         assert "proposed_action" in r
         assert "supporting_evidence" in r
         assert "final_action" in r
+
