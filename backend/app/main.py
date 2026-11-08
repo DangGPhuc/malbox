@@ -2,14 +2,27 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.core.database import init_db
+from app.core.database import init_db, SessionLocal
 from app.api.router import api_router
+from app.workers.job_queue import job_queue_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize database tables and private storage directories safely on startup
     init_db()
+    db = SessionLocal()
+    try:
+        recovered = job_queue_manager.recover_stale_jobs(db)
+        if recovered > 0:
+            print(f"[*] malbox-ai startup: Safely recovered {recovered} interrupted analysis task(s).")
+    finally:
+        db.close()
+
+    # Start background job queue consumer
+    job_queue_manager.start()
     yield
+    # Stop background consumer gracefully
+    job_queue_manager.stop()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -44,4 +57,3 @@ def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=settings.DEBUG)
-

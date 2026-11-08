@@ -78,6 +78,8 @@ export interface AnalysisDetail {
   live_mode: boolean;
   approved_by_user: boolean;
   error_message?: string;
+  external_task_id?: string;
+  replay_scenario_id?: string;
   created_at: string;
   started_at?: string;
   completed_at?: string;

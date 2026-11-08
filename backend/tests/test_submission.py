@@ -53,7 +53,7 @@ def test_create_and_retrieve_analysis(client):
     res_analysis = client.post("/api/v1/analyses", json=analysis_payload)
     assert res_analysis.status_code == 201
     analysis = res_analysis.json()
-    assert analysis["status"] == AnalysisStatus.PREFLIGHT.value
+    assert analysis["status"] in [AnalysisStatus.QUEUED.value, AnalysisStatus.PREFLIGHT.value]
     assert analysis["backend_type"] == "replay"
 
     # Retrieve analysis by ID

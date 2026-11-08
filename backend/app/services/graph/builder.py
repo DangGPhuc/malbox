@@ -243,10 +243,16 @@ def build_behavior_graph(analysis_id: str, db: Session) -> BehaviorGraphResponse
             )
         )
 
+    # Strictly validate edge integrity: ensure source and target exist in nodes
+    valid_edges = [
+        edge for edge in edges.values()
+        if edge.data.source in nodes and edge.data.target in nodes
+    ]
+
     return BehaviorGraphResponse(
         analysis_id=analysis_id,
         nodes=list(nodes.values()),
-        edges=list(edges.values()),
+        edges=valid_edges,
         total_nodes=len(nodes),
-        total_edges=len(edges),
+        total_edges=len(valid_edges),
     )

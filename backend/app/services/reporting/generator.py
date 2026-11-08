@@ -24,6 +24,7 @@ class ReportGenerator:
         risk_assessment: RiskAssessment,
         ai_summary: str = "",
         ai_follow_up: dict = None,
+        env_metadata: Optional[Dict[str, Any]] = None,
     ) -> AnalysisReport:
         analysis = self.db.query(Analysis).filter(Analysis.id == analysis_id).first()
         if not analysis:
@@ -72,12 +73,20 @@ class ReportGenerator:
         finding_titles = ", ".join([f.title for f in findings_db[:3]]) or "No severe behavioral anomalies"
 
         if not ai_summary:
-            executive_summary = (
-                f"Dynamic sandbox analysis of '{sample_name}' (SHA-256: {sample_hash[:16]}...) concluded with "
-                f"a threat classification of {risk_assessment.level.upper()} and an explainable risk score of {risk_assessment.score}/100. "
-                f"The executable spawned {process_tree.total_processes} process(es) and demonstrated high-confidence behaviors: {finding_titles}. "
-                f"{len(mitre_map)} MITRE ATT&CK techniques were deterministically mapped with direct telemetry provenance."
-            )
+            if not findings_db:
+                executive_summary = (
+                    f"Dynamic sandbox analysis of '{sample_name}' (SHA-256: {sample_hash[:16]}...) concluded with "
+                    f"a threat classification of '{risk_assessment.level}' (score: 0/100). "
+                    "No suspicious or malicious behavioral anomalies were observed during the bounded sandbox execution. "
+                    "Note: Anti-evasion measures, dormant delayed payloads, or missing external C2 infrastructure cannot be ruled out."
+                )
+            else:
+                executive_summary = (
+                    f"Dynamic sandbox analysis of '{sample_name}' (SHA-256: {sample_hash[:16]}...) concluded with "
+                    f"a threat classification of {risk_assessment.level.upper()} and an explainable risk score of {risk_assessment.score}/100. "
+                    f"The executable spawned {process_tree.total_processes} process(es) and demonstrated high-confidence behaviors: {finding_titles}. "
+                    f"{len(mitre_map)} MITRE ATT&CK techniques were deterministically mapped with direct telemetry provenance."
+                )
         else:
             executive_summary = ai_summary
 
@@ -91,12 +100,22 @@ class ReportGenerator:
             "pe_metadata": sample.pe_metadata if sample else {},
         }
 
+        # Do not fabricate OS environment; report only verified telemetry from sandbox
+        env_meta = env_metadata or {}
+        if analysis.backend_type == "replay":
+            guest_os_str = env_meta.get("guest_os", "Windows 10 x64 (Simulated Replay Environment)")
+            confinement_str = "Isolated Replay Sandbox"
+        else:
+            guest_os_str = env_meta.get("guest_os") or "Not reported by sandbox backend"
+            confinement_str = env_meta.get("confinement") or "Live Hypervisor Guest"
+
         analysis_env = {
             "backend": analysis.backend_type,
             "profile": analysis.profile,
             "timeout_seconds": analysis.timeout_seconds,
             "live_mode": analysis.live_mode,
-            "guest_os": "Windows 10 Pro 64-bit (Isolated Sandbox)",
+            "guest_os": guest_os_str,
+            "confinement": confinement_str,
         }
 
         # Activity summaries
@@ -151,6 +170,15 @@ class ReportGenerator:
         report_payload = FullReportSchema(
             analysis_id=analysis_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            backend_type=analysis.backend_type,
+            is_replay=(analysis.backend_type == "replay"),
+            replay_scenario_id=analysis.replay_scenario_id,
+            provenance_disclaimer=(
+                "REPLAY DATA PROVENANCE: Telemetry derived from synthetic replay fixture. "
+                "All behaviors represent simulated execution rather than live host detonation."
+                if analysis.backend_type == "replay"
+                else "LIVE DETONATION: Telemetry collected from live sandbox VM execution."
+            ),
             sample_metadata=sample_meta,
             analysis_environment=analysis_env,
             executive_summary=executive_summary,

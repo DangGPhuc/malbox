@@ -51,6 +51,12 @@ class AnalysisPlanner:
         analysis.timeout_seconds = final_plan.execution_timeout_seconds
 
         # 5. Persist complete audit trail
+        llm_meta = getattr(self.llm, "last_call_meta", None) or {
+            "provider": getattr(self.llm, "provider_name", "mock"),
+            "model": getattr(self.llm, "model", "mock-deterministic"),
+            "tokens_used": 0,
+            "fallback": False,
+        }
         audit_record = OrchestrationRecord(
             analysis_id=analysis.id,
             stage="preflight_planning",
@@ -59,6 +65,7 @@ class AnalysisPlanner:
                 "overall_entropy": sample_meta.get("overall_entropy", 0.0),
                 "is_packed": sample_meta.get("is_packed_heuristic", False),
                 "number_of_sections": sample_meta.get("number_of_sections", 0),
+                "llm_metadata": llm_meta,
             },
             validation_result=validation.status,
             validation_notes=validation.reason,

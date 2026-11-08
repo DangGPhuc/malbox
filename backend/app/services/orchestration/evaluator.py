@@ -46,11 +46,21 @@ class ObservationEvaluator:
         recommendation = FollowUpRecommendation(**final_rec_dict)
 
         # 3. Log to audit trail
+        llm_meta = getattr(self.llm, "last_call_meta", None) or {
+            "provider": getattr(self.llm, "provider_name", "mock"),
+            "model": getattr(self.llm, "model", "mock-deterministic"),
+            "tokens_used": 0,
+            "fallback": False,
+        }
+        evidence = {
+            **telemetry_summary,
+            "llm_metadata": llm_meta,
+        }
         audit_record = OrchestrationRecord(
             analysis_id=analysis.id,
             stage="observation_evaluation",
             proposed_action=proposed_raw,
-            supporting_evidence=telemetry_summary,
+            supporting_evidence=evidence,
             validation_result=validation.status,
             validation_notes=validation.reason,
             final_action=recommendation.model_dump(),

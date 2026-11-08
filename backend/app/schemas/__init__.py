@@ -1,5 +1,5 @@
 from app.schemas.sample import SampleResponse, PEMetadata, SectionInfo, ImportFunction
-from app.schemas.analysis import AnalysisCreate, AnalysisResponse, AnalysisDetailResponse
+from app.schemas.analysis import AnalysisCreate, AnalysisResponse, AnalysisDetailResponse, SandboxBackendType
 from app.schemas.event import EventCreate, EventResponse, PaginatedEvents
 from app.schemas.finding import FindingResponse, ProcessTreeNode, ProcessTreeResponse
 from app.schemas.graph import BehaviorGraphResponse, GraphNode, GraphEdge
@@ -14,6 +14,7 @@ __all__ = [
     "AnalysisCreate",
     "AnalysisResponse",
     "AnalysisDetailResponse",
+    "SandboxBackendType",
     "EventCreate",
     "EventResponse",
     "PaginatedEvents",
@@ -33,4 +34,3 @@ __all__ = [
     "MitreTechnique",
     "ExtractedIOCs",
 ]
-

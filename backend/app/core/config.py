@@ -35,19 +35,23 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_BYTES: int = 33554432  # 32 MB
     LIVE_MODE_ENABLED: bool = False
     REQUIRE_EXPLICIT_APPROVAL: bool = True
+    OPERATOR_TOKEN: str = "malbox-dev-operator-key-9988"
     WORKER_CONCURRENCY: int = 1
     DEFAULT_ANALYSIS_TIMEOUT_SECONDS: int = 120
+    JOB_POLL_INTERVAL_SECONDS: float = 0.5
 
     # AI Orchestration
-    AI_PROVIDER: str = "mock"  # mock, openai, anthropic, gemini
+    AI_PROVIDER: str = "mock"  # mock, real, openai, ollama
     AI_MODEL: str = "gpt-4o-mini"
     AI_API_KEY: str = ""
+    AI_BASE_URL: str = "https://api.openai.com/v1"
+    AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_TOKENS: int = 2048
     AI_TEMPERATURE: float = 0.1
 
     # Pluggable Sandbox Settings
     DEFAULT_SANDBOX_BACKEND: str = "replay"  # replay, cape
-    CAPE_API_URL: str = "http://127.0.0.1:8000"
+    CAPE_API_URL: str = "http://127.0.0.1:8008"  # Distinct from application port 8000
     CAPE_API_TOKEN: str = ""
     CAPE_TIMEOUT_SECONDS: int = 300
     CAPE_POLL_INTERVAL_SECONDS: int = 5

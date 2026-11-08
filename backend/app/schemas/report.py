@@ -27,6 +27,13 @@ class ExtractedIOCs(BaseModel):
 class FullReportSchema(BaseModel):
     analysis_id: str
     generated_at: str
+    backend_type: str = "replay"
+    is_replay: bool = True
+    replay_scenario_id: Optional[str] = None
+    provenance_disclaimer: str = (
+        "REPLAY DATA PROVENANCE: Telemetry derived from synthetic replay fixture. "
+        "All behaviors represent recorded execution rather than live detonation."
+    )
     sample_metadata: Dict[str, Any]
     analysis_environment: Dict[str, Any]
     executive_summary: str
@@ -49,6 +56,9 @@ class ReportResponse(BaseModel):
     executive_summary: str
     risk_score: int
     risk_level: str
+    backend_type: str = "replay"
+    is_replay: bool = True
+    replay_scenario_id: Optional[str] = None
     full_report: FullReportSchema
     created_at: datetime
 

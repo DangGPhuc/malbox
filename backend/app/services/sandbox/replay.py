@@ -7,9 +7,10 @@ from app.services.sandbox.base import SandboxBackend
 
 class ReplaySandboxBackend(SandboxBackend):
     """
-    High-fidelity deterministic replay sandbox backend.
+    Deterministic replay sandbox backend.
     Enables full end-to-end telemetry correlation, graph modeling, and reporting
-    without executing dangerous code on host systems.
+    without executing dangerous code on host systems. All outputs are explicitly
+    tagged with synthetic provenance.
     """
 
     def __init__(self, fixtures_dir: Optional[Path] = None):
@@ -24,24 +25,35 @@ class ReplaySandboxBackend(SandboxBackend):
             "fixtures_available": has_fixtures,
             "fixtures_path": str(self.fixtures_dir),
             "mode": "deterministic_replay",
+            "is_synthetic": True,
         }
 
-    def _select_fixture_file(self, profile: str, sample_path: Path) -> Path:
-        filename_lower = sample_path.name.lower()
-        if "stealer" in profile or "redline" in filename_lower or "invoice" in filename_lower:
-            stealer_path = self.fixtures_dir / "infostealer_redline_mock.json"
-            if stealer_path.exists():
-                return stealer_path
+    def _resolve_fixture(self, profile: str, scenario_id: Optional[str] = None) -> tuple[Path, str]:
+        """Resolves explicit scenario ID or falls back to profile-based scenario with explicit ID."""
+        if scenario_id:
+            # Check direct match
+            direct_file = self.fixtures_dir / f"{scenario_id}.json"
+            if direct_file.exists():
+                return direct_file, scenario_id
 
-        # Default to ransomware fixture
-        ransom_path = self.fixtures_dir / "ransomware_wannacry_mock.json"
-        if ransom_path.exists():
-            return ransom_path
+            # Check stem match
+            for p in self.fixtures_dir.glob("*.json"):
+                if scenario_id.lower() in p.stem.lower():
+                    return p, p.stem
 
-        # Fallback to any json fixture
+        if "stealer" in profile.lower() or "credential" in profile.lower():
+            target = self.fixtures_dir / "infostealer_redline_mock.json"
+            if target.exists():
+                return target, "infostealer_redline_mock"
+
+        # Default ransomware scenario
+        target = self.fixtures_dir / "ransomware_wannacry_mock.json"
+        if target.exists():
+            return target, "ransomware_wannacry_mock"
+
         all_fixtures = list(self.fixtures_dir.glob("*.json"))
         if all_fixtures:
-            return all_fixtures[0]
+            return all_fixtures[0], all_fixtures[0].stem
 
         raise FileNotFoundError(f"No replay fixtures located in {self.fixtures_dir}")
 
@@ -50,13 +62,25 @@ class ReplaySandboxBackend(SandboxBackend):
         sample_path: Path,
         profile: str,
         timeout_seconds: int,
-        options: Optional[Dict[str, Any]] = None
+        options: Optional[Dict[str, Any]] = None,
+        scenario_id: Optional[str] = None
     ) -> str:
         task_id = f"replay_{uuid.uuid4().hex[:12]}"
-        fixture_file = self._select_fixture_file(profile, sample_path)
-        
+        fixture_file, resolved_scenario_id = self._resolve_fixture(profile, scenario_id)
+
         with open(fixture_file, "r", encoding="utf-8") as f:
             fixture_data = json.load(f)
+
+        # Inject explicit synthetic provenance metadata
+        meta = fixture_data.setdefault("metadata", {})
+        meta["is_synthetic_replay"] = True
+        meta["replay_scenario_id"] = resolved_scenario_id
+        meta["fixture_file"] = fixture_file.name
+        meta["fixture_version"] = fixture_data.get("fixture_version", "1.0")
+        meta["provenance_statement"] = (
+            "SYNTHETIC REPLAY DATA: Telemetry derived from calibrated reference scenario. "
+            "Uploaded binary was NOT executed on the host system."
+        )
 
         self._tasks[task_id] = {
             "status": "completed",
@@ -64,6 +88,7 @@ class ReplaySandboxBackend(SandboxBackend):
             "timeout_seconds": timeout_seconds,
             "sample_path": str(sample_path),
             "fixture_file": str(fixture_file),
+            "scenario_id": resolved_scenario_id,
             "data": fixture_data,
         }
         return task_id
@@ -76,6 +101,7 @@ class ReplaySandboxBackend(SandboxBackend):
             "status": task["status"],
             "backend_task_id": backend_task_id,
             "progress_percent": 100,
+            "is_synthetic": True,
         }
 
     def collect_results(self, backend_task_id: str) -> Dict[str, Any]:
@@ -91,7 +117,7 @@ class ReplaySandboxBackend(SandboxBackend):
         return False
 
     def generate_artifacts(self, backend_task_id: str, dest_dir: Path) -> List[Dict[str, Any]]:
-        """Generates safe mock artifact files (PCAP, PNG screenshot, TXT) for the analysis."""
+        """Generates safe mock artifact files labeled explicitly as synthetic."""
         dest_dir.mkdir(parents=True, exist_ok=True)
         task = self._tasks.get(backend_task_id)
         if not task:
@@ -122,14 +148,18 @@ class ReplaySandboxBackend(SandboxBackend):
                     f.write(png_bytes)
             else:
                 with open(target_path, "w", encoding="utf-8") as f:
-                    f.write(f"--- malbox-ai Forensic Artifact Mock: {name} ---\n{item.get('description', '')}\n")
+                    f.write(
+                        f"--- malbox-ai SYNTHETIC Forensic Artifact Mock: {name} ---\n"
+                        f"Notice: Synthetic artifact generated from reference fixture {task.get('scenario_id')}.\n"
+                        f"{item.get('description', '')}\n"
+                    )
 
             generated.append({
                 "name": name,
                 "type": art_type,
                 "size_bytes": target_path.stat().st_size,
                 "path": str(target_path),
+                "is_synthetic": True,
             })
 
         return generated
-

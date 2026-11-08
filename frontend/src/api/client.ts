@@ -53,12 +53,18 @@ export const api = {
     timeout_seconds?: number;
     live_mode?: boolean;
     approved_by_user?: boolean;
+    scenario_id?: string;
+    operator_token?: string;
     run_sync?: boolean;
   }): Promise<AnalysisDetail> {
     const query = payload.run_sync ? '?run_sync=true' : '';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (payload.operator_token) {
+      headers['X-Operator-Token'] = payload.operator_token;
+    }
     const res = await fetch(`${BASE_URL}/analyses${query}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
     });
     if (!res.ok) {

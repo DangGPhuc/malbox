@@ -29,3 +29,17 @@ def init_db():
     # Import all models to register them on Base.metadata
     from app.models import sample, analysis, event, finding, audit, report
     Base.metadata.create_all(bind=engine)
+
+    # Lightweight migration for SQLite dev database
+    if db_url.startswith("sqlite"):
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            # Check existing columns on analyses table
+            res = conn.execute(text("PRAGMA table_info(analyses)")).fetchall()
+            col_names = {row[1] for row in res}
+            if col_names:
+                if "external_task_id" not in col_names:
+                    conn.execute(text("ALTER TABLE analyses ADD COLUMN external_task_id VARCHAR(128)"))
+                if "replay_scenario_id" not in col_names:
+                    conn.execute(text("ALTER TABLE analyses ADD COLUMN replay_scenario_id VARCHAR(128)"))
+                conn.commit()

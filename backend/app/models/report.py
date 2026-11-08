@@ -11,7 +11,7 @@ class AnalysisReport(Base):
     analysis_id = Column(String(36), ForeignKey("analyses.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
     executive_summary = Column(Text, nullable=False)
     risk_score = Column(Integer, default=0, nullable=False)
-    risk_level = Column(String(32), default="Clean", nullable=False)  # Clean, Low, Suspicious, Malicious
+    risk_level = Column(String(64), default="No Suspicious Behavior Observed", nullable=False)
     full_report_json = Column(JSON, default=dict, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 

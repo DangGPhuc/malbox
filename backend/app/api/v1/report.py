@@ -29,6 +29,9 @@ def get_analysis_report(
         executive_summary=report_record.executive_summary,
         risk_score=report_record.risk_score,
         risk_level=report_record.risk_level,
+        backend_type=analysis.backend_type,
+        is_replay=(analysis.backend_type == "replay"),
+        replay_scenario_id=analysis.replay_scenario_id,
         full_report=report_record.full_report_json,
         created_at=report_record.created_at,
     )

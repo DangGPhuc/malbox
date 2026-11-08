@@ -49,9 +49,11 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [loading, setLoading] = useState(true);
 
-  const fetchData = async () => {
+  const TERMINAL_STATES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'BLOCKED_BY_POLICY'];
+
+  const fetchData = async (isInitial = false) => {
     try {
-      setLoading(true);
+      if (isInitial) setLoading(true);
       const [analysisData, eventsData, orchData, artData] = await Promise.all([
         api.getAnalysis(analysisId),
         api.getEvents(analysisId, { page_size: 150 }),
@@ -62,15 +64,35 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
       setEvents(eventsData.items);
       setOrchestration(orchData);
       setArtifacts(artData);
+      return analysisData.status;
     } catch (err) {
       console.error(err);
+      return null;
     } finally {
-      setLoading(false);
+      if (isInitial) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
+    let timer: ReturnType<typeof setInterval>;
+
+    const runPolling = async () => {
+      const status = await fetchData(true);
+      if (status && !TERMINAL_STATES.includes(status)) {
+        timer = setInterval(async () => {
+          const currentStatus = await fetchData(false);
+          if (currentStatus && TERMINAL_STATES.includes(currentStatus)) {
+            clearInterval(timer);
+          }
+        }, 2000);
+      }
+    };
+
+    runPolling();
+
+    return () => {
+      if (timer) clearInterval(timer);
+    };
   }, [analysisId]);
 
   const filteredEvents =
@@ -112,6 +134,36 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Replay Mode Provenance Indicator */}
+      {analysis?.backend_type === 'replay' && (
+        <div style={{
+          background: '#1e1b4b',
+          border: '1px solid #4338ca',
+          borderLeft: '5px solid #818cf8',
+          padding: '0.75rem 1rem',
+          borderRadius: '6px',
+          marginBottom: '1.25rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+        }}>
+          <Shield size={20} color="#818cf8" />
+          <div>
+            <div style={{ fontWeight: 700, color: '#e0e7ff', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span>REPLAY PROVENANCE: SYNTHETIC TELEMETRY FIXTURE</span>
+              {analysis.replay_scenario_id && (
+                <span className="mono" style={{ background: '#312e81', color: '#c7d2fe', padding: '1px 6px', borderRadius: '4px', fontSize: '0.75rem' }}>
+                  {analysis.replay_scenario_id}
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: '0.8rem', color: '#a5b4fc', marginTop: '2px' }}>
+              Verified offline replay execution. No live malware was detonated in this environment.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* State Machine Step Pipeline */}
       <div className="card" style={{ padding: '1rem', overflowX: 'auto', marginBottom: '1.25rem' }}>

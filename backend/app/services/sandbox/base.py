@@ -16,7 +16,8 @@ class SandboxBackend(ABC):
         sample_path: Path,
         profile: str,
         timeout_seconds: int,
-        options: Optional[Dict[str, Any]] = None
+        options: Optional[Dict[str, Any]] = None,
+        scenario_id: Optional[str] = None
     ) -> str:
         """Submits an approved binary to the execution environment. Returns backend task ID."""
         pass
@@ -40,4 +41,3 @@ class SandboxBackend(ABC):
     def generate_artifacts(self, backend_task_id: str, dest_dir: Path) -> List[Dict[str, Any]]:
         """Materializes safe mock or real forensic artifacts into the analysis artifacts folder."""
         pass
-

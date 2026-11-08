@@ -73,7 +73,8 @@ class CapeSandboxBackend(SandboxBackend):
         sample_path: Path,
         profile: str,
         timeout_seconds: int,
-        options: Optional[Dict[str, Any]] = None
+        options: Optional[Dict[str, Any]] = None,
+        scenario_id: Optional[str] = None,
     ) -> str:
         """
         Submits a quarantined sample to the CAPE Sandbox task queue.

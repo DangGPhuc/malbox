@@ -15,6 +15,8 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({ onAnalysisStarted }) => 
 
   // Analysis options
   const [backendType, setBackendType] = useState('replay');
+  const [selectedScenario, setSelectedScenario] = useState('ransomware_wannacry_mock');
+  const [operatorToken, setOperatorToken] = useState('');
   const [profile, setProfile] = useState('ransomware_focus');
   const [timeoutSeconds, setTimeoutSeconds] = useState(60);
   const [liveMode, setLiveMode] = useState(false);
@@ -55,11 +57,13 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({ onAnalysisStarted }) => 
       const filename = threatType === 'wannacry' ? 'wannacry_test_sample.exe' : 'redline_stealer_sample.exe';
       const fakeBytes = threatType === 'wannacry'
         ? new Blob(['MZ\x90\x00WannaCry_Synthetic_Demo_Sample'], { type: 'application/octet-stream' })
-        : new Blob(['MZ\x90\x00Redline_Synthetic_Demo_Sample'], { type: 'application/octet-stream' })
+        : new Blob(['MZ\x90\x00Redline_Synthetic_Demo_Sample'], { type: 'application/octet-stream' });
       const demoFile = new File([fakeBytes], filename);
       const sample = await api.uploadSample(demoFile);
       setUploadedSample(sample);
+      setBackendType('replay');
       setProfile(threatType === 'wannacry' ? 'ransomware_focus' : 'infostealer_focus');
+      setSelectedScenario(threatType === 'wannacry' ? 'ransomware_wannacry_mock' : 'infostealer_redline_mock');
     } catch (err: any) {
       setError(err.message || 'Quick demo generation failed');
     } finally {
@@ -73,14 +77,17 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({ onAnalysisStarted }) => 
       setSubmitting(true);
       setError(null);
 
+      const isLive = backendType === 'cape';
       const analysis = await api.createAnalysis({
         sample_id: uploadedSample.id,
         backend_type: backendType,
         profile: profile,
         timeout_seconds: timeoutSeconds,
-        live_mode: liveMode,
-        approved_by_user: approvedByUser,
-        run_sync: true, // Execute sequentially so it immediately finishes
+        live_mode: isLive,
+        approved_by_user: isLive ? approvedByUser : false,
+        scenario_id: backendType === 'replay' ? selectedScenario : undefined,
+        operator_token: isLive ? operatorToken : undefined,
+        run_sync: false, // Non-blocking job processing via JobQueueManager
       });
 
       onAnalysisStarted(analysis.id);
@@ -234,22 +241,53 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({ onAnalysisStarted }) => 
                 </select>
               </div>
 
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.3rem' }}>
-                  ANALYSIS PROFILE
-                </label>
-                <select
-                  value={profile}
-                  onChange={(e) => setProfile(e.target.value)}
-                  style={{ width: '100%', padding: '0.6rem', background: '#0b1120', border: '1px solid #334155', borderRadius: '6px', color: '#f8fafc' }}
-                >
-                  <option value="ransomware_focus">Ransomware Focus (Shadow copies, file mod burst)</option>
-                  <option value="infostealer_focus">Infostealer Focus (Credential vaults, HTTP gate)</option>
-                  <option value="evasion_focus">Evasion Focus (Sleep bypass, anti-VM checks)</option>
-                  <option value="standard">Standard Baseline</option>
-                </select>
-              </div>
+              {backendType === 'replay' ? (
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.3rem' }}>
+                    REPLAY SCENARIO FIXTURE
+                  </label>
+                  <select
+                    value={selectedScenario}
+                    onChange={(e) => setSelectedScenario(e.target.value)}
+                    style={{ width: '100%', padding: '0.6rem', background: '#0b1120', border: '1px solid #334155', borderRadius: '6px', color: '#f8fafc' }}
+                  >
+                    <option value="ransomware_wannacry_mock">WannaCry Ransomware Mock (Encryption Burst & vssadmin)</option>
+                    <option value="infostealer_redline_mock">RedLine Infostealer Mock (Vault Theft & HTTP C2)</option>
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.3rem' }}>
+                    ANALYSIS PROFILE
+                  </label>
+                  <select
+                    value={profile}
+                    onChange={(e) => setProfile(e.target.value)}
+                    style={{ width: '100%', padding: '0.6rem', background: '#0b1120', border: '1px solid #334155', borderRadius: '6px', color: '#f8fafc' }}
+                  >
+                    <option value="ransomware_focus">Ransomware Focus (Shadow copies, file mod burst)</option>
+                    <option value="infostealer_focus">Infostealer Focus (Credential vaults, HTTP gate)</option>
+                    <option value="evasion_focus">Evasion Focus (Sleep bypass, anti-VM checks)</option>
+                    <option value="standard">Standard Baseline</option>
+                  </select>
+                </div>
+              )}
             </div>
+
+            {backendType === 'cape' && (
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#f87171', marginBottom: '0.3rem' }}>
+                  OPERATOR SECURITY TOKEN (REQUIRED FOR LIVE DETONATION)
+                </label>
+                <input
+                  type="password"
+                  placeholder="Enter MALBOX_OPERATOR_TOKEN"
+                  value={operatorToken}
+                  onChange={(e) => setOperatorToken(e.target.value)}
+                  style={{ width: '100%', padding: '0.6rem', background: '#0b1120', border: '1px solid #7f1d1d', borderRadius: '6px', color: '#f8fafc' }}
+                />
+              </div>
+            )}
 
             <div style={{ marginBottom: '1.25rem' }}>
               <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.3rem' }}>
