@@ -1,24 +1,35 @@
 from typing import List, Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.models.analysis import Analysis, AnalysisStatus
 from app.models.sample import Sample
 from app.schemas.analysis import AnalysisCreate, AnalysisResponse, AnalysisDetailResponse
+from app.workers.pipeline_worker import PipelineWorker
 
 router = APIRouter()
+
+def run_worker_task(analysis_id: str):
+    db = SessionLocal()
+    try:
+        worker = PipelineWorker(db)
+        worker.execute_pipeline(analysis_id)
+    finally:
+        db.close()
 
 @router.post("/analyses", response_model=AnalysisResponse, status_code=status.HTTP_201_CREATED, tags=["Analyses"])
 def create_analysis(
     payload: AnalysisCreate,
+    background_tasks: BackgroundTasks,
+    run_sync: bool = Query(False, description="Run sequentially in current request for synchronous completion"),
     db: Session = Depends(get_db)
 ):
     """
     Initiates a new dynamic analysis workflow for an existing sample.
-    Validates execution mode, safety gates, and sets initial state machine status.
+    Validates execution mode, safety gates, and executes state machine.
     """
     sample = db.query(Sample).filter(Sample.id == payload.sample_id).first()
     if not sample:
@@ -49,6 +60,13 @@ def create_analysis(
     db.add(analysis)
     db.commit()
     db.refresh(analysis)
+
+    if run_sync:
+        worker = PipelineWorker(db)
+        analysis = worker.execute_pipeline(analysis.id)
+    else:
+        background_tasks.add_task(run_worker_task, analysis.id)
+
     return analysis
 
 @router.get("/analyses", response_model=List[AnalysisDetailResponse], tags=["Analyses"])

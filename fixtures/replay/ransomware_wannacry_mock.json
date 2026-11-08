@@ -1,0 +1,147 @@
+{
+  "fixture_version": "1.0",
+  "metadata": {
+    "sample_name": "wannacry_variant_sample.exe",
+    "threat_name": "Ransom.Win32.WannaCry.Mock",
+    "sha256": "ed01ebf83434a1694e73e14fc9aa0f6ce837299e9c408b4f6831d360627a64f9",
+    "family": "WannaCry",
+    "environment": {
+      "os": "Windows 10 Pro 64-bit Build 19045",
+      "sandbox_type": "ReplaySandbox",
+      "duration_seconds": 60
+    }
+  },
+  "processes": [
+    {
+      "pid": 1420,
+      "ppid": 1004,
+      "name": "wannacry_variant_sample.exe",
+      "command_line": "\"C:\\Users\\Victim\\Desktop\\wannacry_variant_sample.exe\"",
+      "start_time": "2026-11-08T12:00:01Z",
+      "end_time": "2026-11-08T12:00:59Z"
+    },
+    {
+      "pid": 2104,
+      "ppid": 1420,
+      "name": "cmd.exe",
+      "command_line": "cmd.exe /c vssadmin.exe delete shadows /all /quiet",
+      "start_time": "2026-11-08T12:00:03Z",
+      "end_time": "2026-11-08T12:00:05Z"
+    },
+    {
+      "pid": 3388,
+      "ppid": 2104,
+      "name": "vssadmin.exe",
+      "command_line": "vssadmin.exe delete shadows /all /quiet",
+      "start_time": "2026-11-08T12:00:04Z",
+      "end_time": "2026-11-08T12:00:05Z"
+    },
+    {
+      "pid": 4012,
+      "ppid": 1420,
+      "name": "tasksche.exe",
+      "command_line": "\"C:\\Windows\\tasksche.exe\" /run",
+      "start_time": "2026-11-08T12:00:08Z",
+      "end_time": "2026-11-08T12:00:58Z"
+    }
+  ],
+  "filesystem": [
+    {
+      "action": "write",
+      "pid": 1420,
+      "process_name": "wannacry_variant_sample.exe",
+      "path": "C:\\Windows\\tasksche.exe",
+      "timestamp": "2026-11-08T12:00:06Z",
+      "size_bytes": 351232,
+      "sha256": "84c82835a5d21bbcf75a61706d8ab549",
+      "is_dropped_binary": true
+    },
+    {
+      "action": "write",
+      "pid": 4012,
+      "process_name": "tasksche.exe",
+      "path": "C:\\Users\\Victim\\Documents\\quarterly_budget.xlsx.wnry",
+      "timestamp": "2026-11-08T12:00:15Z",
+      "size_bytes": 48200,
+      "is_encrypted_target": true
+    },
+    {
+      "action": "write",
+      "pid": 4012,
+      "process_name": "tasksche.exe",
+      "path": "C:\\Users\\Victim\\Documents\\project_confidential.docx.wnry",
+      "timestamp": "2026-11-08T12:00:18Z",
+      "size_bytes": 105400,
+      "is_encrypted_target": true
+    },
+    {
+      "action": "write",
+      "pid": 4012,
+      "process_name": "tasksche.exe",
+      "path": "C:\\Users\\Victim\\Desktop\\@Please_Read_Me@.txt",
+      "timestamp": "2026-11-08T12:00:20Z",
+      "size_bytes": 2100,
+      "is_ransom_note": true
+    }
+  ],
+  "registry": [
+    {
+      "action": "reg_write",
+      "pid": 1420,
+      "process_name": "wannacry_variant_sample.exe",
+      "key": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\WanaDecryptor",
+      "value_name": "WanaDecryptor",
+      "data": "\"C:\\Windows\\tasksche.exe\"",
+      "timestamp": "2026-11-08T12:00:07Z",
+      "persistence": true
+    }
+  ],
+  "network": {
+    "dns": [
+      {
+        "pid": 1420,
+        "process_name": "wannacry_variant_sample.exe",
+        "query": "www.iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea.com",
+        "record_type": "A",
+        "response": "0.0.0.0",
+        "timestamp": "2026-11-08T12:00:02Z"
+      }
+    ],
+    "connections": [
+      {
+        "pid": 1420,
+        "process_name": "wannacry_variant_sample.exe",
+        "protocol": "TCP",
+        "dest_ip": "192.168.1.105",
+        "dest_port": 445,
+        "timestamp": "2026-11-08T12:00:10Z"
+      },
+      {
+        "pid": 1420,
+        "process_name": "wannacry_variant_sample.exe",
+        "protocol": "TCP",
+        "dest_ip": "10.0.0.1",
+        "dest_port": 445,
+        "timestamp": "2026-11-08T12:00:12Z"
+      }
+    ],
+    "http": []
+  },
+  "artifacts": [
+    {
+      "name": "network_capture.pcap",
+      "type": "pcap",
+      "description": "Full packet capture of SMB scanning and DNS lookup"
+    },
+    {
+      "name": "ransom_desktop_screenshot.png",
+      "type": "screenshot",
+      "description": "Desktop screenshot showing ransom payment message"
+    },
+    {
+      "name": "dropped_tasksche.exe",
+      "type": "dropped_file",
+      "description": "Extracted secondary ransomware payload"
+    }
+  ]
+}

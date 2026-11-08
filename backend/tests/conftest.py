@@ -49,6 +49,8 @@ def client(db_session, monkeypatch):
 
     # Prevent lifespan from touching production DB during tests
     monkeypatch.setattr(app_main, "init_db", lambda: None)
+    monkeypatch.setattr("app.core.database.SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.api.v1.analyses.SessionLocal", TestingSessionLocal)
     app.dependency_overrides[get_db] = override_get_db
 
     with TestClient(app) as test_client:
