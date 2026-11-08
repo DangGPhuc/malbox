@@ -9,6 +9,9 @@ from app.services.sandbox.replay import ReplaySandboxBackend
 from app.services.telemetry.normalizer import TelemetryNormalizer
 from app.services.detection.engine import DetectionEngine
 from app.services.reporting.generator import ReportGenerator
+from app.services.orchestration.planner import AnalysisPlanner
+from app.services.orchestration.evaluator import ObservationEvaluator
+from app.ai.llm_client import get_llm_provider
 
 def update_status(analysis: Analysis, db: Session, new_status: AnalysisStatus) -> None:
     analysis.status = new_status.value
@@ -17,7 +20,8 @@ def update_status(analysis: Analysis, db: Session, new_status: AnalysisStatus) -
 
 class PipelineWorker:
     """
-    Sequential analysis execution worker managing the complete 10-step state machine.
+    Sequential analysis execution worker managing the complete 10-step state machine
+    with active AI orchestration and policy-checked controller actions.
     """
 
     def __init__(self, db: Session):
@@ -38,10 +42,10 @@ class PipelineWorker:
             if not sample:
                 raise FileNotFoundError("Associated sample does not exist.")
 
-            # 2. PLANNED
-            # In Phase 3, this invokes the AI Orchestration Planner.
-            # For Phase 2, generate structured baseline plan.
+            # 2. PLANNED (AI Planning + Policy Validation + Audit Log)
             update_status(analysis, self.db, AnalysisStatus.PLANNED)
+            planner = AnalysisPlanner(self.db)
+            plan, plan_validation = planner.create_and_validate_plan(analysis)
 
             # 3. QUEUED
             update_status(analysis, self.db, AnalysisStatus.QUEUED)
@@ -76,19 +80,50 @@ class PipelineWorker:
             normalizer = TelemetryNormalizer(self.db)
             normalizer.normalize_sandbox_output(analysis.id, raw_results)
 
-            # 7. CORRELATING
+            # 7. CORRELATING & AI OBSERVATION EVALUATION
             update_status(analysis, self.db, AnalysisStatus.CORRELATING)
-            # Correlation is evaluated dynamically by ProcessTree and Correlator queries
+            events = analysis.events or []
+            proc_events = [e for e in events if e.category == "process"]
+            net_events = [e for e in events if e.category in ["network", "dns", "http"]]
+            
+            evaluator = ObservationEvaluator(self.db)
+            telemetry_summary = {
+                "total_events": len(events),
+                "total_processes": len(proc_events),
+                "network_events_count": len(net_events),
+                "findings_count": len(analysis.findings or []),
+            }
+            follow_up, follow_up_validation = evaluator.evaluate_observations(analysis, telemetry_summary)
 
             # 8. SCORING
             update_status(analysis, self.db, AnalysisStatus.SCORING)
             detector = DetectionEngine(self.db)
             findings, risk_assessment = detector.evaluate_behavior(analysis.id)
 
-            # 9. REPORTING
+            # 9. REPORTING (AI Evidence Synthesis)
             update_status(analysis, self.db, AnalysisStatus.REPORTING)
+            llm = get_llm_provider()
+            ai_summary = llm.generate_executive_summary(
+                sample_metadata={
+                    "file_name": sample.file_name,
+                    "sha256": sample.sha256,
+                    "file_size": sample.file_size,
+                },
+                findings_summary={
+                    "score": risk_assessment.score,
+                    "level": risk_assessment.level,
+                    "finding_titles": [f.title for f in findings],
+                },
+                timeline=[],
+            )
+
             reporter = ReportGenerator(self.db)
-            reporter.generate_report(analysis.id, risk_assessment)
+            reporter.generate_report(
+                analysis.id,
+                risk_assessment,
+                ai_summary=ai_summary,
+                ai_follow_up=follow_up.model_dump(),
+            )
 
             # 10. COMPLETED
             update_status(analysis, self.db, AnalysisStatus.COMPLETED)

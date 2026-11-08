@@ -72,7 +72,7 @@ def test_full_replay_analysis_pipeline(client):
     report = report_res.json()
     assert report["risk_score"] >= 80
     assert report["risk_level"] == "Malicious"
-    assert "WannaCry" in report["executive_summary"] or "threat classification" in report["executive_summary"]
+    assert "wannacry" in report["executive_summary"].lower() or "threat" in report["executive_summary"].lower()
     assert len(report["full_report"]["extracted_iocs"]["domains"]) >= 1
 
     # 8. Verify HTML Report Export
