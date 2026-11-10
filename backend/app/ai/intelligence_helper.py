@@ -490,10 +490,11 @@ def run_bounded_llm_intelligence(
     base_url: str,
     timeout: float,
     rules_text: Optional[str] = None,
+    cancel_event: Optional[Any] = None,
 ) -> Tuple[IntelligenceReport, Dict[str, Any]]:
     """
     Executes a single bounded /chat/completions call (no shell/tool access) with strict schema
-    and evidence validation. Falls back cleanly to deterministic grounded intelligence on error.
+    and evidence validation. Enforces granular transport timeouts and cancellation checks.
     """
     validator = EvidenceValidator()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -522,7 +523,18 @@ def run_bounded_llm_intelligence(
     }
 
     try:
-        with httpx.Client(timeout=timeout) as client:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("LLM enrichment request cancelled prior to execution.")
+
+        t_val = max(0.5, float(timeout))
+        transport_timeout = httpx.Timeout(
+            t_val,
+            connect=min(5.0, t_val),
+            read=t_val,
+            write=min(10.0, t_val),
+            pool=min(5.0, t_val),
+        )
+        with httpx.Client(timeout=transport_timeout) as client:
             resp = client.post(
                 endpoint,
                 headers={
@@ -531,6 +543,8 @@ def run_bounded_llm_intelligence(
                 },
                 json=payload,
             )
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("LLM enrichment request cancelled after timeout.")
             resp.raise_for_status()
             data = resp.json()
 

@@ -33,7 +33,8 @@ class LLMProvider(ABC):
         self,
         bundle: "VerifiedEvidenceBundle",
         rules_text: "Optional[str]" = None,
+        cancel_event: "Optional[Any]" = None,
     ) -> "IntelligenceReport":
-        """Produces schema-validated, evidence-grounded Phase 2A intelligence report."""
+        """Produces schema-validated, evidence-grounded Phase 2A/2B intelligence report."""
         pass
 

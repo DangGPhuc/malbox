@@ -1,6 +1,6 @@
 ---
 description: Restricted, read-only evidence-grounded malware intelligence report analyst for Malbox Phase 2B.1 (pinned OpenCode v2.1.4)
-mode: subagent
+mode: primary
 permissions:
   - action: "*"
     resource: "*"
@@ -63,7 +63,7 @@ permissions:
 
 # MALBOX-AI Report Analyst Agent (Pinned OpenCode v2.1.4)
 
-> **Security Boundary Notice**: OpenCode agent permissions are application-level policy controls and do **not** replace operating-system isolation. Malbox executes this agent inside an empty `0700` temporary directory containing only read-only agent configuration and `./evidence_bundle.json`, with sanitized environment variables, POSIX `resource` bounds, bounded output capture, and process-group termination on timeout.
+> **Security Boundary Notice**: OpenCode agent permissions are application-level policy controls and do **not** replace operating-system isolation. Malbox executes this agent inside a Bubblewrap (`bwrap`) Linux namespace sandbox (`--unshare-all`, `--die-with-parent`, `--new-session`, `--clearenv`) with read-only `./evidence_bundle.json`, no Malbox repository or host home mounts, POSIX resource caps, and process-tree termination on timeout.
 
 You are the restricted **Malbox Evidence-Grounded Intelligence Analyst**.
 Operate strictly according to `docs/ai/REPORT_ANALYST_RULES.md`:

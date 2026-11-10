@@ -1,10 +1,9 @@
 import hashlib
 import hmac
 import json
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from contextlib import contextmanager
+import threading
 from copy import deepcopy
-from typing import Iterator, Literal, Optional
+from typing import Literal, Optional
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict
@@ -12,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.ai.llm_client import get_reporting_llm_provider
 from app.ai.mock_provider import MockLLMProvider
-from app.ai.opencode_provider import OpenCodeReportProvider, check_posix_isolation_support
+from app.ai.opencode_provider import OpenCodeReportProvider
+from app.ai.opencode_sandbox import check_os_sandbox_support, parse_approved_provider_target
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import redact_sensitive_text
@@ -26,6 +26,7 @@ from app.services.intelligence.bundle_builder import (
 from app.services.intelligence.enrichment_guard import (
     AnalysisEnrichmentConflictError,
     ConcurrencyLimitError,
+    EnrichmentTimeoutError,
     RateLimitExceededError,
     enrichment_coordinator,
 )
@@ -116,9 +117,9 @@ def generate_report_intelligence(
     db: Session = Depends(get_db),
 ):
     """
-    Authorized, rate-limited, consent-gated endpoint to regenerate or enrich
+    Authorized, rate-limited, consent-gated, cancellable endpoint to regenerate or enrich
     Phase 2A/2B evidence-grounded intelligence on an existing analysis report.
-    Preserves the last known-good persisted report on any provider/validation failure.
+    Preserves the last known-good persisted report on any timeout or provider failure.
     """
     # 1. Explicit dedicated reporting authorization (fail-closed; never reuses CAPE OPERATOR_TOKEN)
     if not settings.REPORTING_AUTH_TOKEN:
@@ -142,7 +143,7 @@ def generate_report_intelligence(
     else:
         target_mode = requested_mode
 
-    # 2. Enforce explicit consent & fail-closed configuration before grabbing worker resources
+    # 2. Enforce explicit consent & fail-closed configuration before reserving worker resources
     if target_mode in ("llm", "opencode"):
         if not settings.REPORTING_EXTERNAL_AI_CONSENT or not req.external_transmission_consent:
             raise HTTPException(
@@ -165,21 +166,91 @@ def generate_report_intelligence(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="OpenCode reporting adapter is disabled by server configuration (MALBOX_OPENCODE_ENABLED=false).",
                 )
-            iso_ok, iso_reason = check_posix_isolation_support()
-            if not iso_ok:
+            sb_ok, _, sb_reason = check_os_sandbox_support(settings.OPENCODE_SANDBOX_BIN)
+            if not sb_ok:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"OpenCode isolation boundary unavailable: {iso_reason}",
+                    detail=f"OpenCode OS namespace sandbox unavailable: {sb_reason}",
                 )
             if not OpenCodeReportProvider._resolve_binary(settings.OPENCODE_BIN):
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="OpenCode CLI executable is not available on this host.",
                 )
+            if settings.OPENCODE_ALLOW_NETWORK:
+                try:
+                    parse_approved_provider_target(
+                        settings.OPENCODE_ALLOWED_PROVIDER_URL or settings.AI_BASE_URL
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Invalid approved provider target configuration: {exc}",
+                    ) from exc
 
-    # 3. Rate limiting, bounded concurrency, and per-analysis lock
+    # 3. Validate analysis/report existence and snapshot baseline before grabbing executor slot
+    # Keep fast 404 accurate, yet check rate-limit/lock consistently inside coordinator
+    analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+    if not analysis:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis task not found.")
+
+    report_record = db.query(AnalysisReport).filter(AnalysisReport.analysis_id == analysis_id).first()
+    if not report_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report has not been generated yet.",
+        )
+
+    baseline_digest = _report_digest(report_record.full_report_json)
+    updated_json = deepcopy(report_record.full_report_json or {})
+    raw_risk = updated_json.get("risk_assessment") or {
+        "score": report_record.risk_score,
+        "level": report_record.risk_level,
+    }
+    risk_assessment = RiskAssessment.model_validate(raw_risk)
+    env_meta = updated_json.get("analysis_environment") or {}
+
     try:
-        enrichment_coordinator.acquire_slot(analysis_id)
+        bundle = EvidenceBundleBuilder(db).build(
+            analysis_id=analysis_id,
+            risk_assessment=risk_assessment,
+            env_metadata=env_meta if isinstance(env_meta, dict) else {},
+        )
+    except BundleSizeLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=redact_sensitive_text(str(exc), extra_secrets=_collect_reporting_secrets()),
+        ) from exc
+
+    timeout_budget = max(0.2, float(settings.REPORTING_ENRICHMENT_TIMEOUT_SECONDS))
+    if target_mode == "deterministic":
+        provider = MockLLMProvider()
+    elif target_mode == "opencode":
+        provider = OpenCodeReportProvider(timeout=min(timeout_budget, float(settings.OPENCODE_TIMEOUT_SECONDS)))
+    else:
+        provider = get_reporting_llm_provider(force_external=True, requested_mode="llm")
+        if hasattr(provider, "timeout"):
+            provider.timeout = min(timeout_budget, float(getattr(provider, "timeout", timeout_budget)))
+
+    observed_cancel_flag = {"cancelled": False}
+
+    def _run_job(cancel_event: threading.Event):
+        if cancel_event.is_set():
+            raise EnrichmentTimeoutError("Enrichment cancelled before start.")
+        try:
+            res = provider.generate_intelligence_report(bundle, cancel_event=cancel_event)
+        finally:
+            if cancel_event.is_set():
+                observed_cancel_flag["cancelled"] = True
+        return res
+
+    # 4. Run on bounded shared executor; slot remains held until worker finishes cleanly
+    try:
+        intelligence_report = enrichment_coordinator.execute_cancellable(
+            analysis_id=analysis_id,
+            timeout_seconds=timeout_budget,
+            fn=_run_job,
+        )
     except RateLimitExceededError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -196,131 +267,82 @@ def generate_report_intelligence(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-
-    @contextmanager
-    def _release_on_exit() -> Iterator[None]:
-        try:
-            yield
-        finally:
-            enrichment_coordinator.release_slot(analysis_id)
-
-    with _release_on_exit():
-        analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
-        if not analysis:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis task not found.")
-
-        report_record = db.query(AnalysisReport).filter(AnalysisReport.analysis_id == analysis_id).first()
-        if not report_record:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Report has not been generated yet.",
-            )
-
-        baseline_digest = _report_digest(report_record.full_report_json)
-        updated_json = deepcopy(report_record.full_report_json or {})
-        raw_risk = updated_json.get("risk_assessment") or {
-            "score": report_record.risk_score,
-            "level": report_record.risk_level,
-        }
-        risk_assessment = RiskAssessment.model_validate(raw_risk)
-        env_meta = updated_json.get("analysis_environment") or {}
-
-        try:
-            bundle = EvidenceBundleBuilder(db).build(
-                analysis_id=analysis_id,
-                risk_assessment=risk_assessment,
-                env_metadata=env_meta if isinstance(env_meta, dict) else {},
-            )
-        except BundleSizeLimitError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=redact_sensitive_text(str(exc), extra_secrets=_collect_reporting_secrets()),
-            ) from exc
-
-        if target_mode == "deterministic":
-            provider = MockLLMProvider()
-        elif target_mode == "opencode":
-            provider = OpenCodeReportProvider()
-        else:
-            provider = get_reporting_llm_provider(force_external=True, requested_mode="llm")
-
-        timeout_budget = max(1.0, float(settings.REPORTING_ENRICHMENT_TIMEOUT_SECONDS))
-        executor = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = executor.submit(provider.generate_intelligence_report, bundle)
-            intelligence_report = future.result(timeout=timeout_budget)
-        except FuturesTimeoutError as exc:
-            future.cancel()
-            db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=(
-                    f"Reporting enrichment timed out after {timeout_budget:.0f}s; "
-                    "previous report preserved."
-                ),
-            ) from exc
-        except Exception as exc:
-            db.rollback()
-            safe_err = redact_sensitive_text(
-                f"{type(exc).__name__}: {str(exc)}",
-                extra_secrets=_collect_reporting_secrets(),
-                max_chars=180,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Reporting enrichment failed ({safe_err}); previous report preserved.",
-            ) from exc
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
-
-        # Preserve last known-good report when an explicit external enrichment attempt failed/fell back
-        if target_mode in ("llm", "opencode") and intelligence_report.provider_metadata.fallback_used:
-            db.rollback()
-            safe_reason = redact_sensitive_text(
-                intelligence_report.provider_metadata.fallback_reason or "External provider error",
-                extra_secrets=_collect_reporting_secrets(),
-                max_chars=180,
-            )
-            is_timeout = "timeout" in safe_reason.lower() or "timed out" in safe_reason.lower()
-            raise HTTPException(
-                status_code=(
-                    status.HTTP_504_GATEWAY_TIMEOUT if is_timeout else status.HTTP_502_BAD_GATEWAY
-                ),
-                detail=(
-                    f"External '{target_mode}' enrichment failed ({safe_reason}); "
-                    "previous known-good report preserved."
-                ),
-            )
-
-        # Stale-write protection: verify report row was not updated concurrently
-        db.expire(report_record)
-        latest_record = (
-            db.query(AnalysisReport).filter(AnalysisReport.analysis_id == analysis_id).first()
+    except EnrichmentTimeoutError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=(
+                f"Reporting enrichment timed out after {timeout_budget:.1f}s; "
+                "previous report preserved."
+            ),
+        ) from exc
+    except Exception as exc:
+        db.rollback()
+        safe_err = redact_sensitive_text(
+            f"{type(exc).__name__}: {str(exc)}",
+            extra_secrets=_collect_reporting_secrets(),
+            max_chars=180,
         )
-        if not latest_record or _report_digest(latest_record.full_report_json) != baseline_digest:
-            db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Stale write detected: report changed concurrently; update aborted.",
-            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Reporting enrichment failed ({safe_err}); previous report preserved.",
+        ) from exc
 
-        updated_json["intelligence_report"] = intelligence_report.model_dump()
-        updated_json["executive_summary"] = intelligence_report.executive_assessment
-
-        latest_record.executive_summary = intelligence_report.executive_assessment
-        latest_record.full_report_json = updated_json
-        db.commit()
-        db.refresh(latest_record)
-
-        return ReportResponse(
-            id=latest_record.id,
-            analysis_id=latest_record.analysis_id,
-            executive_summary=latest_record.executive_summary,
-            risk_score=latest_record.risk_score,
-            risk_level=latest_record.risk_level,
-            backend_type=analysis.backend_type,
-            is_replay=(analysis.backend_type == "replay"),
-            replay_scenario_id=analysis.replay_scenario_id,
-            full_report=latest_record.full_report_json,
-            created_at=latest_record.created_at,
+    if observed_cancel_flag["cancelled"]:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Reporting enrichment was cancelled due to timeout; previous report preserved.",
         )
+
+    # Preserve last known-good report when an explicit external enrichment attempt failed/fell back
+    if target_mode in ("llm", "opencode") and intelligence_report.provider_metadata.fallback_used:
+        db.rollback()
+        safe_reason = redact_sensitive_text(
+            intelligence_report.provider_metadata.fallback_reason or "External provider error",
+            extra_secrets=_collect_reporting_secrets(),
+            max_chars=180,
+        )
+        is_timeout = "timeout" in safe_reason.lower() or "timed out" in safe_reason.lower()
+        raise HTTPException(
+            status_code=(
+                status.HTTP_504_GATEWAY_TIMEOUT if is_timeout else status.HTTP_502_BAD_GATEWAY
+            ),
+            detail=(
+                f"External '{target_mode}' enrichment failed ({safe_reason}); "
+                "previous known-good report preserved."
+            ),
+        )
+
+    # Stale-write protection: verify report row was not updated concurrently
+    db.expire(report_record)
+    latest_record = (
+        db.query(AnalysisReport).filter(AnalysisReport.analysis_id == analysis_id).first()
+    )
+    if not latest_record or _report_digest(latest_record.full_report_json) != baseline_digest:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Stale write detected: report changed concurrently; update aborted.",
+        )
+
+    updated_json["intelligence_report"] = intelligence_report.model_dump()
+    updated_json["executive_summary"] = intelligence_report.executive_assessment
+
+    latest_record.executive_summary = intelligence_report.executive_assessment
+    latest_record.full_report_json = updated_json
+    db.commit()
+    db.refresh(latest_record)
+
+    return ReportResponse(
+        id=latest_record.id,
+        analysis_id=latest_record.analysis_id,
+        executive_summary=latest_record.executive_summary,
+        risk_score=latest_record.risk_score,
+        risk_level=latest_record.risk_level,
+        backend_type=analysis.backend_type,
+        is_replay=(analysis.backend_type == "replay"),
+        replay_scenario_id=analysis.replay_scenario_id,
+        full_report=latest_record.full_report_json,
+        created_at=latest_record.created_at,
+    )

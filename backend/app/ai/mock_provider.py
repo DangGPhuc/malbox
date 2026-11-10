@@ -137,6 +137,7 @@ class MockLLMProvider(LLMProvider):
         self,
         bundle: "VerifiedEvidenceBundle",
         rules_text: "Optional[str]" = None,
+        cancel_event: "Optional[Any]" = None,
     ) -> "IntelligenceReport":
         from datetime import datetime, timezone
         from app.ai.intelligence_helper import build_deterministic_proposed_intelligence

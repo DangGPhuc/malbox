@@ -64,14 +64,20 @@ class Settings(BaseSettings):
     REPORTING_MAX_CONCURRENT_JOBS: int = 2
     REPORTING_ENRICHMENT_TIMEOUT_SECONDS: float = 35.0
 
-    # OpenCode Restricted Reporting Adapter (Disabled & opt-in by default)
+    # OpenCode Restricted Reporting Adapter (Disabled & opt-in by default; requires bwrap OS sandbox)
     OPENCODE_ENABLED: bool = False
     OPENCODE_BIN: str = "opencode"
+    OPENCODE_SANDBOX_BIN: str = "bwrap"
     OPENCODE_AGENT_NAME: str = "report-analyst"
     OPENCODE_MODEL: str = ""
+    OPENCODE_ALLOW_NETWORK: bool = False
+    OPENCODE_ALLOWED_PROVIDER_URL: str = ""
     OPENCODE_TIMEOUT_SECONDS: float = 30.0
     OPENCODE_MAX_OUTPUT_BYTES: int = 262144
     OPENCODE_MAX_CPU_SECONDS: int = 25
+    OPENCODE_MAX_MEMORY_MB: int = 2048
+    OPENCODE_MAX_DATA_MB: int = 512
+    OPENCODE_MAX_SANDBOX_TMPFS_BYTES: int = 16777216
     OPENCODE_PROVIDER_API_KEY: str = ""
     OPENCODE_PROVIDER_ENV_NAME: str = "OPENAI_API_KEY"
 

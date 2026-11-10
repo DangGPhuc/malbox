@@ -9,7 +9,7 @@ Phase 2A and Phase 2B.1 replace ungrounded reporting with a deterministic, acces
 3. **Provenance Integrity (Replay vs. Live)**: Replay Mode runs explicitly distinguish static triage of the uploaded sample from synthetic telemetry derived from a registered replay fixture (`is_replay=True`, `replay_scenario_id`). Mock placeholder artifacts (stub `.pcap`, 1x1 `.png`, mock text files) are labeled `is_synthetic=True`.
 4. **Offline-First & Hardened Opt-In External Providers**:
    - `AI_REPORTING_MODE` defaults to `"opt_in"`, keeping uploads, Replay Mode, and `GET` report endpoints strictly offline using deterministic `MockLLMProvider` intelligence.
-   - External enrichment (`"llm"` direct `/chat/completions` or `"opencode"` isolated CLI adapter) requires BOTH dedicated reporting authorization (`X-Reporting-Token` matching `MALBOX_REPORTING_AUTH_TOKEN`, never reusing CAPE `OPERATOR_TOKEN`) AND explicit server/request operator consent (`MALBOX_REPORTING_EXTERNAL_AI_CONSENT=true` + `external_transmission_consent=true`).
+   - External enrichment (`"llm"` direct `/chat/completions` or `"opencode"` Bubblewrap-isolated CLI adapter) requires BOTH dedicated reporting authorization (`X-Reporting-Token` matching `MALBOX_REPORTING_AUTH_TOKEN`, never reusing CAPE `OPERATOR_TOKEN`) AND explicit server/request operator consent (`MALBOX_REPORTING_EXTERNAL_AI_CONSENT=true` + `external_transmission_consent=true`).
 5. **Conservative Semantic Validation**: `EvidenceValidator` verifies citation existence, cited source type, entity/category consistency against cited records, programmatic `FACT` grounding, human-review flags on `INFERENCE` claims, mandatory uncertainty on `HYPOTHESIS` claims, and static disassembly guardrails (`StaticAnalysisPlaceholder`, `status="not_available"`).
 
 ---
@@ -29,8 +29,8 @@ EvidenceBundleBuilder (backend/app/services/intelligence/bundle_builder.py)
 VerifiedEvidenceBundle (backend/app/schemas/intelligence.py)
    │
    ├─── opt_in / deterministic ──────▶ MockLLMProvider.generate_intelligence_report()
-   ├─── mode="llm" (consented) ──────▶ RealLLMProvider.generate_intelligence_report() (single bounded HTTP POST)
-   └─── mode="opencode" (consented) ─▶ OpenCodeReportProvider.generate_intelligence_report() (isolated temp dir)
+   ├─── mode="llm" (consented) ──────▶ RealLLMProvider.generate_intelligence_report() (cancellable httpx timeout)
+   └─── mode="opencode" (consented) ─▶ OpenCodeReportProvider.generate_intelligence_report() (bwrap + cancel_event)
                                           │
                                           ▼
                                EvidenceValidator.validate_and_finalize()
@@ -49,9 +49,13 @@ IntelligenceReport (schema_version="2.0") ──▶ FullReportSchema.intelligenc
 ## 3. Hardened Enrichment Endpoint (`POST /api/v1/analyses/{analysis_id}/report/intelligence`)
 
 - **Authorization**: Dedicated header `X-Reporting-Token` checked via constant-time `hmac.compare_digest` against `MALBOX_REPORTING_AUTH_TOKEN`. Fails closed (`403`) if unconfigured and `401` if invalid/missing or if `X-Operator-Token` is substituted.
-- **Consent Gate**: External providers (`llm`, `opencode`) fail closed (`403`) unless both `MALBOX_REPORTING_EXTERNAL_AI_CONSENT=true` and `external_transmission_consent=true`.
-- **Resource & Concurrency Protection** ([`enrichment_guard.py`](file:///home/kali/Documents/malbox/backend/app/services/intelligence/enrichment_guard.py)):
+- **Consent & Sandbox Preflight**:
+  - External providers (`llm`, `opencode`) fail closed (`403`) unless both `MALBOX_REPORTING_EXTERNAL_AI_CONSENT=true` and `external_transmission_consent=true`.
+  - When `provider_mode="opencode"` is requested, the endpoint validates `OPENCODE_ENABLED`, `check_os_sandbox_support()`, and (when network egress is requested) `parse_approved_provider_target()` before dispatching work.
+- **Shared Bounded Executor, True Concurrency Accounting & Cancellation** ([`enrichment_guard.py`](file:///home/kali/Documents/malbox/backend/app/services/intelligence/enrichment_guard.py)):
+  - Reuses a single shared bounded `ThreadPoolExecutor` (`max_workers=REPORTING_MAX_CONCURRENT_JOBS`) rather than spawning an executor per request.
   - Sliding-window rate limit (`REPORTING_RATE_LIMIT_REQUESTS` / `REPORTING_RATE_LIMIT_WINDOW_SECONDS` -> `429` with `Retry-After`).
-  - Global concurrent cap (`REPORTING_MAX_CONCURRENT_JOBS` -> `429`).
-  - Per-analysis mutual exclusion (`409`) and optimistic digest stale-write check before commit (`409`).
-- **Preservation on Failure & Redaction**: Wall-clock timeout (`REPORTING_ENRICHMENT_TIMEOUT_SECONDS`), external fallback failures, or provider exceptions roll back cleanly without overwriting the last known-good persisted `AnalysisReport`, and `redact_sensitive_text()` strips tokens, auth headers, keys, and local paths before returning errors.
+  - Concurrency slots (`_active_count`) and per-analysis locks (`_active_analyses`) are held until the worker callable actually exits its `finally` block — **never** released early on HTTP timeout, preventing parallel bypasses during wind-down.
+  - On `REPORTING_ENRICHMENT_TIMEOUT_SECONDS`, `cancel_event.set()` propagates into `OpenCodeReportProvider` (immediate `os.killpg`) and `RealLLMProvider` (clamped `httpx.Timeout` + pre/post response cancel fence), blocking any stale post-timeout database writes (`cancel_event.is_set()` check + optimistic report digest verification -> `409`).
+  - **Worker Process Scope**: Limits, locks, and the coordinator's thread pool operate in-process; under single-worker Uvicorn (`--workers 1`, default VM/local setup) they enforce global caps, whereas multi-worker deployments (`workers > 1`) enforce caps per worker process.
+- **Preservation on Failure & Redaction**: Wall-clock timeout, external fallback failure, or provider exception rolls back cleanly without overwriting the last known-good persisted `AnalysisReport`, and `redact_sensitive_text()` strips tokens, auth headers, keys, and local paths before returning errors.

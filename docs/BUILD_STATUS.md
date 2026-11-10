@@ -1,9 +1,9 @@
 # malbox-ai — Build Status & Verification Ledger
 
 **Project Codename:** `malbox-ai`  
-**Architecture Version:** 0.2.1-alpha (Phase 2B.1)  
-**Active Branch:** `feat/phase2b-opencode-reporting`  
-**Status:** **OPERATIONAL — PHASE 2B.1 SECURE REPORTING & RESTRICTED OPENCODE ADAPTER VERIFIED**
+**Architecture Version:** 0.2.1-alpha (Phase 2B.1 Hardened)  
+**Active Branch:** `fix/phase2b-opencode-safety`  
+**Status:** **OPERATIONAL — PHASE 2B.1 FINAL SAFETY & RUNTIME HARDENING VERIFIED**
 
 ---
 
@@ -19,8 +19,8 @@
 | **Deterministic Rule Engine** | **VERIFIED** | `test_detection_rules.py` | Contextual thresholds (T1490, T1486, T1547.001, T1059.001, T1555.003, T1071.001, T1046); negative regression tests for lone ransom note and normal HTTP POST. |
 | **Cytoscape.js Behavior Graph**| **VERIFIED** | `test_telemetry_integrity.py` | Unique process-instance identity (`proc_{ev.id}`), temporal PID reuse resolution, unattributed network activity isolated to `node_unattributed_network`, 100% grounded edges. |
 | **Evidence Provenance & Reporting**| **VERIFIED** | `test_telemetry_integrity.py`, `test_intelligence_engine.py`, `export_html.py` | Non-fabricated environment metadata, explicit Replay provenance, synthetic mock artifact labeling (`is_synthetic`), XSS-safe HTML export with strict CSP. |
-| **Evidence-Grounded AI Intelligence (v2.0)** | **VERIFIED** | `test_intelligence_engine.py`, `test_opencode_and_hardening.py`, `docs/architecture/intelligence-v2.md` | DB-bounded `VerifiedEvidenceBundle` with hard byte limit (`BundleSizeLimitError`), semantic claim/entity/category validation (`DETERMINISTIC_FACT`, `ANALYST_INFERENCE`, `UNCERTAIN_HYPOTHESIS`), dedicated `X-Reporting-Token` authorization, rate/concurrency/stale-write guards, and secret/path redaction. |
-| **Restricted OpenCode Adapter (v2.1.4)** | **VERIFIED** | `test_opencode_and_hardening.py`, `docs/ai/OPENCODE_INTEGRATION.md`, `.opencode/agents/report-analyst.md` | Optional, disabled-by-default adapter with explicit consent gates, `0700` isolated temp workspace, stripped env, POSIX rlimits, bounded JSONL capture, PGID killpg timeout cleanup, and truthful deterministic fallback. |
+| **Evidence-Grounded AI Intelligence (v2.0)** | **VERIFIED** | `test_intelligence_engine.py`, `test_opencode_and_hardening.py`, `docs/architecture/intelligence-v2.md` | DB-bounded `VerifiedEvidenceBundle` with hard byte limit (`BundleSizeLimitError`), semantic claim/entity/category validation (`DETERMINISTIC_FACT`, `ANALYST_INFERENCE`, `UNCERTAIN_HYPOTHESIS`), dedicated `X-Reporting-Token` authorization, shared bounded `EnrichmentCoordinator` with timeout cancellation & true slot retention, stale-write fencing, and secret/path redaction. |
+| **Restricted OpenCode Adapter (v2.1.4)** | **VERIFIED** | `test_opencode_and_hardening.py`, `docs/ai/OPENCODE_INTEGRATION.md`, `.opencode/agents/report-analyst.md` | Optional, disabled-by-default `mode: primary` adapter with disabled privileged built-in agents, mandatory Bubblewrap (`bwrap`) Linux namespace isolation (`--unshare-all`, `--cap-drop ALL`, `--clearenv`, RO mounts, bounded tmpfs, `ApprovedProviderProxy` Unix socket egress allowlist), dynamic CLI version verification, POSIX rlimits, JSONL stream guards, `killpg` cancellation, and truthful deterministic fallback. |
 | **Doctor & Bootstrap CLI** | **VERIFIED** | `test_doctor_cli.py` | Idempotent `./malbox doctor/start/stop/status`, strong OS PID/PGID ownership verification, 0600 `.env` & 0700 `.malbox` permissions, offline Replay setup. |
 | **Web User Interface** | **VERIFIED** | React 18 + TypeScript + Vite (`npm run build`) | Real-time interval polling, Replay scenario selection, Operator token gate, Cytoscape graph visualizer, backward-compatible report rendering. Upgraded esbuild dependency to resolve GHSA-67mh-4wv8-2f99. |
 | **Live CAPE Sandbox Backend** | **PARTIAL** | `test_cape_adapter.py` | Fully implemented and unit-tested adapter with readiness checks, task polling, report transformation, and cancellation. Real hypervisor execution remains disabled by policy. |
@@ -31,8 +31,8 @@
 ## 2. Test Execution Outcomes
 
 - **Test Framework:** `pytest` 9.2.0 with `pytest-asyncio` & `starlette.testclient`
-- **Total Test Cases:** 90
-- **Passed:** 90 (100%)
+- **Total Test Cases:** 93
+- **Passed:** 93 (100%)
 - **Failed:** 0
 
 ### Test Breakdown by Subsystem
@@ -42,7 +42,7 @@
 4. `backend/tests/test_doctor_cli.py`: (11/11 PASSED)
 5. `backend/tests/test_health.py`: (2/2 PASSED)
 6. `backend/tests/test_intelligence_engine.py`: (13/13 PASSED)
-7. `backend/tests/test_opencode_and_hardening.py`: (10/10 PASSED)
+7. `backend/tests/test_opencode_and_hardening.py`: (13/13 PASSED)
 8. `backend/tests/test_pe_parser.py`: (5/5 PASSED)
 9. `backend/tests/test_real_ai_provider.py`: (6/6 PASSED)
 10. `backend/tests/test_replay_pipeline.py`: (5/5 PASSED)

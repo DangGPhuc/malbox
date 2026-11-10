@@ -487,6 +487,7 @@ def test_opencode_agent_spec_and_disabled_or_missing_cli_fallbacks():
     assert spec_path.is_file()
     content = spec_path.read_text(encoding="utf-8")
     assert TESTED_OPENCODE_VERSION in content
+    assert "mode: primary" in content
     assert "shell" in content and "deny" in content
     assert "edit" in content
     assert "external_directory" in content
@@ -557,10 +558,26 @@ def test_opencode_isolation_env_permissions_and_jsonl_success(client, db_session
     fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     os.chmod(fake_bin, 0o755)
 
+    fake_bwrap = Path(settings.DATA_DIR) / "fake_bwrap"
+    fake_bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(fake_bwrap, 0o755)
+    monkeypatch.setattr(
+        "app.ai.opencode_provider.check_os_sandbox_support",
+        lambda bwrap_bin="bwrap": (True, str(fake_bwrap), None),
+    )
+
     captured = {}
 
     class FakePopen:
         def __init__(self, cmd, **kwargs):
+            self.pid = 999999
+            self.returncode = 0
+            if "--version" in cmd:
+                captured["version_cmd"] = cmd
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+                self.stderr = io.BytesIO(b"")
+                return
+
             captured["cmd"] = cmd
             captured["kwargs"] = kwargs
             captured["env"] = dict(kwargs.get("env") or {})
@@ -571,8 +588,6 @@ def test_opencode_isolation_env_permissions_and_jsonl_success(client, db_session
             captured["bundle_text"] = (cwd / "evidence_bundle.json").read_text(encoding="utf-8")
             captured["oc_json"] = json.loads((cwd / "opencode.json").read_text(encoding="utf-8"))
             captured["agent_exists"] = (cwd / ".opencode" / "agents" / "report-analyst.md").is_file()
-            self.pid = 999999
-            self.returncode = 0
             jsonl = "\n".join(
                 [
                     json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
@@ -601,6 +616,7 @@ def test_opencode_isolation_env_permissions_and_jsonl_success(client, db_session
         enabled=True,
         external_consent=True,
         binary=str(fake_bin),
+        sandbox_binary=str(fake_bwrap),
         model="openai/gpt-4o-mini",
     )
     res = provider.generate_intelligence_report(bundle)
@@ -611,8 +627,20 @@ def test_opencode_isolation_env_permissions_and_jsonl_success(client, db_session
     assert res.provider_metadata.fallback_used is False
     assert res.is_replay is True
     assert res.validation_summary.passed is True
+    assert provider.last_call_meta["cli_version"] == "2.1.4"
+    assert provider.last_call_meta["os_sandbox"] == "bwrap"
 
-    # Verify strict isolation invariants
+    # Verify strict bwrap + OS isolation invariants
+    cmd = captured["cmd"]
+    assert cmd[0] == str(fake_bwrap)
+    assert "--unshare-all" in cmd
+    assert "--die-with-parent" in cmd
+    assert "--new-session" in cmd
+    assert "--cap-drop" in cmd and "ALL" in cmd
+    assert "--clearenv" in cmd
+    assert "/sandbox/evidence_bundle.json" in cmd
+    assert str(Path(settings.WORKSPACE_ROOT).resolve()) not in cmd
+    assert str(Path(settings.QUARANTINE_DIR).resolve()) not in cmd
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["start_new_session"] is True
     assert captured["cwd"] != Path(settings.WORKSPACE_ROOT).resolve()
@@ -624,25 +652,30 @@ def test_opencode_isolation_env_permissions_and_jsonl_success(client, db_session
     assert "RAW_SECRET_SAMPLE_" not in captured["bundle_text"]
     assert captured["agent_exists"] is True
 
-    # Verify opencode.json locked down all dangerous actions
+    # Verify opencode.json locked down all dangerous actions & disabled privileged built-in agents
     perms = {(p["action"], p["effect"]) for p in captured["oc_json"]["permissions"]}
     for forbidden_act in ("*", "shell", "bash", "edit", "external_directory", "webfetch", "subagent"):
         assert (forbidden_act, "deny") in perms
+    assert captured["oc_json"]["default_agent"] == "report-analyst"
+    assert captured["oc_json"]["agent"]["build"]["disable"] is True
+    assert captured["oc_json"]["agent"]["plan"]["disable"] is True
 
-    # Verify zero sensitive env variable leakage
-    assert "MALBOX_OPERATOR_TOKEN" not in captured["env"]
-    assert "AWS_SECRET_ACCESS_KEY" not in captured["env"]
-    assert "REPORTING_AUTH_TOKEN" not in captured["env"]
-    assert captured["env"]["HOME"] == str(captured["cwd"])
+    # Verify zero sensitive env variable leakage inside host Popen OR bwrap --setenv pairs
+    assert captured["env"] == {}
+    cmd_str = " ".join(cmd)
+    assert "leak-op-token" not in cmd_str
+    assert "leak-aws-secret" not in cmd_str
+    assert "leak-rep-token" not in cmd_str
+    assert "HOME" in cmd and "/sandbox" in cmd
 
-    # OS isolation check fails closed cleanly when unavailable
+    # OS sandbox unavailable fails closed cleanly without breaking Replay/mock reporting
     monkeypatch.setattr(
-        "app.ai.opencode_provider.check_posix_isolation_support",
-        lambda: (False, "POSIX OS isolation primitives are unavailable."),
+        "app.ai.opencode_provider.check_os_sandbox_support",
+        lambda bwrap_bin="bwrap": (False, None, "Bubblewrap namespace isolation unavailable."),
     )
-    res_win = provider.generate_intelligence_report(bundle)
-    assert res_win.provider_metadata.provider == "mock_fallback"
-    assert res_win.provider_metadata.fallback_used is True
+    res_nosb = provider.generate_intelligence_report(bundle)
+    assert res_nosb.provider_metadata.provider == "mock_fallback"
+    assert res_nosb.provider_metadata.fallback_used is True
 
 
 def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
@@ -657,6 +690,14 @@ def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
     fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     os.chmod(fake_bin, 0o755)
 
+    fake_bwrap = Path(settings.DATA_DIR) / "fake_bwrap_err"
+    fake_bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(fake_bwrap, 0o755)
+    monkeypatch.setattr(
+        "app.ai.opencode_provider.check_os_sandbox_support",
+        lambda bwrap_bin="bwrap": (True, str(fake_bwrap), None),
+    )
+
     killed_pids = []
     monkeypatch.setattr("app.ai.opencode_provider.os.getpgid", lambda pid: pid)
     monkeypatch.setattr(
@@ -669,7 +710,10 @@ def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
         def __init__(self, cmd, **kwargs):
             self.pid = 111
             self.returncode = 0
-            self.stdout = io.BytesIO(b"not-json-at-all\n")
+            if "--version" in cmd:
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+            else:
+                self.stdout = io.BytesIO(b"not-json-at-all\n")
             self.stderr = io.BytesIO(b"")
 
         def wait(self, timeout=None):
@@ -679,7 +723,9 @@ def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
             return 0
 
     monkeypatch.setattr("app.ai.opencode_provider.subprocess.Popen", MalformedPopen)
-    prov = OpenCodeReportProvider(enabled=True, external_consent=True, binary=str(fake_bin))
+    prov = OpenCodeReportProvider(
+        enabled=True, external_consent=True, binary=str(fake_bin), sandbox_binary=str(fake_bwrap)
+    )
     res_mal = prov.generate_intelligence_report(bundle)
     assert res_mal.provider_metadata.provider == "mock_fallback"
     assert res_mal.provider_metadata.fallback_used is True
@@ -689,13 +735,18 @@ def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
         def __init__(self, cmd, **kwargs):
             self.pid = 222
             self.returncode = 0
-            stream = "\n".join(
-                [
-                    json.dumps({"type": "tool_use", "part": {"tool": "bash"}}),
-                    json.dumps({"type": "text", "part": {"text": "{}"}}),
-                ]
-            ).encode("utf-8")
-            self.stdout = io.BytesIO(stream)
+            if "--version" in cmd:
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+            else:
+                stream = "\n".join(
+                    [
+                        json.dumps({"type": "step_start"}),
+                        json.dumps({"type": "tool_use", "part": {"tool": "bash"}}),
+                        json.dumps({"type": "text", "part": {"text": "{}"}}),
+                        json.dumps({"type": "step_finish"}),
+                    ]
+                ).encode("utf-8")
+                self.stdout = io.BytesIO(stream)
             self.stderr = io.BytesIO(b"")
 
         def wait(self, timeout=None):
@@ -712,21 +763,31 @@ def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
     # 3. Subprocess timeout -> killpg invoked + redacted fallback
     class TimeoutPopen:
         def __init__(self, cmd, **kwargs):
-            self.pid = 333
-            self.returncode = -9
-            self.stdout = io.BytesIO(b"")
+            if "--version" in cmd:
+                self.pid = 330
+                self.returncode = 0
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+            else:
+                self.pid = 333
+                self.returncode = -9
+                self.stdout = io.BytesIO(b"")
             self.stderr = io.BytesIO(b"")
 
         def wait(self, timeout=None):
-            import subprocess as _sp
-
-            raise _sp.TimeoutExpired(cmd="opencode", timeout=timeout or 1)
+            return 0
 
         def poll(self):
-            return None
+            return 0 if self.pid == 330 else None
 
     monkeypatch.setattr("app.ai.opencode_provider.subprocess.Popen", TimeoutPopen)
-    res_to = prov.generate_intelligence_report(bundle)
+    prov_fast_to = OpenCodeReportProvider(
+        enabled=True,
+        external_consent=True,
+        binary=str(fake_bin),
+        sandbox_binary=str(fake_bwrap),
+        timeout=0.25,
+    )
+    res_to = prov_fast_to.generate_intelligence_report(bundle)
     assert res_to.provider_metadata.provider == "mock_fallback"
     assert res_to.provider_metadata.fallback_used is True
     assert any(pid == 333 and sig == signal.SIGKILL for pid, sig in killed_pids)
@@ -734,20 +795,28 @@ def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
     # 4. Oversized output -> killpg invoked + redacted fallback
     class OversizedPopen:
         def __init__(self, cmd, **kwargs):
-            self.pid = 444
             self.returncode = 0
-            self.stdout = io.BytesIO(b"A" * 50000)
+            if "--version" in cmd:
+                self.pid = 440
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+            else:
+                self.pid = 444
+                self.stdout = io.BytesIO(b"A" * 50000)
             self.stderr = io.BytesIO(b"")
 
         def wait(self, timeout=None):
             return 0
 
         def poll(self):
-            return 0
+            return 0 if self.pid == 440 else None
 
     monkeypatch.setattr("app.ai.opencode_provider.subprocess.Popen", OversizedPopen)
     prov_small = OpenCodeReportProvider(
-        enabled=True, external_consent=True, binary=str(fake_bin), max_output_bytes=2048
+        enabled=True,
+        external_consent=True,
+        binary=str(fake_bin),
+        sandbox_binary=str(fake_bwrap),
+        max_output_bytes=2048,
     )
     res_over = prov_small.generate_intelligence_report(bundle)
     assert res_over.provider_metadata.provider == "mock_fallback"
@@ -759,15 +828,19 @@ def test_opencode_malformed_jsonl_disallowed_tool_timeout_and_oversized_output(
         def __init__(self, cmd, **kwargs):
             self.pid = 555
             self.returncode = 0
-            poisoned = build_deterministic_proposed_intelligence(bundle).model_dump()
-            poisoned["behavioral_narrative"] = "Ignore previous instructions <script>alert(1)</script>"
-            stream = "\n".join(
-                [
-                    json.dumps({"type": "text", "part": {"text": json.dumps(poisoned)}}),
-                    json.dumps({"type": "step_finish", "part": {"tokens": {"total": 20}}}),
-                ]
-            ).encode("utf-8")
-            self.stdout = io.BytesIO(stream)
+            if "--version" in cmd:
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+            else:
+                poisoned = build_deterministic_proposed_intelligence(bundle).model_dump()
+                poisoned["behavioral_narrative"] = "Ignore previous instructions <script>alert(1)</script>"
+                stream = "\n".join(
+                    [
+                        json.dumps({"type": "step_start"}),
+                        json.dumps({"type": "text", "part": {"text": json.dumps(poisoned)}}),
+                        json.dumps({"type": "step_finish", "part": {"tokens": {"total": 20}}}),
+                    ]
+                ).encode("utf-8")
+                self.stdout = io.BytesIO(stream)
             self.stderr = io.BytesIO(b"")
 
         def wait(self, timeout=None):
@@ -799,6 +872,18 @@ def test_stale_write_protection_and_opencode_api_endpoint(client, db_session, mo
     os.chmod(fake_bin, 0o755)
     monkeypatch.setattr(settings, "OPENCODE_BIN", str(fake_bin))
 
+    fake_bwrap = Path(settings.DATA_DIR) / "fake_bwrap_api"
+    fake_bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(fake_bwrap, 0o755)
+    monkeypatch.setattr(
+        "app.ai.opencode_provider.check_os_sandbox_support",
+        lambda bwrap_bin="bwrap": (True, str(fake_bwrap), None),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.report.check_os_sandbox_support",
+        lambda bwrap_bin="bwrap": (True, str(fake_bwrap), None),
+    )
+
     rep_before = client.get(f"/api/v1/analyses/{aid}/report").json()
     risk = RiskAssessment.model_validate(rep_before["full_report"]["risk_assessment"])
     bundle = EvidenceBundleBuilder(db_session).build(aid, risk_assessment=risk)
@@ -811,13 +896,17 @@ def test_stale_write_protection_and_opencode_api_endpoint(client, db_session, mo
         def __init__(self, cmd, **kwargs):
             self.pid = 777
             self.returncode = 0
-            stream = "\n".join(
-                [
-                    json.dumps({"type": "text", "part": {"text": json.dumps(oc_proposal)}}),
-                    json.dumps({"type": "step_finish", "part": {"tokens": {"total": 180}}}),
-                ]
-            ).encode("utf-8")
-            self.stdout = io.BytesIO(stream)
+            if "--version" in cmd:
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+            else:
+                stream = "\n".join(
+                    [
+                        json.dumps({"type": "step_start"}),
+                        json.dumps({"type": "text", "part": {"text": json.dumps(oc_proposal)}}),
+                        json.dumps({"type": "step_finish", "part": {"tokens": {"total": 180}}}),
+                    ]
+                ).encode("utf-8")
+                self.stdout = io.BytesIO(stream)
             self.stderr = io.BytesIO(b"")
 
         def wait(self, timeout=None):
@@ -842,14 +931,14 @@ def test_stale_write_protection_and_opencode_api_endpoint(client, db_session, mo
 
     orig_gen = MockLLMProvider.generate_intelligence_report
 
-    def mutating_gen(self_prov, b, rules_text=None):
+    def mutating_gen(self_prov, b, rules_text=None, cancel_event=None):
         row = db_session.query(AnalysisReport).filter(AnalysisReport.analysis_id == aid).first()
         mutated = dict(row.full_report_json)
         mutated["executive_summary"] = "CONCURRENT_NEWER_WRITE"
         row.full_report_json = mutated
         row.executive_summary = "CONCURRENT_NEWER_WRITE"
         db_session.commit()
-        return orig_gen(self_prov, b, rules_text=rules_text)
+        return orig_gen(self_prov, b, rules_text=rules_text, cancel_event=cancel_event)
 
     monkeypatch.setattr(MockLLMProvider, "generate_intelligence_report", mutating_gen)
     stale_res = client.post(
@@ -859,3 +948,354 @@ def test_stale_write_protection_and_opencode_api_endpoint(client, db_session, mo
     )
     assert stale_res.status_code == 409
     assert "CONCURRENT_NEWER_WRITE" in client.get(f"/api/v1/analyses/{aid}/report").json()["executive_summary"]
+
+
+def test_opencode_version_validation_agent_guards_and_stream_completeness(
+    client, db_session, monkeypatch
+):
+    _, analysis = _run_sync_replay(client, "ransomware_wannacry_mock")
+    rep = client.get(f"/api/v1/analyses/{analysis['id']}/report").json()
+    risk = RiskAssessment.model_validate(rep["full_report"]["risk_assessment"])
+    bundle = EvidenceBundleBuilder(db_session).build(analysis["id"], risk_assessment=risk)
+
+    fake_bin = Path(settings.DATA_DIR) / "fake_oc_vcheck"
+    fake_bwrap = Path(settings.DATA_DIR) / "fake_bwrap_vcheck"
+    for f in (fake_bin, fake_bwrap):
+        f.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(f, 0o755)
+    monkeypatch.setattr(
+        "app.ai.opencode_provider.check_os_sandbox_support",
+        lambda bwrap_bin="bwrap": (True, str(fake_bwrap), None),
+    )
+
+    prov = OpenCodeReportProvider(
+        enabled=True, external_consent=True, binary=str(fake_bin), sandbox_binary=str(fake_bwrap)
+    )
+
+    # 1. Invalid / unsupported CLI versions rejected cleanly
+    for bad_ver in (b"opencode v1.9.9\n", b"opencode v3.0.0\n", b"not-a-version\n"):
+        class BadVerPopen:
+            def __init__(self, cmd, **kwargs):
+                self.pid = 901
+                self.returncode = 0
+                self.stdout = io.BytesIO(bad_ver)
+                self.stderr = io.BytesIO(b"")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        monkeypatch.setattr("app.ai.opencode_provider.subprocess.Popen", BadVerPopen)
+        r = prov.generate_intelligence_report(bundle)
+        assert r.provider_metadata.provider == "mock_fallback"
+        assert r.provider_metadata.fallback_used is True
+        assert "Unsupported" in (r.provider_metadata.fallback_reason or "")
+
+    # 2. Tampered non-primary agent mode rejected pre-execution
+    prov_bad_agent = OpenCodeReportProvider(
+        enabled=True,
+        external_consent=True,
+        binary=str(fake_bin),
+        sandbox_binary=str(fake_bwrap),
+        agent_name="nonexistent-priv-agent",
+    )
+    r_bad_agent = prov_bad_agent.generate_intelligence_report(bundle)
+    assert r_bad_agent.provider_metadata.provider == "mock_fallback"
+    assert r_bad_agent.provider_metadata.fallback_used is True
+
+    # 3. Incomplete stream (step_start without step_finish), out-of-workspace read, webfetch, and agent fallback
+    valid_proposal = build_deterministic_proposed_intelligence(bundle).model_dump()
+    adversarial_streams = [
+        [json.dumps({"type": "step_start"}), json.dumps({"type": "text", "part": {"text": json.dumps(valid_proposal)}})],
+        [json.dumps({"type": "step_start"}), json.dumps({"type": "tool_use", "part": {"tool": "read", "input": {"filePath": "/etc/passwd"}}}), json.dumps({"type": "step_finish"})],
+        [json.dumps({"type": "step_start"}), json.dumps({"type": "tool_use", "part": {"tool": "webfetch", "input": {"url": "https://evil.example"}}}), json.dumps({"type": "step_finish"})],
+        [json.dumps({"type": "step_start", "agent": "build"}), json.dumps({"type": "text", "part": {"text": json.dumps(valid_proposal)}}), json.dumps({"type": "step_finish"})],
+    ]
+    for events in adversarial_streams:
+        class StreamPopen:
+            def __init__(self, cmd, **kwargs):
+                self.pid = 902
+                self.returncode = 0
+                if "--version" in cmd:
+                    self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+                else:
+                    self.stdout = io.BytesIO("\n".join(events).encode("utf-8"))
+                self.stderr = io.BytesIO(b"")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        monkeypatch.setattr("app.ai.opencode_provider.subprocess.Popen", StreamPopen)
+        res = prov.generate_intelligence_report(bundle)
+        assert res.provider_metadata.provider == "mock_fallback"
+        assert res.provider_metadata.fallback_used is True
+
+
+def test_timeout_holds_slot_blocks_bypass_cancels_opencode_and_prevents_late_write(
+    client, db_session, monkeypatch
+):
+    _, a1 = _run_sync_replay(client, "ransomware_wannacry_mock")
+    _, a2 = _run_sync_replay(client, "infostealer_redline_mock")
+
+    baseline_a1 = client.get(f"/api/v1/analyses/{a1['id']}/report").json()
+    secret_val = "sk-timeout-secret-xyz"
+    monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "rep-timeout-token")
+    monkeypatch.setattr(settings, "REPORTING_EXTERNAL_AI_CONSENT", True)
+    monkeypatch.setattr(settings, "AI_PROVIDER", "openai")
+    monkeypatch.setattr(settings, "AI_API_KEY", secret_val)
+    monkeypatch.setattr(settings, "REPORTING_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr(settings, "REPORTING_RATE_LIMIT_REQUESTS", 20)
+    monkeypatch.setattr(settings, "REPORTING_ENRICHMENT_TIMEOUT_SECONDS", 0.25)
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+
+    class SlowHungHttpClient:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            worker_entered.set()
+            release_worker.wait(timeout=3.0)
+            return MagicMock()
+
+    monkeypatch.setattr(httpx, "Client", SlowHungHttpClient)
+
+    # 1. Request times out cleanly at 0.25s while background thread is STILL active
+    r_to = client.post(
+        f"/api/v1/analyses/{a1['id']}/report/intelligence",
+        headers={"X-Reporting-Token": "rep-timeout-token"},
+        json={"mode": "llm", "external_transmission_consent": True},
+    )
+    assert r_to.status_code == 504
+    assert secret_val not in r_to.text
+    assert worker_entered.is_set()
+
+    # 2. Active concurrency slot & per-analysis lock MUST NOT be freed early while job runs!
+    assert enrichment_coordinator.active_count() == 1
+    assert enrichment_coordinator.is_analysis_active(a1["id"]) is True
+
+    # Repeated timeout request on same analysis -> 409 Conflict
+    r_dup = client.post(
+        f"/api/v1/analyses/{a1['id']}/report/intelligence",
+        headers={"X-Reporting-Token": "rep-timeout-token"},
+        json={"mode": "deterministic"},
+    )
+    assert r_dup.status_code == 409
+
+    # Request on different analysis cannot bypass capacity limit -> 429 Too Many Requests
+    r_cap = client.post(
+        f"/api/v1/analyses/{a2['id']}/report/intelligence",
+        headers={"X-Reporting-Token": "rep-timeout-token"},
+        json={"mode": "deterministic"},
+    )
+    assert r_cap.status_code == 429
+
+    # Release worker thread and confirm idle recovery + untouched DB report + bounded single executor
+    release_worker.set()
+    assert enrichment_coordinator.wait_idle(timeout=3.0) is True
+    assert enrichment_coordinator.active_count() == 0
+    assert enrichment_coordinator.executor_creation_count() <= 1
+    after_a1 = client.get(f"/api/v1/analyses/{a1['id']}/report").json()
+    assert after_a1["executive_summary"] == baseline_a1["executive_summary"]
+    assert after_a1["full_report"]["intelligence_report"]["provider_metadata"]["provider"] == "mock"
+
+    # 3. Verify active cancellation event terminates a slow OpenCode subprocess PGID promptly
+    fake_bin = Path(settings.DATA_DIR) / "fake_oc_cancel"
+    fake_bwrap = Path(settings.DATA_DIR) / "fake_bwrap_cancel"
+    for f in (fake_bin, fake_bwrap):
+        f.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(f, 0o755)
+    monkeypatch.setattr(
+        "app.ai.opencode_provider.check_os_sandbox_support",
+        lambda bwrap_bin="bwrap": (True, str(fake_bwrap), None),
+    )
+
+    killed = []
+    monkeypatch.setattr("app.ai.opencode_provider.os.getpgid", lambda pid: pid)
+    monkeypatch.setattr("app.ai.opencode_provider.os.killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    class HungSubprocPopen:
+        def __init__(self, cmd, **kwargs):
+            if "--version" in cmd:
+                self.pid = 801
+                self.returncode = 0
+                self.stdout = io.BytesIO(b"opencode v2.1.4\n")
+            else:
+                self.pid = 802
+                self.returncode = -9
+                self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0 if self.pid == 801 else None
+
+    monkeypatch.setattr("app.ai.opencode_provider.subprocess.Popen", HungSubprocPopen)
+    risk = RiskAssessment.model_validate(baseline_a1["full_report"]["risk_assessment"])
+    bundle = EvidenceBundleBuilder(db_session).build(a1["id"], risk_assessment=risk)
+    cancel_ev = threading.Event()
+    timer = threading.Timer(0.15, cancel_ev.set)
+    timer.start()
+    prov = OpenCodeReportProvider(
+        enabled=True,
+        external_consent=True,
+        binary=str(fake_bin),
+        sandbox_binary=str(fake_bwrap),
+        timeout=5.0,
+    )
+    t0 = time.monotonic()
+    res_cancelled = prov.generate_intelligence_report(bundle, cancel_event=cancel_ev)
+    elapsed = time.monotonic() - t0
+    timer.cancel()
+    assert elapsed < 1.5
+    assert res_cancelled.provider_metadata.provider == "mock_fallback"
+    assert res_cancelled.provider_metadata.fallback_used is True
+    assert any(pid == 802 for pid, _ in killed)
+
+
+def test_real_bwrap_sandbox_and_real_opencode_cli_integration(client, db_session):
+    """
+    Harmless real OS namespace + real OpenCode CLI integration test (no malware,
+    no paid external API calls). Skips cleanly with explicit reason if host/CI lacks bwrap or opencode.
+    """
+    from app.ai.opencode_sandbox import ApprovedProviderProxy, build_bwrap_command, check_os_sandbox_support
+    import http.server
+    import socketserver
+    import subprocess as _sp
+
+    sb_ok, bwrap_bin, sb_reason = check_os_sandbox_support("bwrap")
+    if not sb_ok or not bwrap_bin:
+        pytest.skip(f"Bubblewrap OS sandbox unavailable in this environment: {sb_reason}")
+
+    # 1. Real bwrap read-only filesystem, hidden repo/home, no root priv escalation, network filter
+    class DummyH(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"APPROVED_MOCK_OK")
+
+        def log_message(self, *args):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), DummyH)
+    approved_port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            (p / "evidence_bundle.json").write_text('{"synthetic":true}', encoding="utf-8")
+            (p / "opencode.json").write_text("{}", encoding="utf-8")
+            (p / ".opencode" / "agents").mkdir(parents=True)
+
+            sock = p / "egress.sock"
+            with ApprovedProviderProxy(sock, "127.0.0.1", approved_port):
+                cmd_net = build_bwrap_command(
+                    bwrap_bin,
+                    "/bin/true",
+                    p,
+                    {"PATH": "/usr/bin:/bin", "HOME": "/sandbox"},
+                    [],
+                    allow_network=True,
+                    egress_socket_path=sock,
+                )
+                probe = cmd_net[:-1] + [
+                    "/usr/bin/python3",
+                    "-c",
+                    (
+                        "import os, urllib.request, urllib.error\n"
+                        "assert os.getuid() == os.geteuid() != 0\n"
+                        "assert not os.path.exists('/home/kali')\n"
+                        "try:\n"
+                        "    open('/sandbox/evidence_bundle.json', 'w')\n"
+                        "    assert False\n"
+                        "except OSError:\n"
+                        "    pass\n"
+                        f"assert urllib.request.urlopen('http://127.0.0.1:{approved_port}/', timeout=3).read() == b'APPROVED_MOCK_OK'\n"
+                        "try:\n"
+                        "    urllib.request.urlopen('http://example.com:80/', timeout=3)\n"
+                        "    assert False\n"
+                        "except urllib.error.HTTPError as e:\n"
+                        "    assert e.code == 403\n"
+                        "print('REAL_BWRAP_OK')\n"
+                    ),
+                ]
+                res_b = _sp.run(probe, capture_output=True, text=True, timeout=8)
+                assert res_b.returncode == 0 and "REAL_BWRAP_OK" in res_b.stdout, (
+                    res_b.returncode,
+                    res_b.stdout,
+                    res_b.stderr,
+                )
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    # 2. Real OpenCode CLI harmless offline check (no external provider request)
+    oc_bin = OpenCodeReportProvider._resolve_binary("opencode")
+    if not oc_bin:
+        pytest.skip("OpenCode CLI binary is not installed in this environment.")
+
+    _, analysis = _run_sync_replay(client, "ransomware_wannacry_mock")
+    rep = client.get(f"/api/v1/analyses/{analysis['id']}/report").json()
+    risk = RiskAssessment.model_validate(rep["full_report"]["risk_assessment"])
+    bundle = EvidenceBundleBuilder(db_session).build(analysis["id"], risk_assessment=risk)
+
+    # Airgapped invocation (allow_network=False) verifies real --version + bwrap launch + fail-closed fallback without external network
+    real_prov = OpenCodeReportProvider(
+        enabled=True,
+        external_consent=True,
+        binary=oc_bin,
+        sandbox_binary=bwrap_bin,
+        model="openai/gpt-4o-mini",
+        allow_network=False,
+        timeout=8.0,
+    )
+    ver_detected = real_prov._verify_cli_version(bwrap_bin, oc_bin)
+    assert ver_detected.startswith("2.")
+
+    res_airgap = real_prov.generate_intelligence_report(bundle)
+    assert res_airgap.provider_metadata.provider == "mock_fallback"
+    assert res_airgap.provider_metadata.fallback_used is True
+    assert real_prov.last_call_meta.get("cli_version", "").startswith("2.")
+    assert real_prov.last_call_meta.get("os_sandbox") == "bwrap"
+
+    # Also verify real opencode rejects disabled privileged built-in agent `build` inside locked sandbox
+    import tempfile as _tf
+
+    with _tf.TemporaryDirectory() as td_agent:
+        pa = Path(td_agent)
+        (pa / ".opencode" / "agents").mkdir(parents=True)
+        (pa / ".opencode" / "agents" / "report-analyst.md").write_text(
+            real_prov._load_and_validate_agent_markdown(), encoding="utf-8"
+        )
+        (pa / "opencode.json").write_text(
+            json.dumps(real_prov._build_locked_opencode_config(), indent=2), encoding="utf-8"
+        )
+        (pa / "evidence_bundle.json").write_text('{"synthetic":true}', encoding="utf-8")
+        cmd_build = build_bwrap_command(
+            resolved_bwrap=bwrap_bin,
+            resolved_opencode=oc_bin,
+            tmpdir=pa,
+            sandbox_env=real_prov._build_sandbox_env(),
+            inner_args=["run", "--standalone", "--format", "json", "--agent", "build", "hi"],
+            allow_network=False,
+        )
+        res_build = _sp.run(cmd_build, capture_output=True, text=True, timeout=8)
+        combined_out = (res_build.stdout or "") + "\n" + (res_build.stderr or "")
+        assert res_build.returncode != 0
+        assert "agent not found" in combined_out.lower() or "build" in combined_out.lower()

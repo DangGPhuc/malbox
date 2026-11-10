@@ -197,6 +197,7 @@ class RealLLMProvider(LLMProvider):
         self,
         bundle: "VerifiedEvidenceBundle",
         rules_text: "Optional[str]" = None,
+        cancel_event: "Optional[Any]" = None,
     ) -> "IntelligenceReport":
         from app.ai.intelligence_helper import run_bounded_llm_intelligence
 
@@ -207,6 +208,7 @@ class RealLLMProvider(LLMProvider):
             base_url=self.base_url,
             timeout=self.timeout,
             rules_text=rules_text,
+            cancel_event=cancel_event,
         )
         self.last_call_meta = call_meta
         return report
