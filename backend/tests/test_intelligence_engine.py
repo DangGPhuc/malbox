@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 
 from app.ai.intelligence_helper import build_deterministic_proposed_intelligence
 from app.ai.llm_client import RealLLMProvider, get_reporting_llm_provider
@@ -20,9 +21,17 @@ from app.schemas.intelligence import (
 )
 from app.schemas.report import FullReportSchema, RiskAssessment
 from app.services.intelligence.bundle_builder import EvidenceBundleBuilder
+from app.services.intelligence.enrichment_guard import enrichment_coordinator
 from app.services.intelligence.validator import EvidenceValidator
 from app.services.reporting.export_html import generate_html_report
 from app.services.reporting.generator import ReportGenerator
+
+
+@pytest.fixture(autouse=True)
+def _reset_enrichment_guard():
+    enrichment_coordinator.reset()
+    yield
+    enrichment_coordinator.reset()
 
 
 def _run_sync_replay(client, filename: str, scenario_id: str, profile: str = "standard"):
@@ -294,6 +303,7 @@ def test_validator_rejects_fabricated_ids_and_marks_unverified(client, db_sessio
     bundle = EvidenceBundleBuilder(db_session).build(analysis["id"], risk_assessment=risk)
 
     real_ev = bundle.events[0].event_id
+    real_finding = bundle.findings[0]
     real_domain = bundle.iocs.domains[0]
     raw = {
         "executive_assessment": "Replay scenario 'ransomware_wannacry_mock' telemetry reviewed.",
@@ -309,9 +319,17 @@ def test_validator_rejects_fabricated_ids_and_marks_unverified(client, db_sessio
             {
                 "claim_id": "CLM-1",
                 "classification": "FACT",
+                "claim_text": f"Replay scenario matched rule {real_finding.rule_id} ({real_finding.title}).",
+                "supporting_evidence_ids": [real_finding.finding_id],
+                "confidence": 0.95,
+                "caveats": [],
+            },
+            {
+                "claim_id": "CLM-1B",
+                "classification": "FACT",
                 "claim_text": "Valid observation from bundle event.",
                 "supporting_evidence_ids": [real_ev],
-                "confidence": 0.95,
+                "confidence": 0.9,
                 "caveats": [],
             },
             {
@@ -384,12 +402,20 @@ def test_validator_rejects_fabricated_ids_and_marks_unverified(client, db_sessio
     )
     by_id = {c.claim_id: c for c in res.technical_claims}
     assert by_id["CLM-1"].validation_status == "VERIFIED"
+    assert by_id["CLM-1"].support_category == "DETERMINISTIC_FACT"
+    # Generic vague FACT citing real ID cannot auto-promote to VERIFIED
+    assert by_id["CLM-1B"].validation_status == "UNVERIFIED"
+    assert by_id["CLM-1B"].support_category == "CONSERVATIVE_UNVERIFIED"
+    assert by_id["CLM-1B"].requires_human_review is True
     assert by_id["CLM-2"].validation_status == "REJECTED"
     assert by_id["CLM-2"].supporting_evidence_ids == []
     assert by_id["CLM-3"].validation_status == "UNVERIFIED"
     assert by_id["CLM-4"].validation_status == "UNVERIFIED"
+    assert by_id["CLM-4"].support_category == "ANALYST_INFERENCE"
     assert by_id["CLM-4"].supporting_evidence_ids == [real_ev]
-    assert by_id["CLM-5"].validation_status == "VERIFIED"
+    # HYPOTHESIS retains uncertainty and is never labeled VERIFIED
+    assert by_id["CLM-5"].validation_status == "UNVERIFIED"
+    assert by_id["CLM-5"].support_category == "UNCERTAIN_HYPOTHESIS"
     assert "evt-nonexistent-999" in res.validation_summary.removed_invalid_evidence_ids
     assert "evt-fake-888" in res.validation_summary.removed_invalid_evidence_ids
     assert res.validation_summary.passed is False
@@ -683,10 +709,13 @@ def test_ai_reporting_mode_opt_in_default_and_explicit_enrichment_endpoint(clien
             }
             return resp
 
+    monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "report-secret-token-xyz")
+    monkeypatch.setattr(settings, "REPORTING_EXTERNAL_AI_CONSENT", True)
     monkeypatch.setattr(httpx, "Client", AllowEnrichClient)
     enrich_res = client.post(
         f"/api/v1/analyses/{analysis['id']}/report/intelligence",
-        json={"mode": "llm"},
+        headers={"X-Reporting-Token": "report-secret-token-xyz"},
+        json={"mode": "llm", "external_transmission_consent": True},
     )
     assert enrich_res.status_code == 200
     enriched_rep = enrich_res.json()
@@ -701,13 +730,17 @@ def test_ai_reporting_mode_opt_in_default_and_explicit_enrichment_endpoint(clien
     # Deterministic re-generation resets cleanly offline
     det_res = client.post(
         f"/api/v1/analyses/{analysis['id']}/report/intelligence",
+        headers={"X-Reporting-Token": "report-secret-token-xyz"},
         json={"mode": "deterministic"},
     )
     assert det_res.status_code == 200
     assert det_res.json()["full_report"]["intelligence_report"]["provider_metadata"]["provider"] == "mock"
 
     # Nonexistent analysis returns 404
-    missing_res = client.post("/api/v1/analyses/does-not-exist/report/intelligence")
+    missing_res = client.post(
+        "/api/v1/analyses/does-not-exist/report/intelligence",
+        headers={"X-Reporting-Token": "report-secret-token-xyz"},
+    )
     assert missing_res.status_code == 404
 
 

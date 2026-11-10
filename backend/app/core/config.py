@@ -46,15 +46,34 @@ class Settings(BaseSettings):
     DEFAULT_ANALYSIS_TIMEOUT_SECONDS: int = 120
     JOB_POLL_INTERVAL_SECONDS: float = 0.5
 
-    # AI Orchestration
+    # AI Orchestration & Phase 2A/2B Reporting Security
     AI_PROVIDER: str = "mock"  # mock, real, openai, ollama
-    AI_REPORTING_MODE: str = "opt_in"  # opt_in, deterministic, llm
+    AI_REPORTING_MODE: str = "opt_in"  # opt_in, deterministic, llm, opencode
     AI_MODEL: str = "gpt-4o-mini"
     AI_API_KEY: str = ""
     AI_BASE_URL: str = "https://api.openai.com/v1"
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_TOKENS: int = 2048
     AI_TEMPERATURE: float = 0.1
+
+    # Reporting Enrichment Authorization, Consent & Budget (No hardcoded secrets; fail closed)
+    REPORTING_AUTH_TOKEN: str = ""  # Required via X-Reporting-Token for POST .../report/intelligence
+    REPORTING_EXTERNAL_AI_CONSENT: bool = False  # Server-level consent for sending evidence to external providers
+    REPORTING_RATE_LIMIT_REQUESTS: int = 10
+    REPORTING_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    REPORTING_MAX_CONCURRENT_JOBS: int = 2
+    REPORTING_ENRICHMENT_TIMEOUT_SECONDS: float = 35.0
+
+    # OpenCode Restricted Reporting Adapter (Disabled & opt-in by default)
+    OPENCODE_ENABLED: bool = False
+    OPENCODE_BIN: str = "opencode"
+    OPENCODE_AGENT_NAME: str = "report-analyst"
+    OPENCODE_MODEL: str = ""
+    OPENCODE_TIMEOUT_SECONDS: float = 30.0
+    OPENCODE_MAX_OUTPUT_BYTES: int = 262144
+    OPENCODE_MAX_CPU_SECONDS: int = 25
+    OPENCODE_PROVIDER_API_KEY: str = ""
+    OPENCODE_PROVIDER_ENV_NAME: str = "OPENAI_API_KEY"
 
     # Pluggable Sandbox Settings
     DEFAULT_SANDBOX_BACKEND: str = "replay"  # replay, cape

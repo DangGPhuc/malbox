@@ -224,14 +224,35 @@ def get_llm_provider() -> LLMProvider:
     return MockLLMProvider()
 
 
-def get_reporting_llm_provider(force_external: bool = False) -> LLMProvider:
+def get_reporting_llm_provider(
+    force_external: bool = False,
+    requested_mode: "Optional[str]" = None,
+) -> LLMProvider:
     """
-    Returns reporting intelligence provider respecting AI_REPORTING_MODE.
-    Defaults to deterministic offline MockLLMProvider unless mode='llm'
-    or caller explicitly opts in with force_external=True.
+    Returns reporting intelligence provider respecting AI_REPORTING_MODE and explicit
+    external transmission consent. Defaults strictly to offline MockLLMProvider.
     """
-    mode = (getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in").strip().lower()
-    if (mode == "llm" or force_external) and settings.AI_PROVIDER != "mock" and settings.AI_API_KEY:
+    mode = (
+        (requested_mode or getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in")
+        .strip()
+        .lower()
+    )
+    has_consent = bool(getattr(settings, "REPORTING_EXTERNAL_AI_CONSENT", False))
+
+    if mode == "deterministic":
+        return MockLLMProvider()
+
+    if mode == "opencode" or (force_external and mode == "auto" and getattr(settings, "OPENCODE_ENABLED", False)):
+        from app.ai.opencode_provider import OpenCodeReportProvider
+
+        return OpenCodeReportProvider()
+
+    if (
+        (mode == "llm" or (force_external and mode == "auto"))
+        and has_consent
+        and settings.AI_PROVIDER != "mock"
+        and settings.AI_API_KEY
+    ):
         return RealLLMProvider(
             api_key=settings.AI_API_KEY,
             model=settings.AI_MODEL,

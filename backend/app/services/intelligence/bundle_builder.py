@@ -1,7 +1,7 @@
-import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -10,7 +10,6 @@ from app.models.analysis import Analysis
 from app.models.event import AnalysisEvent
 from app.models.finding import BehavioralFinding
 from app.models.sample import Sample
-from app.schemas.finding import ProcessTreeNode
 from app.schemas.intelligence import (
     ArtifactEvidence,
     BundleProvenance,
@@ -27,8 +26,6 @@ from app.schemas.intelligence import (
     VerifiedEvidenceBundle,
 )
 from app.schemas.report import RiskAssessment
-from app.services.correlation.correlator import CorrelationEngine
-from app.services.correlation.process_tree import build_process_tree
 
 
 DEFAULT_MAX_EVENTS = 120
@@ -37,6 +34,20 @@ DEFAULT_MAX_FIELD_CHARS = 512
 DEFAULT_MAX_BUNDLE_BYTES = 65536
 DEFAULT_MAX_ATTR_KEYS = 20
 DEFAULT_MAX_LIST_ITEMS = 25
+
+_SUSPICIOUS_PROC_PATTERNS = (
+    "vssadmin",
+    "delete shadows",
+    "-executionpolicy bypass",
+    "-enc",
+    "rundll32",
+    "regsvr32",
+    "powershell",
+    "certutil",
+    "bitsadmin",
+    "wscript",
+    "cscript",
+)
 
 _HIGH_SIGNAL_ACTIONS = {
     "delete_shadow_copies",
@@ -51,6 +62,10 @@ _HIGH_SIGNAL_ACTIONS = {
     "scheduled_task",
     "inject",
 }
+
+
+class BundleSizeLimitError(ValueError):
+    """Raised when even the minimal required bundle exceeds the configured hard byte budget."""
 
 
 def _to_sort_dt(dt: Optional[datetime]) -> datetime:
@@ -110,8 +125,8 @@ class _SanitizerTracker:
 class EvidenceBundleBuilder:
     """
     Constructs a strictly bounded, sanitized, provenance-aware VerifiedEvidenceBundle
-    from persisted normalized telemetry, deterministic findings, correlation outputs,
-    and sample metadata. Never reads or embeds raw executable bytes.
+    using bounded database queries (no unbounded event table .all() scans).
+    Never reads or embeds raw executable bytes and never silently exceeds max_bundle_bytes.
     """
 
     def __init__(
@@ -126,7 +141,7 @@ class EvidenceBundleBuilder:
         self.max_events = max(1, max_events)
         self.max_timeline = max(1, max_timeline)
         self.max_field_chars = max(64, max_field_chars)
-        self.max_bundle_bytes = max(2048, max_bundle_bytes)
+        self.max_bundle_bytes = max(128, max_bundle_bytes)
 
     def build(
         self,
@@ -185,10 +200,12 @@ class EvidenceBundleBuilder:
             pe_metadata_summary=pe_summary,
         )
 
+        # Bounded retrieval of findings (capped to protect against adversarial oversized finding rows)
         findings_db: List[BehavioralFinding] = (
             self.db.query(BehavioralFinding)
             .filter(BehavioralFinding.analysis_id == analysis.id)
             .order_by(BehavioralFinding.created_at.asc(), BehavioralFinding.id.asc())
+            .limit(100)
             .all()
         )
         findings_ev: List[DeterministicFindingEvidence] = []
@@ -196,7 +213,7 @@ class EvidenceBundleBuilder:
         mitre_by_id: Dict[str, MitreMappingEvidence] = {}
 
         for f in findings_db:
-            sup_ids = [str(eid) for eid in (f.supporting_event_ids or [])]
+            sup_ids = [str(eid) for eid in (f.supporting_event_ids or [])[:50]]
             finding_event_ids.update(sup_ids)
             findings_ev.append(
                 DeterministicFindingEvidence(
@@ -223,7 +240,7 @@ class EvidenceBundleBuilder:
                     )
                 else:
                     merged = set(existing.supporting_event_ids) | set(sup_ids)
-                    existing.supporting_event_ids = sorted(merged)
+                    existing.supporting_event_ids = sorted(merged)[:50]
 
         if risk_assessment is not None:
             det_score = int(risk_assessment.score)
@@ -232,52 +249,53 @@ class EvidenceBundleBuilder:
             det_score = 0
             det_level = "Clean" if not findings_ev else "Suspicious"
 
-        all_events_db: List[AnalysisEvent] = (
-            self.db.query(AnalysisEvent)
+        # Bounded DB-level retrieval for events (never calls unbounded .all() on full analysis events)
+        total_events_available = (
+            self.db.query(func.count(AnalysisEvent.id))
             .filter(AnalysisEvent.analysis_id == analysis.id)
-            .all()
-        )
-        selected_events, omitted_count = self._prioritize_and_select_events(
-            all_events_db, finding_event_ids, tracker
+            .scalar()
+            or 0
         )
 
-        correlator = CorrelationEngine(self.db)
-        raw_iocs = correlator.extract_iocs(analysis.id)
-        iocs_ev = IOCReferenceEvidence(
-            domains=[tracker.clean_str(d, 255) for d in raw_iocs.domains[:DEFAULT_MAX_LIST_ITEMS]],
-            ips=[tracker.clean_str(ip, 64) for ip in raw_iocs.ips[:DEFAULT_MAX_LIST_ITEMS]],
-            urls=[tracker.clean_str(u) for u in raw_iocs.urls[:DEFAULT_MAX_LIST_ITEMS]],
-            dropped_files=[
-                tracker.clean_value(df) for df in raw_iocs.dropped_files[:DEFAULT_MAX_LIST_ITEMS]
-            ],
-            registry_keys=[tracker.clean_str(rk) for rk in raw_iocs.registry_keys[:DEFAULT_MAX_LIST_ITEMS]],
+        selected_events, omitted_count, retrieved_pool = self._fetch_prioritized_events_bounded(
+            analysis_id=analysis.id,
+            total_events=total_events_available,
+            finding_event_ids=finding_event_ids,
+            tracker=tracker,
         )
 
-        raw_timeline = correlator.generate_timeline(analysis.id)
-        timeline_truncated = len(raw_timeline) > self.max_timeline
-        timeline_ev = [
-            TimelineEntryEvidence(
-                event_id=str(item.get("event_id") or ""),
-                timestamp=str(item.get("timestamp")) if item.get("timestamp") else None,
-                category=str(item.get("category") or "unknown"),
-                action=str(item.get("action") or "unknown"),
-                process=tracker.clean_str(item.get("process"), 128) if item.get("process") else None,
-                pid=item.get("pid"),
-                summary=tracker.clean_str(item.get("summary") or ""),
-            )
-            for item in raw_timeline[: self.max_timeline]
-        ]
+        # Extract IOCs, network relationships, process relationships, artifacts, and timeline using bounded queries
+        ioc_pool = self._fetch_bounded_category_events(
+            analysis.id,
+            categories=("dns", "network", "http", "registry", "artifact"),
+            limit=max(self.max_events * 2, 200),
+        )
+        iocs_ev = self._extract_bounded_iocs(analysis.id, ioc_pool, tracker)
 
-        process_tree = build_process_tree(analysis.id, self.db)
-        proc_rels = self._flatten_process_tree(process_tree.root_nodes, tracker)
-        net_rels, has_unattributed_network = self._extract_network_relationships(all_events_db, tracker)
-        artifacts_ev = self._build_artifacts(analysis.id, all_events_db, is_replay, tracker)
+        # Build timeline chronologically from prioritized retrieved pool + IOC pool
+        timeline_ev, timeline_truncated = self._build_bounded_timeline(
+            selected_events=selected_events,
+            supplemental_pool=ioc_pool,
+            total_events=total_events_available,
+            tracker=tracker,
+        )
+
+        proc_pool = self._fetch_bounded_category_events(
+            analysis.id,
+            categories=("process",),
+            limit=max(DEFAULT_MAX_LIST_ITEMS * 4, 100),
+        )
+        proc_rels = self._build_bounded_process_relationships(proc_pool, tracker)
+        net_pool = [ev for ev in (ioc_pool or retrieved_pool) if ev.category in {"network", "dns", "http"}]
+        net_rels, has_unattributed_network = self._extract_network_relationships(net_pool, tracker)
+        art_pool = [ev for ev in ioc_pool if ev.category == "artifact"]
+        artifacts_ev = self._build_artifacts(analysis.id, art_pool, is_replay, tracker)
 
         static_info = static_analysis or StaticAnalysisPlaceholder()
         known_limitations = self._build_known_limitations(
             is_replay=is_replay,
             scenario_id=scenario_id,
-            total_events=len(all_events_db),
+            total_events=total_events_available,
             omitted_events=omitted_count,
             findings_count=len(findings_ev),
             has_unattributed_network=has_unattributed_network,
@@ -285,18 +303,19 @@ class EvidenceBundleBuilder:
             artifacts=artifacts_ev,
         )
 
+        included_ev_ids = {e.event_id for e in selected_events} | {t.event_id for t in timeline_ev if t.event_id}
         valid_ids = self._collect_valid_ids(
             sample_evidence_id=sample_evidence_id,
             findings=findings_ev,
             events=selected_events,
             timeline=timeline_ev,
             artifacts=artifacts_ev,
-            all_event_ids={e.id for e in all_events_db},
+            all_event_ids=included_ev_ids,
         )
 
         truncation = TruncationMetadata(
             truncated=(omitted_count > 0 or timeline_truncated or tracker.truncated_count > 0),
-            total_events_available=len(all_events_db),
+            total_events_available=total_events_available,
             events_included=len(selected_events),
             events_omitted=omitted_count,
             timeline_truncated=timeline_truncated,
@@ -329,26 +348,120 @@ class EvidenceBundleBuilder:
 
         return self._enforce_byte_budget(bundle, finding_event_ids)
 
-    def _prioritize_and_select_events(
+    def _fetch_events_by_ids(
+        self, analysis_id: str, event_ids: List[str], limit: int
+    ) -> List[AnalysisEvent]:
+        results: List[AnalysisEvent] = []
+        target_ids = event_ids[:limit]
+        chunk_size = 100
+        for idx in range(0, len(target_ids), chunk_size):
+            chunk = target_ids[idx : idx + chunk_size]
+            rows = (
+                self.db.query(AnalysisEvent)
+                .filter(
+                    AnalysisEvent.analysis_id == analysis_id,
+                    AnalysisEvent.id.in_(chunk),
+                )
+                .order_by(AnalysisEvent.timestamp.asc().nulls_last(), AnalysisEvent.id.asc())
+                .all()
+            )
+            results.extend(rows)
+        return results
+
+    def _fetch_bounded_category_events(
+        self, analysis_id: str, categories: Tuple[str, ...], limit: int
+    ) -> List[AnalysisEvent]:
+        return (
+            self.db.query(AnalysisEvent)
+            .filter(
+                AnalysisEvent.analysis_id == analysis_id,
+                AnalysisEvent.category.in_(categories),
+            )
+            .order_by(AnalysisEvent.timestamp.asc().nulls_last(), AnalysisEvent.id.asc())
+            .limit(limit)
+            .all()
+        )
+
+    def _fetch_prioritized_events_bounded(
         self,
-        events: List[AnalysisEvent],
+        analysis_id: str,
+        total_events: int,
         finding_event_ids: Set[str],
         tracker: _SanitizerTracker,
-    ) -> Tuple[List[NormalizedEventEvidence], int]:
-        ranked: List[Tuple[int, datetime, str, AnalysisEvent, str]] = []
-        for ev in events:
-            tier_rank, tier_name = self._classify_event_tier(ev, finding_event_ids)
-            ranked.append((tier_rank, _to_sort_dt(ev.timestamp), ev.id, ev, tier_name))
+    ) -> Tuple[List[NormalizedEventEvidence], int, List[AnalysisEvent]]:
+        seen_ids: Set[str] = set()
+        candidates: List[Tuple[int, datetime, str, AnalysisEvent, str]] = []
 
-        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
-        chosen = ranked[: self.max_events]
-        omitted = max(0, len(ranked) - len(chosen))
+        # Tier 0: Finding-linked events fetched directly in bounded chunks
+        if finding_event_ids:
+            f_rows = self._fetch_events_by_ids(
+                analysis_id, sorted(finding_event_ids), limit=max(self.max_events * 2, 240)
+            )
+            for ev in f_rows:
+                if ev.id not in seen_ids:
+                    seen_ids.add(ev.id)
+                    candidates.append((0, _to_sort_dt(ev.timestamp), ev.id, ev, "finding_linked"))
+
+        # Tier 1: Security-critical events bounded at DB level
+        tier1_limit = max(self.max_events, 120)
+        tier1_rows = (
+            self.db.query(AnalysisEvent)
+            .filter(
+                AnalysisEvent.analysis_id == analysis_id,
+                or_(
+                    AnalysisEvent.category.in_(("process", "persistence", "artifact")),
+                    AnalysisEvent.action.in_(tuple(_HIGH_SIGNAL_ACTIONS)),
+                ),
+            )
+            .order_by(AnalysisEvent.timestamp.asc().nulls_last(), AnalysisEvent.id.asc())
+            .limit(tier1_limit)
+            .all()
+        )
+        for ev in tier1_rows:
+            if ev.id not in seen_ids:
+                seen_ids.add(ev.id)
+                candidates.append((1, _to_sort_dt(ev.timestamp), ev.id, ev, "security_critical"))
+
+        # Tier 2: Network/DNS/HTTP events bounded at DB level if budget permits
+        if len(candidates) < self.max_events * 2:
+            tier2_rows = self._fetch_bounded_category_events(
+                analysis_id, categories=("dns", "http", "network"), limit=self.max_events
+            )
+            for ev in tier2_rows:
+                if ev.id not in seen_ids:
+                    seen_ids.add(ev.id)
+                    candidates.append((2, _to_sort_dt(ev.timestamp), ev.id, ev, "network_http_dns"))
+
+        # Tier 3: Routine events fetched strictly bounded up to remaining capacity
+        remaining_slots = max(0, self.max_events - len(candidates))
+        if remaining_slots > 0:
+            routine_rows = (
+                self.db.query(AnalysisEvent)
+                .filter(AnalysisEvent.analysis_id == analysis_id)
+                .order_by(AnalysisEvent.timestamp.asc().nulls_last(), AnalysisEvent.id.asc())
+                .limit(remaining_slots + len(seen_ids))
+                .all()
+            )
+            for ev in routine_rows:
+                if ev.id in seen_ids:
+                    continue
+                seen_ids.add(ev.id)
+                tier_rank, tier_name = self._classify_event_tier(ev, finding_event_ids)
+                candidates.append((tier_rank, _to_sort_dt(ev.timestamp), ev.id, ev, tier_name))
+                if len(candidates) >= self.max_events:
+                    break
+
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        chosen = candidates[: self.max_events]
+        omitted = max(0, total_events - len(chosen))
 
         # Re-order chosen subset chronologically for coherent analyst narrative
         chosen.sort(key=lambda item: (item[1], item[2]))
 
         result: List[NormalizedEventEvidence] = []
+        raw_pool: List[AnalysisEvent] = []
         for _, _, _, ev, tier_name in chosen:
+            raw_pool.append(ev)
             result.append(
                 NormalizedEventEvidence(
                     event_id=ev.id,
@@ -365,7 +478,171 @@ class EvidenceBundleBuilder:
                     priority_tier=tier_name,
                 )
             )
-        return result, omitted
+        return result, omitted, raw_pool
+
+    def _extract_bounded_iocs(
+        self,
+        analysis_id: str,
+        ioc_pool: List[AnalysisEvent],
+        tracker: _SanitizerTracker,
+    ) -> IOCReferenceEvidence:
+        domains: Set[str] = set()
+        ips: Set[str] = set()
+        urls: Set[str] = set()
+        registry_keys: Set[str] = set()
+        dropped_files: List[Dict[str, Any]] = []
+
+        for ev in ioc_pool:
+            attrs = ev.attributes or {}
+            if ev.category == "dns" and ev.target_path:
+                domains.add(tracker.clean_str(ev.target_path, 255))
+            elif ev.category == "network":
+                dest_ip = attrs.get("dest_ip") or attrs.get("destination_ip")
+                if dest_ip and dest_ip not in ("127.0.0.1", "0.0.0.0"):
+                    ips.add(tracker.clean_str(dest_ip, 64))
+            elif ev.category == "http" and ev.target_path:
+                urls.add(tracker.clean_str(ev.target_path))
+            elif ev.category == "registry" and attrs.get("persistence") and ev.target_path:
+                registry_keys.add(tracker.clean_str(ev.target_path))
+
+        # Bounded streaming check over file events for dropped binaries (capped at 500 scanned)
+        file_stream = (
+            self.db.query(AnalysisEvent)
+            .filter(AnalysisEvent.analysis_id == analysis_id, AnalysisEvent.category == "file")
+            .order_by(AnalysisEvent.timestamp.asc().nulls_last(), AnalysisEvent.id.asc())
+            .limit(500)
+            .yield_per(100)
+        )
+        for ev in file_stream:
+            attrs = ev.attributes or {}
+            if attrs.get("is_dropped_binary"):
+                dropped_files.append(
+                    tracker.clean_value(
+                        {
+                            "path": ev.target_path,
+                            "sha256": attrs.get("sha256", "N/A"),
+                            "size_bytes": attrs.get("size_bytes", 0),
+                            "event_id": ev.id,
+                        }
+                    )
+                )
+                if len(dropped_files) >= DEFAULT_MAX_LIST_ITEMS:
+                    break
+
+        return IOCReferenceEvidence(
+            domains=sorted(domains)[:DEFAULT_MAX_LIST_ITEMS],
+            ips=sorted(ips)[:DEFAULT_MAX_LIST_ITEMS],
+            urls=sorted(urls)[:DEFAULT_MAX_LIST_ITEMS],
+            dropped_files=dropped_files[:DEFAULT_MAX_LIST_ITEMS],
+            registry_keys=sorted(registry_keys)[:DEFAULT_MAX_LIST_ITEMS],
+        )
+
+    def _build_bounded_timeline(
+        self,
+        selected_events: List[NormalizedEventEvidence],
+        supplemental_pool: List[AnalysisEvent],
+        total_events: int,
+        tracker: _SanitizerTracker,
+    ) -> Tuple[List[TimelineEntryEvidence], bool]:
+        entries: List[Tuple[str, str, TimelineEntryEvidence]] = []
+        seen_ev_ids: Set[str] = set()
+
+        def _maybe_append(
+            eid: str,
+            cat: str,
+            act: str,
+            ts: Optional[str],
+            pname: Optional[str],
+            pid: Optional[int],
+            tpath: Optional[str],
+            attrs: Dict[str, Any],
+        ) -> None:
+            if eid in seen_ev_ids:
+                return
+            summary = None
+            if cat == "process" and act == "spawn":
+                summary = f"Spawned process: {pname} (PID: {pid})"
+            elif cat == "file" and attrs.get("is_dropped_binary"):
+                summary = f"Dropped binary payload: {tpath}"
+            elif cat == "file" and attrs.get("is_encrypted_target"):
+                summary = f"Encrypted user file: {tpath}"
+            elif cat == "registry" and attrs.get("persistence"):
+                summary = f"Installed registry persistence key: {tpath}"
+            elif cat == "dns":
+                summary = f"Resolved domain: {tpath} -> {attrs.get('response')}"
+            elif cat == "network":
+                summary = f"Outbound network connection to {tpath} ({attrs.get('protocol')})"
+            elif cat == "http":
+                summary = f"HTTP {attrs.get('method')} request to {tpath}"
+            if summary is None:
+                return
+            seen_ev_ids.add(eid)
+            entries.append(
+                (
+                    ts or "",
+                    eid,
+                    TimelineEntryEvidence(
+                        event_id=eid,
+                        timestamp=ts or "N/A",
+                        category=cat,
+                        action=act,
+                        process=tracker.clean_str(pname, 128) if pname else None,
+                        pid=pid,
+                        summary=tracker.clean_str(summary),
+                    ),
+                )
+            )
+
+        for ev in selected_events:
+            _maybe_append(
+                ev.event_id,
+                ev.category,
+                ev.action,
+                ev.timestamp,
+                ev.process_name,
+                ev.process_id,
+                ev.target_path,
+                ev.attributes,
+            )
+
+        for ev in supplemental_pool:
+            _maybe_append(
+                ev.id,
+                ev.category,
+                ev.action,
+                ev.timestamp.isoformat() if ev.timestamp else "N/A",
+                ev.process_name,
+                ev.process_id,
+                ev.target_path,
+                ev.attributes or {},
+            )
+
+        entries.sort(key=lambda item: (item[0], item[1]))
+        timeline_truncated = (len(entries) > self.max_timeline) or (total_events > len(selected_events))
+        return [item[2] for item in entries[: self.max_timeline]], timeline_truncated
+
+    def _build_bounded_process_relationships(
+        self, proc_events: List[AnalysisEvent], tracker: _SanitizerTracker
+    ) -> List[ProcessRelationshipEvidence]:
+        rels: List[ProcessRelationshipEvidence] = []
+        for ev in proc_events[:DEFAULT_MAX_LIST_ITEMS]:
+            if not ev.process_id:
+                continue
+            cmd = str((ev.attributes or {}).get("command_line") or "")
+            suspicious = any(pat in cmd.lower() for pat in _SUSPICIOUS_PROC_PATTERNS)
+            rels.append(
+                ProcessRelationshipEvidence(
+                    pid=ev.process_id,
+                    ppid=ev.parent_process_id,
+                    name=tracker.clean_str(ev.process_name or "unknown.exe", 128),
+                    command_line=tracker.clean_str(cmd) if cmd else None,
+                    spawn_time=ev.timestamp.isoformat() if ev.timestamp else None,
+                    suspicious=suspicious,
+                    event_count=1,
+                    event_ids=[ev.id],
+                )
+            )
+        return rels
 
     @staticmethod
     def _classify_event_tier(
@@ -382,32 +659,6 @@ class EvidenceBundleBuilder:
             return 2, "network_http_dns"
         return 3, "routine"
 
-    def _flatten_process_tree(
-        self, nodes: List[ProcessTreeNode], tracker: _SanitizerTracker
-    ) -> List[ProcessRelationshipEvidence]:
-        flat: List[ProcessRelationshipEvidence] = []
-
-        def _walk(items: Iterable[ProcessTreeNode]) -> None:
-            for node in items:
-                if len(flat) >= DEFAULT_MAX_LIST_ITEMS:
-                    return
-                flat.append(
-                    ProcessRelationshipEvidence(
-                        pid=node.pid,
-                        ppid=node.ppid,
-                        name=tracker.clean_str(node.name, 128),
-                        command_line=tracker.clean_str(node.command_line) if node.command_line else None,
-                        spawn_time=node.spawn_time,
-                        suspicious=bool(node.suspicious),
-                        event_count=int(node.events_count),
-                        event_ids=list(node.event_ids[:20]),
-                    )
-                )
-                _walk(node.children)
-
-        _walk(nodes)
-        return flat
-
     def _extract_network_relationships(
         self, events: List[AnalysisEvent], tracker: _SanitizerTracker
     ) -> Tuple[List[NetworkRelationshipEvidence], bool]:
@@ -421,13 +672,14 @@ class EvidenceBundleBuilder:
             attrs = ev.attributes or {}
             dest = (
                 attrs.get("destination_ip")
+                or attrs.get("dest_ip")
                 or attrs.get("domain")
                 or attrs.get("host")
                 or attrs.get("url")
                 or ev.target_path
                 or "unknown"
             )
-            port_raw = attrs.get("destination_port") or attrs.get("port")
+            port_raw = attrs.get("destination_port") or attrs.get("dest_port") or attrs.get("port")
             port_val = int(port_raw) if isinstance(port_raw, (int, str)) and str(port_raw).isdigit() else None
             method_or_query = attrs.get("method") or attrs.get("query_type") or attrs.get("protocol")
             if len(rels) < DEFAULT_MAX_LIST_ITEMS:
@@ -486,8 +738,10 @@ class EvidenceBundleBuilder:
                     source_event_id=ev.id,
                 )
             )
+            if len(artifacts) >= DEFAULT_MAX_LIST_ITEMS:
+                break
 
-        if artifacts_dir.is_dir():
+        if artifacts_dir.is_dir() and len(artifacts) < DEFAULT_MAX_LIST_ITEMS:
             for entry in sorted(artifacts_dir.iterdir(), key=lambda p: p.name):
                 if not entry.is_file() or entry.name in seen_names:
                     continue
@@ -510,6 +764,8 @@ class EvidenceBundleBuilder:
                         source_event_id=None,
                     )
                 )
+                if len(artifacts) >= DEFAULT_MAX_LIST_ITEMS:
+                    break
 
         return artifacts
 
@@ -637,49 +893,14 @@ class EvidenceBundleBuilder:
                     valid.add(eid)
         return valid
 
-    def _enforce_byte_budget(
-        self, bundle: VerifiedEvidenceBundle, finding_event_ids: Set[str]
-    ) -> VerifiedEvidenceBundle:
-        serialized = bundle.model_dump_json().encode("utf-8")
-        if len(serialized) <= self.max_bundle_bytes:
-            bundle.truncation.estimated_bundle_bytes = len(serialized)
-            return bundle
+    def _current_bytes(self, bundle: VerifiedEvidenceBundle) -> int:
+        return len(bundle.model_dump_json().encode("utf-8"))
 
-        # Iteratively trim routine events first, then tail events, then timeline
-        events = list(bundle.events)
-        timeline = list(bundle.timeline)
-
-        while len(serialized) > self.max_bundle_bytes and len(events) > 0:
-            drop_idx = self._pick_droppable_event_index(events, finding_event_ids)
-            events.pop(drop_idx)
-            bundle.truncation.truncated = True
-            bundle.truncation.events_included = len(events)
-            bundle.truncation.events_omitted = max(
-                0, bundle.truncation.total_events_available - len(events)
-            )
-            bundle.events = events
-            serialized = bundle.model_dump_json().encode("utf-8")
-
-        while len(serialized) > self.max_bundle_bytes and len(timeline) > 0:
-            timeline.pop()
-            bundle.truncation.truncated = True
-            bundle.truncation.timeline_truncated = True
-            bundle.timeline = timeline
-            serialized = bundle.model_dump_json().encode("utf-8")
-
-        while len(serialized) > self.max_bundle_bytes and len(bundle.network_relationships) > 0:
-            bundle.network_relationships.pop()
-            bundle.truncation.truncated = True
-            serialized = bundle.model_dump_json().encode("utf-8")
-
-        while len(serialized) > self.max_bundle_bytes and len(bundle.process_relationships) > 0:
-            bundle.process_relationships.pop()
-            bundle.truncation.truncated = True
-            serialized = bundle.model_dump_json().encode("utf-8")
-
-        # Refresh valid_evidence_ids to reflect included events/timeline/findings/artifacts
+    def _refresh_valid_ids(self, bundle: VerifiedEvidenceBundle) -> None:
         sample_id = bundle.sample_identity.evidence_id
-        all_evt_ids = {e.event_id for e in bundle.events} | {t.event_id for t in bundle.timeline if t.event_id}
+        all_evt_ids = {e.event_id for e in bundle.events} | {
+            t.event_id for t in bundle.timeline if t.event_id
+        }
         bundle.valid_evidence_ids = sorted(
             self._collect_valid_ids(
                 sample_evidence_id=sample_id,
@@ -691,16 +912,125 @@ class EvidenceBundleBuilder:
             )
         )
 
-        # Ensure known_limitations mentions truncation if budget forced trimming
+    def _enforce_byte_budget(
+        self, bundle: VerifiedEvidenceBundle, finding_event_ids: Set[str]
+    ) -> VerifiedEvidenceBundle:
+        cur = self._current_bytes(bundle)
+        if cur <= self.max_bundle_bytes:
+            bundle.truncation.estimated_bundle_bytes = cur
+            return bundle
+
+        # Stage 1: Drop lowest-priority events first
+        events = list(bundle.events)
+        while cur > self.max_bundle_bytes and len(events) > 0:
+            drop_idx = self._pick_droppable_event_index(events, finding_event_ids)
+            events.pop(drop_idx)
+            bundle.events = events
+            bundle.truncation.truncated = True
+            bundle.truncation.events_included = len(events)
+            bundle.truncation.events_omitted = max(
+                0, bundle.truncation.total_events_available - len(events)
+            )
+            cur = self._current_bytes(bundle)
+
+        # Stage 2: Trim timeline tail
+        timeline = list(bundle.timeline)
+        while cur > self.max_bundle_bytes and len(timeline) > 0:
+            timeline.pop()
+            bundle.timeline = timeline
+            bundle.truncation.truncated = True
+            bundle.truncation.timeline_truncated = True
+            cur = self._current_bytes(bundle)
+
+        # Stage 3: Trim network & process relationships
+        while cur > self.max_bundle_bytes and len(bundle.network_relationships) > 0:
+            bundle.network_relationships.pop()
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        while cur > self.max_bundle_bytes and len(bundle.process_relationships) > 0:
+            bundle.process_relationships.pop()
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        # Stage 4: Compact IOC lists when oversized
+        if cur > self.max_bundle_bytes:
+            for attr in ("urls", "registry_keys", "dropped_files", "domains", "ips"):
+                lst = getattr(bundle.iocs, attr)
+                while cur > self.max_bundle_bytes and len(lst) > 0:
+                    lst.pop()
+                    bundle.truncation.truncated = True
+                    cur = self._current_bytes(bundle)
+
+        # Stage 5: Compact optional metadata dictionaries, MITRE IDs, and artifact descriptions
+        if cur > self.max_bundle_bytes:
+            bundle.provenance.environment = {}
+            bundle.sample_identity.pe_metadata_summary = {}
+            for m in bundle.mitre_mappings:
+                m.supporting_event_ids = m.supporting_event_ids[:3]
+            for a in bundle.artifacts:
+                a.description = a.description[:64]
+                a.provenance_note = a.provenance_note[:64]
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        while cur > self.max_bundle_bytes and len(bundle.artifacts) > 0:
+            bundle.artifacts.pop()
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        while cur > self.max_bundle_bytes and len(bundle.mitre_mappings) > 0:
+            bundle.mitre_mappings.pop()
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        # Stage 6: Compact oversized finding fields, then tail findings if still over cap
+        if cur > self.max_bundle_bytes:
+            for f in bundle.findings:
+                f.description = f.description[:96]
+                f.supporting_event_ids = f.supporting_event_ids[:2]
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        while cur > self.max_bundle_bytes and len(bundle.findings) > 0:
+            bundle.findings.pop()
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        # Refresh valid_evidence_ids and trim non-essential limitations cleanly
+        self._refresh_valid_ids(bundle)
         trunc_note = (
-            f"Evidence bundle truncated to fit {self.max_bundle_bytes}-byte budget: "
-            f"{bundle.truncation.events_included}/{bundle.truncation.total_events_available} events included."
+            f"Reduced bundle enforced within {self.max_bundle_bytes}-byte limit "
+            f"({bundle.truncation.events_included}/{bundle.truncation.total_events_available} events)."
         )
-        if bundle.truncation.truncated and not any("truncated" in item.lower() for item in bundle.known_limitations):
+        if bundle.truncation.truncated and not any(
+            "truncated" in item.lower() or "reduced" in item.lower()
+            for item in bundle.known_limitations
+        ):
             bundle.known_limitations.append(trunc_note)
 
-        final_bytes = len(bundle.model_dump_json().encode("utf-8"))
-        bundle.truncation.estimated_bundle_bytes = final_bytes
+        cur = self._current_bytes(bundle)
+        if cur > self.max_bundle_bytes:
+            bundle.known_limitations = [trunc_note]
+            bundle.static_analysis.notes = "Static unavailable."
+            cur = self._current_bytes(bundle)
+
+        # If valid_evidence_ids alone pushes over cap due to huge UUID list on tight byte cap, trim finding-level extra aliases while keeping core valid IDs
+        while cur > self.max_bundle_bytes and len(bundle.valid_evidence_ids) > 1:
+            bundle.valid_evidence_ids.pop()
+            cur = self._current_bytes(bundle)
+
+        if cur > self.max_bundle_bytes and bundle.known_limitations:
+            bundle.known_limitations = []
+            cur = self._current_bytes(bundle)
+
+        if cur > self.max_bundle_bytes:
+            raise BundleSizeLimitError(
+                f"Cannot construct VerifiedEvidenceBundle within hard byte limit "
+                f"max_bundle_bytes={self.max_bundle_bytes} (minimum required size={cur} bytes)."
+            )
+
+        bundle.truncation.estimated_bundle_bytes = cur
         return bundle
 
     @staticmethod
@@ -710,7 +1040,6 @@ class EvidenceBundleBuilder:
         tier_order = {"routine": 0, "network_http_dns": 1, "security_critical": 2, "finding_linked": 3}
         best_idx = len(events) - 1
         best_score = 99
-        # Scan from the end so chronologically latest lower-tier events drop first
         for idx in range(len(events) - 1, -1, -1):
             ev = events[idx]
             if ev.event_id in finding_event_ids:

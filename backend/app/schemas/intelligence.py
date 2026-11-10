@@ -4,6 +4,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ClaimClassification = Literal["FACT", "INFERENCE", "HYPOTHESIS"]
 ClaimValidationStatus = Literal["VERIFIED", "UNVERIFIED", "REJECTED"]
+ClaimSupportCategory = Literal[
+    "DETERMINISTIC_FACT",
+    "ANALYST_INFERENCE",
+    "UNCERTAIN_HYPOTHESIS",
+    "CONSERVATIVE_UNVERIFIED",
+    "UNSUPPORTED_OR_FABRICATED",
+]
 EvidenceCompleteness = Literal["high", "medium", "low"]
 FollowUpPriority = Literal["high", "medium", "low"]
 
@@ -214,7 +221,10 @@ class AnalyticalClaim(BaseModel):
     supporting_evidence_ids: List[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     caveats: List[str] = Field(default_factory=list)
-    validation_status: ClaimValidationStatus = "VERIFIED"
+    validation_status: ClaimValidationStatus = "UNVERIFIED"
+    support_category: ClaimSupportCategory = "CONSERVATIVE_UNVERIFIED"
+    requires_human_review: bool = False
+    evidence_sources: List[str] = Field(default_factory=list)
     validation_notes: Optional[str] = None
 
 
@@ -288,6 +298,10 @@ class ValidationSummary(BaseModel):
     verified_claims: int = 0
     unverified_claims: int = 0
     rejected_claims: int = 0
+    review_required_claims: int = 0
+    deterministic_facts: int = 0
+    analyst_inferences: int = 0
+    uncertain_hypotheses: int = 0
     removed_invalid_evidence_ids: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     fallback_applied: bool = False

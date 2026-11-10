@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from app.core.config import settings
+from app.core.security import redact_sensitive_text
 from app.schemas.intelligence import (
     AIProposedIntelligence,
     AIProviderMetadata,
@@ -157,6 +158,8 @@ def build_deterministic_proposed_intelligence(
     if bundle.findings and (bundle.network_relationships or bundle.process_relationships):
         corroborating: List[str] = []
         for f in findings[:3]:
+            if f.finding_id in valid_ids:
+                corroborating.append(f.finding_id)
             corroborating.extend([eid for eid in f.supporting_event_ids if eid in valid_ids][:2])
         for n in bundle.network_relationships[:2]:
             if n.event_id in valid_ids and n.event_id not in corroborating:
@@ -178,7 +181,7 @@ def build_deterministic_proposed_intelligence(
                     claim_id=f"CLM-{claim_idx:03d}",
                     classification="INFERENCE",
                     claim_text=inf_text,
-                    supporting_evidence_ids=list(dict.fromkeys(corroborating))[:10],
+                    supporting_evidence_ids=list(dict.fromkeys(corroborating))[:12],
                     confidence=0.82 if not prov.is_replay else 0.78,
                     caveats=[
                         "Correlation establishes behavioral pattern fit across observed events; static code inspection was not performed."
@@ -567,7 +570,11 @@ def run_bounded_llm_intelligence(
         return report, call_meta
 
     except Exception as exc:
-        reason = f"{type(exc).__name__}: {str(exc)[:160]}"
+        reason = redact_sensitive_text(
+            f"{type(exc).__name__}: {str(exc)}",
+            extra_secrets=[api_key],
+            max_chars=180,
+        )
         fallback_proposed = build_deterministic_proposed_intelligence(bundle)
         provider_meta = AIProviderMetadata(
             mode="mock_fallback",
