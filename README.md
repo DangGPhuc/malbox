@@ -56,13 +56,15 @@ flowchart TD
 git clone https://github.com/DangGPhuc/malbox.git
 cd malbox
 ./malbox doctor
+./malbox doctor --smoke-test
 ./malbox start
 ```
-- `./malbox doctor`: Checks OS, Python, Node/npm, resources, ports, `.env` safety, `.venv`, frontend deps, database schema, and replay fixtures, then safely sets up Replay Mode without modifying user secrets or running `sudo`.
-- `./malbox start`: Starts FastAPI backend (`http://127.0.0.1:8000`) and React/Vite UI (`http://127.0.0.1:5173`) in safe Replay Mode.
-- `./malbox status` / `./malbox stop`: Inspects health/PIDs or gracefully shuts down managed services.
+- `./malbox doctor`: Checks OS, Python, Node/npm, resources, ports, `.env` safety (`0600`), `.malbox`/`quarantine` (`0700`), `.venv`, frontend deps, database schema, and replay fixtures, then safely sets up Replay Mode without modifying user secrets or running `sudo`.
+- `./malbox doctor --smoke-test`: Runs an isolated temporary-directory Replay E2E test confirming pipeline completion and evidence provenance without altering user `data/`.
+- `./malbox start`: Starts FastAPI backend (default `http://127.0.0.1:8000`) and React/Vite UI (default `http://127.0.0.1:5173`) in safe Replay Mode, keeping custom `MALBOX_PORT` and Vite `/api` proxy targets synchronized.
+- `./malbox status` / `./malbox stop`: Verifies managed OS process ownership (`proc_start_time`, command signature, live OS PGID) and gracefully stops services.
 
-For `--check`, `--repair`, `--json`, and recovery workflows, see [docs/DOCTOR_GUIDE.md](docs/DOCTOR_GUIDE.md).
+For `--check`, `--repair`, `--smoke-test`, `--json`, custom ports, and Kali Linux evaluation steps, see [docs/DOCTOR_GUIDE.md](docs/DOCTOR_GUIDE.md).
 
 ### Manual Setup (Optional / Foreground Launchers)
 ```bash
@@ -141,8 +143,8 @@ Run the full automated test suite sequentially:
 .venv/bin/pytest backend/tests -v
 ```
 
-Test coverage across **64 automated tests**:
-- Bootstrap CLI (`malbox doctor`, `--check`, `--repair`, `--json`, `start`/`stop`/`status`, idempotency, secret preservation, unsafe config blocking)
+Test coverage across **67 automated tests**:
+- Bootstrap CLI (`malbox doctor`, `--check`, `--repair`, `--smoke-test`, `--json`, strict OS process ownership, stale/reused PID & PGID defenses, custom port/Vite proxy validation, `0600`/`0700` permissions, secret preservation)
 - Static PE header & Shannon entropy triage & SHA-256 deduplication
 - End-to-end Replay pipeline for WannaCry & RedLine scenarios (scenario contract, provenance, artifacts)
 - AI orchestration planning, real/fallback LLM provider tracking, & policy allowlist enforcement

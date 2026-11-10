@@ -15,20 +15,22 @@ from .models import (
     CheckResult,
     CheckStatus,
     CommandRunner,
+    ProcessVerification,
     default_command_runner,
     detect_memory_mb,
     get_runtime_dir,
     get_system_info,
     get_venv_python,
-    is_pid_running,
     is_port_in_use,
     parse_bool,
     parse_env_file,
     read_pid_state,
     redacted_config_summary,
     resolve_effective_config,
+    resolve_ports_strict,
     resolve_repo_path,
     resolve_sqlite_db_path,
+    verify_managed_process,
 )
 
 
@@ -236,6 +238,17 @@ def check_env_config(
         )
 
     raw_env_values = parse_env_file(env_file)
+    _, port_errors = resolve_ports_strict(config)
+    if port_errors:
+        return CheckResult(
+            id="env_config",
+            name="Configuration (.env) & Safety Policy",
+            status=CheckStatus.FAIL,
+            summary=f"Invalid port configuration: {'; '.join(port_errors)}",
+            details={"env_exists": True, "config": safe_summary, "port_errors": port_errors},
+            remediation="Set valid integer ports (1-65535) for `MALBOX_PORT` and `MALBOX_FRONTEND_PORT` in `.env`.",
+        )
+
     live_enabled = parse_bool(config.get("MALBOX_LIVE_MODE_ENABLED"), default=False)
     op_token_set = bool((config.get("MALBOX_OPERATOR_TOKEN") or "").strip())
     default_backend = (config.get("MALBOX_DEFAULT_SANDBOX_BACKEND") or "replay").strip().lower()
@@ -259,6 +272,11 @@ def check_env_config(
     if host not in ("127.0.0.1", "localhost", "::1"):
         warnings.append(f"MALBOX_HOST={host} exposes API beyond localhost")
 
+    if os.name == "posix":
+        env_mode = env_file.stat().st_mode & 0o777
+        if env_mode & 0o077:
+            warnings.append(f"`.env` permissions too permissive ({oct(env_mode)}; expected 0o600)")
+
     if warnings:
         return CheckResult(
             id="env_config",
@@ -266,14 +284,14 @@ def check_env_config(
             status=CheckStatus.WARN,
             summary=f".env present with safety warnings: {'; '.join(warnings)}.",
             details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
-            remediation="For default safe local evaluation, keep `MALBOX_HOST=127.0.0.1`, `MALBOX_LIVE_MODE_ENABLED=false`, and `MALBOX_DEFAULT_SANDBOX_BACKEND=replay`.",
+            remediation="Run `./malbox doctor --repair` to tighten `.env` to `0600` (secrets untouched) and verify Replay Mode defaults.",
         )
 
     return CheckResult(
         id="env_config",
         name="Configuration (.env) & Safety Policy",
         status=CheckStatus.PASS,
-        summary="Safe Replay Mode defaults active (Live Mode disabled, localhost-bound).",
+        summary="Safe Replay Mode defaults active (Live Mode disabled, localhost-bound, .env protected).",
         details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
     )
 
@@ -300,15 +318,26 @@ def check_directories(
         )
 
     if os.name == "posix":
-        mode = quarantine_dir.stat().st_mode & 0o777
-        if mode & 0o077:
+        perm_warnings: List[str] = []
+        q_mode = quarantine_dir.stat().st_mode & 0o777
+        if q_mode & 0o077:
+            perm_warnings.append(f"quarantine dir `{quarantine_dir}` has permissive mode {oct(q_mode)} (expected 0o700)")
+        rt_mode = runtime_dir.stat().st_mode & 0o777
+        if rt_mode & 0o077:
+            perm_warnings.append(f"runtime dir `.malbox` has permissive mode {oct(rt_mode)} (expected 0o700)")
+        for rt_file in list(runtime_dir.glob("*.pid")) + list(runtime_dir.glob("*.log")):
+            if rt_file.is_file():
+                f_mode = rt_file.stat().st_mode & 0o777
+                if f_mode & 0o077:
+                    perm_warnings.append(f"runtime file `.malbox/{rt_file.name}` has permissive mode {oct(f_mode)} (expected 0o600)")
+        if perm_warnings:
             return CheckResult(
                 id="directories",
                 name="Runtime & Quarantine Directories",
                 status=CheckStatus.WARN,
-                summary=f"Quarantine directory permissions too permissive ({oct(mode)}; expected 0o700).",
-                details={"quarantine_dir": str(quarantine_dir), "mode": oct(mode)},
-                remediation="Run `./malbox doctor --repair` or `chmod 700 data/quarantine`.",
+                summary=f"Insecure directory/file permissions: {'; '.join(perm_warnings)}.",
+                details={"quarantine_dir": str(quarantine_dir), "runtime_dir": str(runtime_dir), "warnings": perm_warnings},
+                remediation="Run `./malbox doctor --repair` to restrict quarantine/runtime dirs (0700) and PID/log files (0600).",
             )
 
     return CheckResult(
@@ -560,38 +589,50 @@ def check_ports(
     skip_frontend: bool = False,
     environ: Optional[Dict[str, str]] = None,
     port_in_use_fn: Callable[[str, int], bool] = is_port_in_use,
-    pid_running_fn: Callable[[int, Optional[List[str]]], bool] = is_pid_running,
+    verify_fn: Callable[..., ProcessVerification] = verify_managed_process,
 ) -> CheckResult:
     config = resolve_effective_config(root_dir, environ=environ)
-    host = config.get("MALBOX_HOST", "127.0.0.1")
-    try:
-        backend_port = int(config.get("MALBOX_PORT", "8000"))
-    except ValueError:
-        backend_port = 8000
-    try:
-        frontend_port = int(config.get("MALBOX_FRONTEND_PORT", "5173"))
-    except ValueError:
-        frontend_port = 5173
+    parsed_ports, port_errors = resolve_ports_strict(config)
+    if port_errors or parsed_ports is None:
+        return CheckResult(
+            id="ports",
+            name="Network Port Availability",
+            status=CheckStatus.FAIL,
+            summary=f"Cannot inspect ports due to invalid configuration: {'; '.join(port_errors)}",
+            details={"port_errors": port_errors},
+            remediation="Configure valid ports (1-65535) for `MALBOX_PORT` and `MALBOX_FRONTEND_PORT`.",
+        )
+
+    host, backend_port, frontend_port = parsed_ports
 
     runtime_dir = get_runtime_dir(root_dir)
-    backend_state = read_pid_state(runtime_dir / "backend.pid")
-    frontend_state = read_pid_state(runtime_dir / "frontend.pid")
+    be_state = read_pid_state(runtime_dir / "backend.pid")
+    fe_state = read_pid_state(runtime_dir / "frontend.pid")
 
-    backend_managed = bool(backend_state and pid_running_fn(backend_state["pid"], ["uvicorn", "python"]))
-    frontend_managed = bool(frontend_state and pid_running_fn(frontend_state["pid"], ["vite", "node", "npm"]))
+    be_verify = verify_fn(be_state, "backend", root_dir) if (runtime_dir / "backend.pid").exists() else None
+    fe_verify = verify_fn(fe_state, "frontend", root_dir) if (runtime_dir / "frontend.pid").exists() else None
+
+    backend_managed = bool(be_verify and be_verify.status == "valid")
+    frontend_managed = bool(fe_verify and fe_verify.status == "valid")
 
     conflicts: List[str] = []
     running_managed: List[str] = []
+    pid_warnings: List[str] = []
+
+    if be_verify and be_verify.status in ("unverified", "reused_pid"):
+        pid_warnings.append(f"backend.pid: {be_verify.reason}")
+    if fe_verify and fe_verify.status in ("unverified", "reused_pid"):
+        pid_warnings.append(f"frontend.pid: {fe_verify.reason}")
 
     if port_in_use_fn(host, backend_port):
         if backend_managed:
-            running_managed.append(f"backend:{backend_port} (malbox PID {backend_state['pid']})")
+            running_managed.append(f"backend:{backend_port} (verified malbox PID {be_state['pid']})")
         else:
             conflicts.append(f"backend port {backend_port}")
 
     if not skip_frontend and port_in_use_fn("127.0.0.1", frontend_port):
         if frontend_managed:
-            running_managed.append(f"frontend:{frontend_port} (malbox PID {frontend_state['pid']})")
+            running_managed.append(f"frontend:{frontend_port} (verified malbox PID {fe_state['pid']})")
         else:
             conflicts.append(f"frontend port {frontend_port}")
 
@@ -600,16 +641,22 @@ def check_ports(
         "frontend_port": frontend_port,
         "conflicts": conflicts,
         "running_managed": running_managed,
+        "pid_warnings": pid_warnings,
     }
 
-    if conflicts:
+    if conflicts or pid_warnings:
+        msg_parts = []
+        if conflicts:
+            msg_parts.append(f"Port conflict detected on {', '.join(conflicts)} (held by external/unmanaged process)")
+        if pid_warnings:
+            msg_parts.append("; ".join(pid_warnings))
         return CheckResult(
             id="ports",
             name="Network Port Availability",
             status=CheckStatus.WARN,
-            summary=f"Port conflict detected on {', '.join(conflicts)} (in use by another process).",
+            summary=". ".join(msg_parts) + ".",
             details=details,
-            remediation="Stop the conflicting process or change `MALBOX_PORT` / `MALBOX_FRONTEND_PORT` in `.env` before running `./malbox start`.",
+            remediation="Stop the conflicting external process or update `MALBOX_PORT` / `MALBOX_FRONTEND_PORT` in `.env`. Inspect any unverified PID files in `.malbox/` manually.",
         )
 
     if running_managed:
@@ -617,7 +664,7 @@ def check_ports(
             id="ports",
             name="Network Port Availability",
             status=CheckStatus.PASS,
-            summary=f"Ports bound by active malbox services: {', '.join(running_managed)}.",
+            summary=f"Ports bound by verified malbox services: {', '.join(running_managed)}.",
             details=details,
         )
 

@@ -88,21 +88,35 @@ def _format_start_human(res: Dict[str, Any]) -> str:
 
 
 def _format_stop_human(res: Dict[str, Any]) -> str:
-    lines = ["malbox-ai service shutdown:"]
+    tag = "[FAIL]" if res.get("exit_code", 0) != 0 else "[PASS]"
+    lines = [f"{tag} malbox-ai service shutdown ({res.get('status', 'unknown')}):"]
+    details = res.get("details", {})
     for svc, outcome in res.get("services", {}).items():
-        lines.append(f"  * {svc:<10}: {outcome}")
+        extra = f" — {details[svc]}" if svc in details and details[svc] else ""
+        lines.append(f"  * {svc:<10}: {outcome}{extra}")
+    if res.get("errors"):
+        lines.append("Errors:")
+        for err in res["errors"]:
+            lines.append(f"  ! {err}")
     return "\n".join(lines)
 
 
 def _format_status_human(res: Dict[str, Any]) -> str:
+    if res.get("exit_code", 0) != 0:
+        errs = "; ".join(res.get("errors", [])) or "Invalid configuration"
+        return f"[FAIL] malbox-ai Status ({res.get('status', 'error')}): {errs}"
     be = res["backend"]
     fe = res["frontend"]
     lines = [
         f"malbox-ai Status — Active Mode: {res['mode'].upper()} (backend default: {res['default_backend']})",
-        f"  Backend : {be['status'].upper():<10} PID={be['pid'] or '-':<7} {be['url']}",
-        f"  Frontend: {fe['status'].upper():<10} PID={fe['pid'] or '-':<7} {fe['url']}",
+        f"  Backend : {be['status'].upper():<12} PID={str(be['pid'] or '-'):<7} {be['url']}",
+        f"  Frontend: {fe['status'].upper():<12} PID={str(fe['pid'] or '-'):<7} {fe['url']}",
         f"  Logs    : {be['log_file']} | {fe['log_file']}",
     ]
+    if not be.get("verified_ownership") and be.get("pid"):
+        lines.append(f"  ! Backend PID warning: {be.get('ownership_reason')}")
+    if not fe.get("verified_ownership") and fe.get("pid"):
+        lines.append(f"  ! Frontend PID warning: {fe.get('ownership_reason')}")
     return "\n".join(lines)
 
 
@@ -124,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--verbose", "-v", action="store_true", help="Show detailed metadata per check")
     p_doc.add_argument("--skip-frontend", action="store_true", help="Skip Node.js/npm/frontend checks and setup")
     p_doc.add_argument("--no-build", action="store_true", help="Skip building frontend/dist during setup")
+    p_doc.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run an isolated end-to-end Replay smoke test (synthetic only; does not modify user data)",
+    )
     p_doc.add_argument(
         "--overwrite-env",
         action="store_true",
@@ -166,6 +185,14 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
     repo_root = (root_dir or find_repo_root()).resolve()
 
     if args.command == "doctor":
+        if args.check and args.smoke_test:
+            err_msg = "--check is strictly read-only and cannot be combined with --smoke-test."
+            if args.json:
+                print(json.dumps({"mode": "check", "overall_status": "FAIL", "exit_code": 1, "error": err_msg}, indent=2))
+            else:
+                print(f"[FAIL] {err_msg}", file=sys.stderr)
+            return 1
+
         confirm_overwrite = False
         if args.overwrite_env and (repo_root / ".env").exists():
             if args.yes:
@@ -186,13 +213,22 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
                     print(f"[FAIL] {err_payload['error']}", file=sys.stderr)
                 return 1
 
-        mode = "check" if args.check else ("repair" if args.repair else "default")
+        if args.check:
+            mode = "check"
+        elif args.repair:
+            mode = "repair"
+        elif args.smoke_test:
+            mode = "smoke"
+        else:
+            mode = "default"
+
         report = run_doctor(
             repo_root,
             mode=mode,
             skip_frontend=args.skip_frontend,
             confirm_overwrite_env=confirm_overwrite,
             build_frontend=not args.no_build,
+            smoke_test=args.smoke_test,
         )
         if args.json:
             print(json.dumps(report, indent=2))

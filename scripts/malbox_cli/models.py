@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -57,6 +58,15 @@ class CheckResult:
         return data
 
 
+@dataclass
+class ProcessVerification:
+    """Result of strong OS-level process ownership verification."""
+    status: str  # "valid", "stale", "reused_pid", "unverified", "invalid_state"
+    pid: Optional[int]
+    os_pgid: Optional[int]
+    reason: str
+
+
 CommandRunner = Callable[..., subprocess.CompletedProcess]
 
 
@@ -76,6 +86,20 @@ def default_command_runner(
         timeout=timeout,
         check=False,
     )
+
+
+def chmod_safe(path: Path, mode: int) -> bool:
+    """Applies POSIX permissions safely on supported platforms."""
+    if os.name != "posix" or not path.exists():
+        return False
+    try:
+        current = path.stat().st_mode & 0o777
+        if current != mode:
+            path.chmod(mode)
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def strip_unquoted_inline_comment(value: str) -> str:
@@ -166,6 +190,43 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None or value == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_port_value(raw: Optional[str], default: int, var_name: str) -> Tuple[Optional[int], Optional[str]]:
+    """Validates TCP port strings strictly (1-65535)."""
+    if raw is None or raw.strip() == "":
+        return default, None
+    clean = raw.strip()
+    if not re.fullmatch(r"\d+", clean):
+        return None, f"Invalid {var_name} value '{raw}': must be an integer between 1 and 65535."
+    port = int(clean)
+    if port < 1 or port > 65535:
+        return None, f"Invalid {var_name} port {port}: must be between 1 and 65535."
+    return port, None
+
+
+def resolve_ports_strict(config: Dict[str, str]) -> Tuple[Optional[Tuple[str, int, int]], List[str]]:
+    """
+    Validates host, backend port, and frontend port strictly without silent fallback.
+    Returns ((host, backend_port, frontend_port), errors).
+    """
+    errors: List[str] = []
+    host = (config.get("MALBOX_HOST") or "127.0.0.1").strip()
+    if not host:
+        errors.append("Invalid MALBOX_HOST: cannot be empty.")
+
+    be_port, be_err = parse_port_value(config.get("MALBOX_PORT"), 8000, "MALBOX_PORT")
+    fe_port, fe_err = parse_port_value(config.get("MALBOX_FRONTEND_PORT"), 5173, "MALBOX_FRONTEND_PORT")
+    if be_err:
+        errors.append(be_err)
+    if fe_err:
+        errors.append(fe_err)
+    if be_port is not None and fe_port is not None and be_port == fe_port:
+        errors.append(f"Port collision in configuration: MALBOX_PORT and MALBOX_FRONTEND_PORT cannot both be {be_port}.")
+
+    if errors or be_port is None or fe_port is None:
+        return None, errors
+    return (host, be_port, fe_port), []
 
 
 def resolve_repo_path(root_dir: Path, raw_path: str, fallback: Path) -> Path:
@@ -280,7 +341,7 @@ def read_pid_state(pid_file: Path) -> Optional[Dict[str, Any]]:
         if not raw:
             return None
         data = json.loads(raw)
-        if isinstance(data, dict) and isinstance(data.get("pid"), int):
+        if isinstance(data, dict) and isinstance(data.get("pid"), int) and not isinstance(data.get("pid"), bool):
             return data
     except Exception:
         pass
@@ -289,12 +350,63 @@ def read_pid_state(pid_file: Path) -> Optional[Dict[str, Any]]:
 
 def _read_proc_cmdline(pid: int) -> Optional[str]:
     cmdline_path = Path(f"/proc/{pid}/cmdline")
-    if not cmdline_path.is_file():
-        return None
+    if cmdline_path.is_file():
+        try:
+            raw = cmdline_path.read_bytes()
+            return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        except Exception:
+            return None
+    if platform.system() == "Darwin":
+        try:
+            out = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True, timeout=3)
+            return out.strip()
+        except Exception:
+            return None
+    return None
+
+
+def get_process_start_time(pid: int) -> Optional[str]:
+    """
+    Returns an immutable OS start-time token for a live PID to defend against PID reuse.
+    Reads field 22 (starttime in clock ticks) of /proc/<pid>/stat on Linux,
+    or `ps -o lstart=` on macOS/BSD.
+    """
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.is_file():
+        try:
+            content = stat_path.read_text(encoding="utf-8", errors="replace")
+            rparen = content.rfind(")")
+            if rparen != -1:
+                fields = content[rparen + 2:].split()
+                # Field 3 is index 0 after ')'; field 22 (starttime) is index 19
+                if len(fields) > 19:
+                    return f"ticks:{fields[19]}"
+        except Exception:
+            return None
+    if platform.system() == "Darwin":
+        try:
+            out = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="], text=True, timeout=3).strip()
+            if out:
+                return f"lstart:{out}"
+        except Exception:
+            return None
+    return None
+
+
+def get_process_cwd(pid: int) -> Optional[Path]:
+    cwd_link = Path(f"/proc/{pid}/cwd")
+    if cwd_link.exists():
+        try:
+            return cwd_link.resolve()
+        except Exception:
+            return None
+    return None
+
+
+def get_os_process_group(pid: int) -> Optional[int]:
     try:
-        raw = cmdline_path.read_bytes()
-        return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
-    except Exception:
+        return os.getpgid(pid)
+    except OSError:
         return None
 
 
@@ -312,28 +424,160 @@ def _is_zombie_proc(pid: int) -> bool:
     return False
 
 
-def is_pid_running(pid: int, expected_substrings: Optional[List[str]] = None) -> bool:
+def _probe_pid_liveness(pid: int) -> str:
+    """Returns 'alive', 'dead', or 'permission_denied'."""
     if pid <= 0:
-        return False
+        return "dead"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return "dead"
     except PermissionError:
-        return True
+        return "permission_denied"
     except OSError:
-        return False
+        return "dead"
 
     if _is_zombie_proc(pid):
-        return False
+        return "dead"
+    return "alive"
 
-    if expected_substrings:
-        cmdline = _read_proc_cmdline(pid)
-        if cmdline:
-            lowered = cmdline.lower()
-            if not any(sub.lower() in lowered for sub in expected_substrings):
-                return False
-    return True
+
+def verify_managed_process(
+    state: Optional[Dict[str, Any]],
+    expected_service: str,
+    root_dir: Path,
+    *,
+    liveness_fn: Callable[[int], str] = _probe_pid_liveness,
+    start_time_fn: Callable[[int], Optional[str]] = get_process_start_time,
+    cmdline_fn: Callable[[int], Optional[str]] = _read_proc_cmdline,
+    cwd_fn: Callable[[int], Optional[Path]] = get_process_cwd,
+    getpgid_fn: Callable[[int], Optional[int]] = get_os_process_group,
+) -> ProcessVerification:
+    """
+    Strictly verifies whether a PID state file corresponds to a genuine live malbox service process.
+    Defends against stale PIDs, PID reuse, manipulated PID/PGID state files, and unrelated Python/Node processes.
+    """
+    if not state or not isinstance(state, dict):
+        return ProcessVerification("invalid_state", None, None, "PID file is missing or corrupt JSON.")
+
+    pid = state.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return ProcessVerification("invalid_state", None, None, f"PID file contains invalid PID value: {pid!r}.")
+
+    recorded_service = state.get("service")
+    if recorded_service and recorded_service != expected_service:
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"PID file service '{recorded_service}' does not match expected '{expected_service}'.",
+        )
+
+    liveness = liveness_fn(pid)
+    if liveness == "dead":
+        return ProcessVerification("stale", pid, None, f"Process PID {pid} is no longer running.")
+    if liveness == "permission_denied":
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"OS denied access inspecting live PID {pid}; refusing to signal process owned by another user.",
+        )
+
+    # Mandatory start identity verification against PID reuse
+    recorded_start = state.get("proc_start_time")
+    if not recorded_start or not isinstance(recorded_start, str):
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"PID file for PID {pid} lacks verified process start identity (`proc_start_time`).",
+        )
+
+    live_start = start_time_fn(pid)
+    if not live_start:
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"Unable to read OS start time for live PID {pid}; refusing blind signal.",
+        )
+
+    if live_start != recorded_start:
+        return ProcessVerification(
+            "reused_pid",
+            pid,
+            None,
+            f"PID {pid} was reused by another process (recorded start={recorded_start}, live start={live_start}).",
+        )
+
+    # Exact service command signature verification (NEVER match bare "python" or "node")
+    cmdline = cmdline_fn(pid)
+    if not cmdline:
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"Unable to read OS command line for PID {pid}.",
+        )
+
+    lowered_cmd = cmdline.lower()
+    if expected_service == "backend":
+        has_signature = ("uvicorn" in lowered_cmd) and ("app.main:app" in lowered_cmd)
+        expected_cwd = root_dir.resolve()
+    elif expected_service == "frontend":
+        has_signature = "vite" in lowered_cmd
+        expected_cwd = (root_dir / "frontend").resolve()
+    else:
+        return ProcessVerification("unverified", pid, None, f"Unknown service type '{expected_service}'.")
+
+    if not has_signature:
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"Live PID {pid} command line does not match managed {expected_service} signature (`{cmdline[:120]}`).",
+        )
+
+    # Verify recorded port / expected command tokens if present
+    recorded_port = state.get("port")
+    if isinstance(recorded_port, int):
+        port_token = str(recorded_port)
+        if port_token not in cmdline:
+            return ProcessVerification(
+                "unverified",
+                pid,
+                None,
+                f"Live PID {pid} command line does not include expected port {port_token}.",
+            )
+
+    # Verify working directory / repo association when OS exposes cwd
+    recorded_root = state.get("root_dir")
+    if recorded_root and Path(recorded_root).resolve() != root_dir.resolve():
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"PID file belongs to a different workspace (`{recorded_root}` != `{root_dir.resolve()}`).",
+        )
+
+    live_cwd = cwd_fn(pid)
+    if live_cwd is not None and live_cwd != expected_cwd and str(root_dir.resolve()) not in cmdline:
+        return ProcessVerification(
+            "unverified",
+            pid,
+            None,
+            f"Live PID {pid} working directory (`{live_cwd}`) does not match expected `{expected_cwd}`.",
+        )
+
+    # Query actual OS PGID directly (NEVER trust a stored PGID from disk)
+    os_pgid = getpgid_fn(pid)
+    return ProcessVerification(
+        "valid",
+        pid,
+        os_pgid,
+        f"Verified live managed {expected_service} PID {pid} (os_pgid={os_pgid}).",
+    )
 
 
 def redacted_config_summary(config: Dict[str, str]) -> Dict[str, Any]:
