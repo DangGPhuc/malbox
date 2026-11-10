@@ -1,17 +1,32 @@
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { DashboardPage } from './pages/DashboardPage';
 import { SubmitPage } from './pages/SubmitPage';
 import { WorkspacePage } from './pages/WorkspacePage';
-import { BehaviorGraphPage } from './pages/BehaviorGraphPage';
 import { ReportPage } from './pages/ReportPage';
 import { api } from './api/client';
 import { HealthStatus } from './types';
 
+const BehaviorGraphPage = lazy(() =>
+  import('./pages/BehaviorGraphPage').then((mod) => ({ default: mod.BehaviorGraphPage }))
+);
+
+function readInitialHashRoute(): { tab: string; analysisId: string | null } {
+  if (typeof window === 'undefined' || !window.location.hash) {
+    return { tab: 'dashboard', analysisId: null };
+  }
+  const match = window.location.hash.match(/^#(workspace|graph|report)\/([a-zA-Z0-9_-]{4,80})$/);
+  if (!match) {
+    return { tab: 'dashboard', analysisId: null };
+  }
+  return { tab: match[1], analysisId: match[2] };
+}
+
 export default function App() {
-  const [currentTab, setCurrentTab] = useState<string>('dashboard');
+  const initialRoute = readInitialHashRoute();
+  const [currentTab, setCurrentTab] = useState<string>(initialRoute.tab);
   const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [activeAnalysisId, setActiveAnalysisId] = useState<string | null>(null);
+  const [activeAnalysisId, setActiveAnalysisId] = useState<string | null>(initialRoute.analysisId);
 
   useEffect(() => {
     api
@@ -59,11 +74,22 @@ export default function App() {
         )}
 
         {currentTab === 'graph' && activeAnalysisId && (
-          <BehaviorGraphPage analysisId={activeAnalysisId} />
+          <Suspense
+            fallback={
+              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+                Loading interactive behavior graph...
+              </div>
+            }
+          >
+            <BehaviorGraphPage analysisId={activeAnalysisId} />
+          </Suspense>
         )}
 
         {currentTab === 'report' && activeAnalysisId && (
-          <ReportPage analysisId={activeAnalysisId} />
+          <ReportPage
+            analysisId={activeAnalysisId}
+            onNavigateTab={(tab) => setCurrentTab(tab)}
+          />
         )}
       </main>
     </div>

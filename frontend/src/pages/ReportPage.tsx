@@ -1,271 +1,309 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  FileText,
-  Download,
-  ExternalLink,
-  ShieldAlert,
-  ShieldCheck,
-  Cpu,
-  Layers,
-  Globe,
-  Database,
-  Terminal,
-  HelpCircle,
   AlertTriangle,
+  Layers,
+  Clock,
+  FileSearch,
+  Globe,
+  ShieldCheck,
+  LucideIcon,
 } from 'lucide-react';
 import { api } from '../api/client';
-import { ReportResponse, ProcessTreeResponse } from '../types';
+import {
+  AnalysisEvent,
+  ArtifactItem,
+  ReportResponse,
+} from '../types';
+import {
+  AIProviderStatus,
+  AnalystNarrative,
+  AttackStoryTimeline,
+  ConfidencePanel,
+  EvidenceExplorer,
+  EvidenceLinkedClaim,
+  ExecutiveAssessment,
+  IntelligenceReportHeader,
+  InvestigationRecommendations,
+  IOCIntelligenceTable,
+  ReplayProvenanceBanner,
+  ValidationSummaryPanel,
+  getReplayScenarioId,
+  isReplayReport,
+} from '../components/IntelligenceReport';
 
 interface ReportPageProps {
   analysisId: string;
+  onNavigateTab?: (tab: string) => void;
 }
 
-export const ReportPage: React.FC<ReportPageProps> = ({ analysisId }) => {
-  const [reportData, setReportData] = useState<ReportResponse | null>(null);
-  const [processTree, setProcessTree] = useState<ProcessTreeResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+type ReportViewTab = 'all' | 'claims' | 'timeline' | 'iocs' | 'review';
 
-  const fetchReport = async () => {
+export const ReportPage: React.FC<ReportPageProps> = ({
+  analysisId,
+  onNavigateTab,
+}) => {
+  const [reportData, setReportData] = useState<ReportResponse | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
+  const [eventsCache, setEventsCache] = useState<AnalysisEvent[]>([]);
+  const [eventsLoaded, setEventsLoaded] = useState(false);
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [eventsFetchError, setEventsFetchError] = useState<string | null>(null);
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<ReportViewTab>('all');
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
     try {
       setLoading(true);
-      const [rep, tree] = await Promise.all([
+      setLoadError(null);
+      const [rep, arts] = await Promise.all([
         api.getReport(analysisId),
-        api.getProcessTree(analysisId),
+        api.getArtifacts(analysisId).catch(() => [] as ArtifactItem[]),
       ]);
       setReportData(rep);
-      setProcessTree(tree);
+      setArtifacts(arts);
     } catch (err) {
-      console.error(err);
+      setLoadError(err instanceof Error ? err.message : 'Unable to load analysis report.');
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchReport();
   }, [analysisId]);
 
-  const handleDownloadJSON = () => {
-    if (!reportData) return;
-    const blob = new Blob([JSON.stringify(reportData.full_report, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `malbox_report_${analysisId}.json`;
-    a.click();
-  };
+  useEffect(() => {
+    setEventsCache([]);
+    setEventsLoaded(false);
+    setSelectedEvidenceId(null);
+    setEventsFetchError(null);
+    void fetchReport();
+  }, [fetchReport]);
 
-  if (loading) {
+  const ensureEventsLoaded = useCallback(
+    async (targetEvidenceId: string) => {
+      if (eventsLoaded || loadingEvents) return;
+      // Sample/artifact/finding references resolve cleanly without fetching /events unless needed
+      if (
+        targetEvidenceId.startsWith('sample:') ||
+        targetEvidenceId.startsWith('artifact:') ||
+        targetEvidenceId.startsWith('finding:') ||
+        targetEvidenceId.startsWith('rule:')
+      ) {
+        return;
+      }
+
+      setLoadingEvents(true);
+      setEventsFetchError(null);
+      try {
+        const firstPage = await api.getEvents(analysisId, { page: 1, page_size: 200 });
+        let collected = [...firstPage.items];
+        const foundInFirst = collected.some((e) => e.id === targetEvidenceId);
+        // Bounded pagination only if event ID wasn't on page 1 and more pages exist
+        if (!foundInFirst && firstPage.total > collected.length) {
+          const maxPages = Math.min(3, Math.ceil(firstPage.total / 200));
+          for (let page = 2; page <= maxPages; page += 1) {
+            const next = await api.getEvents(analysisId, { page, page_size: 200 });
+            collected = collected.concat(next.items);
+            if (next.items.some((e) => e.id === targetEvidenceId)) break;
+          }
+        }
+        setEventsCache(collected);
+        setEventsLoaded(true);
+      } catch (err) {
+        setEventsFetchError(
+          err instanceof Error ? err.message : 'Failed to fetch telemetry events from backend.'
+        );
+      } finally {
+        setLoadingEvents(false);
+      }
+    },
+    [analysisId, eventsLoaded, loadingEvents]
+  );
+
+  const handleInspectEvidence = useCallback(
+    (evidenceId: string) => {
+      setSelectedEvidenceId(evidenceId);
+      void ensureEventsLoaded(evidenceId);
+    },
+    [ensureEventsLoaded]
+  );
+
+  if (loading && !reportData) {
     return (
-      <div className="container" style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
-        Loading intelligence report...
+      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+        Loading forensic intelligence report...
+      </div>
+    );
+  }
+
+  if (loadError && !reportData) {
+    return (
+      <div className="container" style={{ maxWidth: '800px', padding: '3rem 1rem' }}>
+        <div className="card" style={{ borderColor: 'rgba(239, 68, 68, 0.45)', color: '#fecaca' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <AlertTriangle size={18} color="#ef4444" aria-hidden="true" />
+            <strong>Failed to Retrieve Report</strong>
+          </div>
+          <div style={{ fontSize: '0.88rem', color: '#cbd5e1', marginBottom: '0.85rem' }}>{loadError}</div>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => void fetchReport()}>
+            Retry Load
+          </button>
+        </div>
       </div>
     );
   }
 
   if (!reportData) {
     return (
-      <div className="container" style={{ textAlign: 'center', padding: '4rem 0', color: '#64748b' }}>
-        Report not yet generated for this task.
+      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#64748b' }}>
+        Report not yet generated for this analysis task.
       </div>
     );
   }
 
-  const { full_report, risk_score, risk_level, executive_summary } = reportData;
-  const { sample_metadata, mitre_attack_mappings, findings, extracted_iocs, confidence_and_limitations, recommended_follow_up } = full_report;
+  const { full_report } = reportData;
+  const intel = full_report.intelligence_report ?? null;
+  const isReplay = isReplayReport(reportData);
+  const scenarioId = getReplayScenarioId(reportData);
+  const hasSyntheticArtifacts =
+    isReplay && (full_report.artifacts.length > 0 || artifacts.length > 0);
 
-  const scoreBadgeClass =
-    risk_level === 'Malicious'
-      ? 'badge-malicious'
-      : risk_level === 'Suspicious'
-      ? 'badge-suspicious'
-      : 'badge-clean';
+  const sectionTabs: Array<{ id: ReportViewTab; label: string; icon: LucideIcon }> = [
+    { id: 'all', label: 'Complete Report', icon: Layers },
+    { id: 'claims', label: `Claims & Findings (${intel?.technical_claims?.length ?? full_report.findings.length})`, icon: FileSearch },
+    { id: 'timeline', label: 'Attack Story', icon: Clock },
+    { id: 'iocs', label: 'IOCs & Artifacts', icon: Globe },
+    { id: 'review', label: 'Confidence & Limitations', icon: ShieldCheck },
+  ];
+
+  const showSection = (id: Exclude<ReportViewTab, 'all'>) =>
+    activeSection === 'all' || activeSection === id;
 
   return (
-    <div className="container" style={{ maxWidth: '1200px' }}>
-      {/* Report Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', borderBottom: '1px solid #1e293b', paddingBottom: '1rem' }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-            <FileText size={24} color="#38bdf8" />
-            <h1 style={{ fontSize: '1.75rem', fontWeight: 800, margin: 0, color: '#f8fafc' }}>
-              Forensic Analysis Intelligence Report
-            </h1>
-          </div>
-          <div style={{ fontSize: '0.85rem', color: '#64748b', marginTop: '4px' }}>
-            Analysis ID: <span className="mono">{analysisId}</span> | Generated: {new Date(full_report.generated_at).toLocaleString()}
-          </div>
-        </div>
+    <div className="container" style={{ maxWidth: '1320px' }}>
+      <IntelligenceReportHeader
+        analysisId={analysisId}
+        reportData={reportData}
+        onNavigateTab={onNavigateTab}
+      />
 
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button onClick={handleDownloadJSON} className="btn btn-secondary">
-            <Download size={15} /> Export JSON
-          </button>
-          <a
-            href={`/api/v1/analyses/${analysisId}/report/html`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn btn-primary"
-          >
-            <ExternalLink size={15} /> Standalone HTML
-          </a>
-        </div>
-      </div>
+      <ReplayProvenanceBanner
+        isReplay={isReplay}
+        scenarioId={scenarioId}
+        provenanceSummary={intel?.provenance_summary}
+        provenanceDisclaimer={full_report.provenance_disclaimer}
+        hasSyntheticArtifacts={hasSyntheticArtifacts}
+      />
 
-      {/* Executive Summary Card */}
-      <div className="card" style={{ borderLeft: `4px solid ${risk_level === 'Malicious' ? '#ef4444' : '#38bdf8'}` }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
-          <h2 style={{ fontSize: '1.2rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
-            Executive Threat Summary
-          </h2>
-          <span className={`badge ${scoreBadgeClass}`} style={{ fontSize: '0.85rem', padding: '0.3rem 0.8rem' }}>
-            {risk_level} ({risk_score}/100)
-          </span>
-        </div>
-        <p style={{ fontSize: '1rem', color: '#e2e8f0', lineHeight: 1.6, margin: 0 }}>
-          {executive_summary}
-        </p>
-      </div>
+      <AIProviderStatus
+        analysisId={analysisId}
+        providerMetadata={intel?.provider_metadata ?? null}
+        onEnrichmentSuccess={fetchReport}
+      />
 
-      {/* Sample Metadata & Environment Grid */}
-      <div className="grid-2">
-        <div className="card">
-          <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <Layers size={16} color="#38bdf8" /> Sample Metadata & PE Triage
-          </h3>
-          <div style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-            <div><strong style={{ color: '#94a3b8' }}>File Name:</strong> {sample_metadata.file_name}</div>
-            <div><strong style={{ color: '#94a3b8' }}>File Size:</strong> {sample_metadata.file_size} bytes</div>
-            <div><strong style={{ color: '#94a3b8' }}>SHA-256:</strong> <span className="mono" style={{ fontSize: '0.75rem' }}>{sample_metadata.sha256}</span></div>
-            <div><strong style={{ color: '#94a3b8' }}>Entropy:</strong> {sample_metadata.pe_metadata?.overall_entropy ?? 'N/A'}</div>
-            <div><strong style={{ color: '#94a3b8' }}>Subsystem:</strong> {sample_metadata.pe_metadata?.subsystem ?? 'N/A'}</div>
-          </div>
-        </div>
+      {selectedEvidenceId && (
+        <EvidenceExplorer
+          selectedEvidenceId={selectedEvidenceId}
+          fullReport={full_report}
+          events={eventsCache}
+          artifacts={artifacts}
+          loadingEvents={loadingEvents}
+          eventsFetchError={eventsFetchError}
+          onClose={() => setSelectedEvidenceId(null)}
+          onSelectEvidence={handleInspectEvidence}
+        />
+      )}
 
-        <div className="card">
-          <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <Globe size={16} color="#38bdf8" /> Extracted Network & Host IOCs
-          </h3>
-          <div style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-            <div>
-              <strong style={{ color: '#94a3b8' }}>Domains Contacted:</strong>{' '}
-              <span className="mono" style={{ color: '#38bdf8' }}>{extracted_iocs.domains.join(', ') || 'None'}</span>
-            </div>
-            <div>
-              <strong style={{ color: '#94a3b8' }}>Remote IPs:</strong>{' '}
-              <span className="mono" style={{ color: '#38bdf8' }}>{extracted_iocs.ips.join(', ') || 'None'}</span>
-            </div>
-            <div>
-              <strong style={{ color: '#94a3b8' }}>Persistence Keys:</strong>{' '}
-              <span className="mono">{extracted_iocs.registry_keys.join(', ') || 'None'}</span>
-            </div>
-            <div>
-              <strong style={{ color: '#94a3b8' }}>Dropped Payloads:</strong>{' '}
-              <span>{extracted_iocs.dropped_files.length} item(s)</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Behavioral Findings Table */}
-      <div className="card">
-        <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.1rem', color: '#f8fafc' }}>
-          Behavioral Findings & Evidence Provenance ({findings.length})
-        </h3>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Severity</th>
-              <th>Finding Title</th>
-              <th>Description</th>
-              <th>MITRE ATT&CK</th>
-              <th>Evidence Event IDs</th>
-            </tr>
-          </thead>
-          <tbody>
-            {findings.map((f) => (
-              <tr key={f.id}>
-                <td>
-                  <span className={`badge ${f.severity === 'Critical' ? 'badge-malicious' : f.severity === 'High' ? 'badge-suspicious' : 'badge-low'}`}>
-                    {f.severity}
-                  </span>
-                </td>
-                <td style={{ fontWeight: 600, color: '#f8fafc' }}>{f.title}</td>
-                <td>{f.description}</td>
-                <td>
-                  {f.mitre_attack_id ? (
-                    <span className="mono" style={{ color: '#38bdf8' }}>{f.mitre_attack_id}</span>
-                  ) : (
-                    'N/A'
-                  )}
-                </td>
-                <td>
-                  <span className="mono" style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                    {f.supporting_event_ids?.length ?? 0} events
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* MITRE ATT&CK Matrix Grid */}
-      <div className="card">
-        <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.1rem', color: '#f8fafc' }}>
-          MITRE ATT&CK Technique Mappings ({mitre_attack_mappings.length})
-        </h3>
-        <div className="grid-2">
-          {mitre_attack_mappings.map((m) => (
-            <div
-              key={m.technique_id}
-              style={{
-                background: '#0b1120',
-                borderLeft: '4px solid #38bdf8',
-                borderRadius: '6px',
-                padding: '0.75rem 1rem',
-              }}
+      {/* Section View Switcher */}
+      <div className="report-tabs-bar no-print" role="tablist" aria-label="Report sections">
+        {sectionTabs.map((tab) => {
+          const Icon = tab.icon;
+          const active = activeSection === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              className={`btn btn-sm ${active ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setActiveSection(tab.id)}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontWeight: 700, color: '#38bdf8' }}>{m.technique_id}: {m.technique_name}</span>
-                <span className="badge badge-info" style={{ fontSize: '0.65rem' }}>{m.tactic}</span>
-              </div>
-              <p style={{ margin: '4px 0 0 0', fontSize: '0.85rem', color: '#cbd5e1' }}>
-                {m.description}
+              <Icon size={14} aria-hidden="true" />
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeSection === 'all' && <ExecutiveAssessment fullReport={full_report} />}
+
+      {showSection('claims') && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginBottom: '1.25rem' }}>
+          {intel ? (
+            <EvidenceLinkedClaim
+              claims={intel.technical_claims}
+              onInspectEvidence={handleInspectEvidence}
+            />
+          ) : (
+            <section className="card">
+              <h2 style={{ fontSize: '1.05rem', margin: '0 0 0.45rem 0', color: '#f8fafc' }}>
+                Evidence-Linked AI Claims
+              </h2>
+              <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8' }}>
+                This report was generated before Phase 2A structured intelligence claims. Use “Run / Re-Generate Intelligence” above with a valid <code className="mono">X-Reporting-Token</code> to build grounded claims without executing any external calls unless opted in.
               </p>
-            </div>
-          ))}
-        </div>
-      </div>
+            </section>
+          )}
 
-      {/* Confidence & Follow-up Grid */}
-      <div className="grid-2">
-        <div className="card">
-          <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem', color: '#f8fafc' }}>
-            Confidence & Analysis Limitations
-          </h3>
-          <p style={{ fontSize: '0.85rem', color: '#cbd5e1', lineHeight: 1.5 }}>
-            {confidence_and_limitations.sandbox_evasion_risk}
-          </p>
-          <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-            Confinement: {confidence_and_limitations.network_confinement}
+          <AnalystNarrative
+            narrative={intel?.behavioral_narrative}
+            findings={full_report.findings}
+            mitreMappings={full_report.mitre_attack_mappings}
+            onInspectEvidence={handleInspectEvidence}
+          />
+        </div>
+      )}
+
+      {showSection('timeline') && (
+        <AttackStoryTimeline
+          timelineInterpretations={intel?.timeline_interpretations ?? []}
+          executionTimeline={full_report.execution_timeline}
+          findings={full_report.findings}
+          isReplay={isReplay}
+          onInspectEvidence={handleInspectEvidence}
+          onNavigateTab={onNavigateTab}
+        />
+      )}
+
+      {showSection('iocs') && (
+        <IOCIntelligenceTable
+          extractedIocs={full_report.extracted_iocs}
+          iocInterpretations={intel?.ioc_interpretations ?? []}
+          artifacts={full_report.artifacts}
+          downloadableArtifacts={artifacts}
+          isReplay={isReplay}
+          onInspectEvidence={handleInspectEvidence}
+        />
+      )}
+
+      {showSection('review') && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          <div className="grid-2">
+            <ConfidencePanel
+              confidenceAssessment={intel?.confidence_assessment ?? null}
+              truncation={intel?.evidence_truncation ?? null}
+              gaps={intel?.contradictions_or_gaps ?? []}
+              limitations={intel?.limitations ?? []}
+              baselineLimitations={full_report.confidence_and_limitations}
+            />
+            <ValidationSummaryPanel validationSummary={intel?.validation_summary ?? null} />
           </div>
-        </div>
 
-        <div className="card">
-          <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem', color: '#f8fafc' }}>
-            Recommended Follow-Up Analysis
-          </h3>
-          <ul style={{ fontSize: '0.85rem', color: '#cbd5e1', paddingLeft: '1.25rem', margin: 0 }}>
-            {((recommended_follow_up?.recommendations as string[]) || []).map((rec, i) => (
-              <li key={i} style={{ marginBottom: '4px' }}>{rec}</li>
-            ))}
-          </ul>
+          <InvestigationRecommendations
+            actions={intel?.recommended_follow_up_actions ?? []}
+            legacyFollowUp={full_report.recommended_follow_up}
+          />
         </div>
-      </div>
+      )}
     </div>
   );
 };
-

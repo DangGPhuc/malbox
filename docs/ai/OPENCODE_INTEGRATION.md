@@ -2,7 +2,7 @@
 
 ## 1. Purpose and Scope
 
-`OpenCodeReportProvider` ([`opencode_provider.py`](file:///home/kali/Documents/malbox/backend/app/ai/opencode_provider.py)) provides an **optional, opt-in, disabled-by-default** adapter for running an external OpenCode CLI agent over a verified evidence bundle isolated from the Malbox repository, quarantine directory, user home directory, and host secrets.
+`OpenCodeReportProvider` ([`opencode_provider.py`](../../backend/app/ai/opencode_provider.py)) provides an **optional, opt-in, disabled-by-default** adapter for running an external OpenCode CLI agent over a verified evidence bundle isolated from the Malbox repository, quarantine directory, user home directory, and host secrets.
 
 - OpenCode is **not** required to install, bootstrap (`./malbox doctor`), start, or use Malbox in Replay Mode, deterministic reporting, or direct HTTP LLM mode.
 - **Tested Baseline & Dynamic Version Check**: Verified against `opencode v2.1.4` (`TESTED_OPENCODE_VERSION = "2.1.4"`, `MIN_SUPPORTED_OPENCODE_VERSION = (2, 0, 0)`, `MAX_EXCLUSIVE_OPENCODE_VERSION = (3, 0, 0)`). Every execution dynamically validates `opencode --version` inside Bubblewrap (`parse_opencode_semver()`) and fails closed on unparseable output or incompatible versions (`< 2.0.0` or `>= 3.0.0`).
@@ -11,7 +11,7 @@
 
 ## 2. Primary Agent Execution Mode & Permission Policy
 
-The repository defines the restricted analyst agent at [`.opencode/agents/report-analyst.md`](file:///home/kali/Documents/malbox/.opencode/agents/report-analyst.md):
+The repository defines the restricted analyst agent at [`.opencode/agents/report-analyst.md`](../../.opencode/agents/report-analyst.md):
 
 1. **Primary Mode (`mode: primary`)**: Enables direct `opencode run --standalone --format json --agent report-analyst --file evidence_bundle.json` execution cleanly without falling back to a default privileged agent.
 2. **Built-In Privileged Agents Disabled**: Inside the ephemeral workspace, `_build_locked_opencode_config()` writes `opencode.json` (`0o400`) setting `"default_agent": "report-analyst"` and `"disable": true` for `"build"`, `"plan"`, `"general"`, and `"explore"`. Attempts to invoke `--agent build` are rejected by the CLI (`Agent not found`).
@@ -26,7 +26,7 @@ The repository defines the restricted analyst agent at [`.opencode/agents/report
 
 ## 3. Genuine OS Security Boundary (`bwrap` + `ApprovedProviderProxy`)
 
-Implemented in [`opencode_sandbox.py`](file:///home/kali/Documents/malbox/backend/app/ai/opencode_sandbox.py):
+Implemented in [`opencode_sandbox.py`](../../backend/app/ai/opencode_sandbox.py):
 
 1. **Fail-Closed OS Sandbox Preflight (`check_os_sandbox_support`)**:
    - Checks POSIX Linux platform, `geteuid() == getuid()` (refuses SUID privilege escalation mismatch), executable `bwrap`, `os.killpg`/`os.getpgid`, POSIX `resource` module, and runs an actual `bwrap --unshare-all --die-with-parent --new-session --cap-drop ALL ... /bin/true` probe.
@@ -43,6 +43,7 @@ Implemented in [`opencode_sandbox.py`](file:///home/kali/Documents/malbox/backen
    - `preexec_fn` applies `RLIMIT_CPU` (`OPENCODE_MAX_CPU_SECONDS`), `RLIMIT_AS` (`OPENCODE_MAX_MEMORY_MB`), `RLIMIT_DATA` (`OPENCODE_MAX_DATA_MB`), `RLIMIT_CORE=0`, and `RLIMIT_FSIZE=1 MiB` cleanly inside a new session (`start_new_session=True`).
    - `_collect_bounded_output()` monitors `cancel_event`, output size limit (`OPENCODE_MAX_OUTPUT_BYTES`), and wall-clock timeout (`OPENCODE_TIMEOUT_SECONDS`), immediately terminating the process group (`os.killpg` `SIGTERM` -> `SIGKILL`).
    - **Scope / Host Limitation**: Environments where unprivileged Linux user namespaces are disabled by kernel/seccomp policy cannot run OpenCode and fail closed cleanly. Host environments without `systemd` user scopes rely on `bwrap` namespace isolation, `--die-with-parent`, POSIX `RLIMIT_*`, bounded tmpfs, and `os.killpg` rather than systemd cgroups.
+   - **CI Runtime Verification Note**: Standard `ubuntu-latest` GitHub Actions runners lack `bwrap` and `opencode`, so the real `bwrap` + `opencode` integration test (`test_real_bwrap_sandbox_and_real_opencode_cli_integration`) is skipped in CI and requires an independent Kali runtime test where both binaries and user namespaces are available.
 5. **Strict JSONL & Authority Validation (`_parse_opencode_jsonl`)**:
    - Rejects OpenCode v2 error objects (`event["error"]`), incomplete streams (`step_start` without `step_finish`), unexpected `agent` identifiers, disallowed `tool_use` events, and out-of-workspace `read` paths; validates proposed claims strictly through `EvidenceValidator`; redacts sensitive patterns via `redact_sensitive_text()`.
 

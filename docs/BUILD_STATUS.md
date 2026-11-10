@@ -1,9 +1,9 @@
 # malbox-ai — Build Status & Verification Ledger
 
 **Project Codename:** `malbox-ai`  
-**Architecture Version:** 0.2.1-alpha (Phase 2B.1 Hardened)  
-**Active Branch:** `fix/phase2b-opencode-safety`  
-**Status:** **OPERATIONAL — PHASE 2B.1 FINAL SAFETY & RUNTIME HARDENING VERIFIED**
+**Architecture Version:** 0.2.2-alpha (Phase 2B.2 Intelligence UI)  
+**Active Branch:** `feat/phase2b-intelligence-ui`  
+**Status:** **OPERATIONAL — PHASE 2B.2 INTELLIGENCE REPORT UI REDESIGN VERIFIED**
 
 ---
 
@@ -20,20 +20,24 @@
 | **Cytoscape.js Behavior Graph**| **VERIFIED** | `test_telemetry_integrity.py` | Unique process-instance identity (`proc_{ev.id}`), temporal PID reuse resolution, unattributed network activity isolated to `node_unattributed_network`, 100% grounded edges. |
 | **Evidence Provenance & Reporting**| **VERIFIED** | `test_telemetry_integrity.py`, `test_intelligence_engine.py`, `export_html.py` | Non-fabricated environment metadata, explicit Replay provenance, synthetic mock artifact labeling (`is_synthetic`), XSS-safe HTML export with strict CSP. |
 | **Evidence-Grounded AI Intelligence (v2.0)** | **VERIFIED** | `test_intelligence_engine.py`, `test_opencode_and_hardening.py`, `docs/architecture/intelligence-v2.md` | DB-bounded `VerifiedEvidenceBundle` with hard byte limit (`BundleSizeLimitError`), semantic claim/entity/category validation (`DETERMINISTIC_FACT`, `ANALYST_INFERENCE`, `UNCERTAIN_HYPOTHESIS`), dedicated `X-Reporting-Token` authorization, shared bounded `EnrichmentCoordinator` with timeout cancellation & true slot retention, stale-write fencing, and secret/path redaction. |
-| **Restricted OpenCode Adapter (v2.1.4)** | **VERIFIED** | `test_opencode_and_hardening.py`, `docs/ai/OPENCODE_INTEGRATION.md`, `.opencode/agents/report-analyst.md` | Optional, disabled-by-default `mode: primary` adapter with disabled privileged built-in agents, mandatory Bubblewrap (`bwrap`) Linux namespace isolation (`--unshare-all`, `--cap-drop ALL`, `--clearenv`, RO mounts, bounded tmpfs, `ApprovedProviderProxy` Unix socket egress allowlist), dynamic CLI version verification, POSIX rlimits, JSONL stream guards, `killpg` cancellation, and truthful deterministic fallback. |
+| **Restricted OpenCode Adapter (v2.1.4)** | **VERIFIED (HOST)** | `test_opencode_and_hardening.py`, `docs/ai/OPENCODE_INTEGRATION.md`, `.opencode/agents/report-analyst.md` | Optional, disabled-by-default `mode: primary` adapter with disabled privileged built-in agents, mandatory Bubblewrap (`bwrap`) Linux namespace isolation (`--unshare-all`, `--cap-drop ALL`, `--clearenv`, RO mounts, bounded tmpfs, `ApprovedProviderProxy`), dynamic CLI version verification, POSIX rlimits, JSONL stream guards, `killpg` cancellation, and truthful deterministic fallback. *Note: Real `bwrap` + `opencode` integration was skipped on `ubuntu-latest` CI and verified locally on Kali; independent Kali VM validation recommended before external use.* |
 | **Doctor & Bootstrap CLI** | **VERIFIED** | `test_doctor_cli.py` | Idempotent `./malbox doctor/start/stop/status`, strong OS PID/PGID ownership verification, 0600 `.env` & 0700 `.malbox` permissions, offline Replay setup. |
-| **Web User Interface** | **VERIFIED** | React 18 + TypeScript + Vite (`npm run build`) | Real-time interval polling, Replay scenario selection, Operator token gate, Cytoscape graph visualizer, backward-compatible report rendering. Upgraded esbuild dependency to resolve GHSA-67mh-4wv8-2f99. |
+| **Intelligence Report Web UI** | **VERIFIED** | Vitest + React Testing Library (`11/11 PASSED`), `tsc --noEmit`, `vite build`, `npm audit` (`0 vulnerabilities`) | Modular evidence-grounded dark-mode report dashboard (`frontend/src/components/IntelligenceReport/`), strict TypeScript contracts, Replay & synthetic artifact badges, FACT/INFERENCE/HYPOTHESIS + EvidenceExplorer, explicit in-memory `X-Reporting-Token` & external consent enrichment UX, print-friendly PDF & CSP-safe HTML exports, lazy-loaded Cytoscape graph, and Vite `6.4.6` + Vitest `4.1.12` dependency remediation. |
 | **Live CAPE Sandbox Backend** | **PARTIAL** | `test_cape_adapter.py` | Fully implemented and unit-tested adapter with readiness checks, task polling, report transformation, and cancellation. Real hypervisor execution remains disabled by policy. |
-| **Static Decompilation (Ghidra)** | **PLANNED (Phase 2B.2+)** | `StaticAnalysisPlaceholder` | Explicit placeholder hook (`status="not_available"`) in `VerifiedEvidenceBundle`; hallucinated static disassembly claims are automatically rejected until Ghidra integration. |
+| **Static Decompilation (Ghidra)** | **PLANNED (Phase 3)** | `StaticAnalysisPlaceholder` | Explicit placeholder hook (`status="not_available"`) in `VerifiedEvidenceBundle` and report UI recommendations; hallucinated static disassembly claims are automatically rejected until Phase 3 Ghidra integration. |
 
 ---
 
 ## 2. Test Execution Outcomes
 
-- **Test Framework:** `pytest` 9.2.0 with `pytest-asyncio` & `starlette.testclient`
-- **Total Test Cases:** 93
-- **Passed:** 93 (100%)
-- **Failed:** 0
+### Backend (`pytest` 9.2.0)
+- **Local Host Result (Kali with `bwrap` & `opencode v2.1.4`):** 93/93 PASSED (0 failed, 0 skipped)
+- **Previous GitHub Actions `ubuntu-latest` CI Note:** 92 passed, 1 skipped (`test_real_bwrap_sandbox_and_real_opencode_cli_integration` skipped due to absent `bwrap`/`opencode` binaries on hosted runner — requires independent Kali runtime test)
+
+### Frontend (`tsc --noEmit` + `vitest` 4.1.12 + `vite` 6.4.6)
+- **Frontend Unit Tests:** 11/11 PASSED across `frontend/src/__tests__/ReportPage.test.tsx` (8) and `frontend/src/__tests__/EnrichmentFlow.test.tsx` (3)
+- **TypeScript Strict Check:** `npm run typecheck` PASSED (0 errors)
+- **Dependency Audit:** `npm audit` -> 0 vulnerabilities (`vite@^6.4.6`, `vitest@^4.1.12`)
 
 ### Test Breakdown by Subsystem
 1. `backend/tests/test_ai_orchestration.py`: (5/5 PASSED)

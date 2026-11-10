@@ -66,6 +66,12 @@ jobs:
           cd frontend
           npm ci
 
+      - name: Typecheck & Run Frontend Unit Tests
+        run: |
+          cd frontend
+          npm run typecheck
+          npm test
+
       - name: Build frontend distribution
         run: |
           cd frontend

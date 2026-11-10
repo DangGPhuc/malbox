@@ -9,9 +9,22 @@ import {
   OrchestrationRecord,
   ReportResponse,
   ArtifactItem,
+  IntelligenceEnrichRequest,
 } from '../types';
 
 const BASE_URL = '/api/v1';
+
+export class EnrichmentApiError extends Error {
+  readonly status: number;
+  readonly retryAfterSeconds?: number;
+
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
+    super(message);
+    this.name = 'EnrichmentApiError';
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 export const api = {
   async getHealth(): Promise<HealthStatus> {
@@ -101,11 +114,12 @@ export const api = {
 
   async getEvents(
     analysisId: string,
-    params?: { category?: string; action?: string; page?: number; page_size?: number }
+    params?: { category?: string; action?: string; process_id?: number; page?: number; page_size?: number }
   ): Promise<{ total: number; page: number; page_size: number; items: AnalysisEvent[] }> {
     const query = new URLSearchParams();
     if (params?.category) query.append('category', params.category);
     if (params?.action) query.append('action', params.action);
+    if (params?.process_id !== undefined) query.append('process_id', params.process_id.toString());
     if (params?.page) query.append('page', params.page.toString());
     if (params?.page_size) query.append('page_size', params.page_size.toString());
 
@@ -144,10 +158,46 @@ export const api = {
     return res.json();
   },
 
+  async enrichReportIntelligence(
+    analysisId: string,
+    payload: IntelligenceEnrichRequest,
+    reportingToken: string
+  ): Promise<ReportResponse> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const trimmedToken = reportingToken.trim();
+    if (trimmedToken) {
+      headers['X-Reporting-Token'] = trimmedToken;
+    }
+
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/report/intelligence`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const retryRaw = res.headers?.get?.('Retry-After');
+      const retrySec = retryRaw && /^\d+$/.test(retryRaw.trim()) ? Number(retryRaw.trim()) : undefined;
+      const errBody = await res.json().catch(() => ({ detail: `Enrichment failed (${res.status})` }));
+      const detail =
+        typeof errBody?.detail === 'string'
+          ? errBody.detail
+          : `Intelligence enrichment failed with status ${res.status}.`;
+      throw new EnrichmentApiError(detail, res.status, retrySec);
+    }
+
+    return res.json();
+  },
+
   async getArtifacts(analysisId: string): Promise<ArtifactItem[]> {
     const res = await fetch(`${BASE_URL}/analyses/${analysisId}/artifacts`);
     if (!res.ok) throw new Error('Failed to retrieve artifacts');
     return res.json();
   },
-};
 
+  getReportHtmlUrl(analysisId: string): string {
+    return `${BASE_URL}/analyses/${analysisId}/report/html`;
+  },
+};

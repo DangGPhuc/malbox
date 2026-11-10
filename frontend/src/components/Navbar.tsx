@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, Activity, UploadCloud, Network, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Shield, Activity, UploadCloud, Network, FileText, AlertCircle } from 'lucide-react';
 import { HealthStatus } from '../types';
 
 interface NavbarProps {
@@ -32,11 +32,20 @@ export const Navbar: React.FC<NavbarProps> = ({
       zIndex: 50,
       backdropFilter: 'blur(8px)',
     }}>
-      <div className="container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 2rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
-          <div
+      <div className="container" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', padding: '0.75rem 2rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '1.5rem' }}>
+          <button
+            type="button"
             onClick={() => setCurrentTab('dashboard')}
-            style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer' }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.6rem',
+              cursor: 'pointer',
+              background: 'transparent',
+              border: 'none',
+              padding: 0,
+            }}
           >
             <div style={{
               background: 'linear-gradient(135deg, #0284c7, #38bdf8)',
@@ -46,22 +55,23 @@ export const Navbar: React.FC<NavbarProps> = ({
               alignItems: 'center',
               justifyContent: 'center',
             }}>
-              <Shield size={22} color="#030712" />
+              <Shield size={22} color="#030712" aria-hidden="true" />
             </div>
             <div>
               <span style={{ fontSize: '1.2rem', fontWeight: 800, letterSpacing: '-0.5px', color: '#f8fafc' }}>malbox</span>
               <span style={{ fontSize: '1.2rem', fontWeight: 800, color: '#38bdf8' }}>-ai</span>
-              <span style={{ fontSize: '0.65rem', marginLeft: '6px', background: '#1e293b', padding: '2px 6px', borderRadius: '4px', color: '#94a3b8' }}>v0.1</span>
+              <span style={{ fontSize: '0.65rem', marginLeft: '6px', background: '#1e293b', padding: '2px 6px', borderRadius: '4px', color: '#94a3b8' }}>v0.2</span>
             </div>
-          </div>
+          </button>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <div className="nav-links-scroll">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               const isActive = currentTab === tab.id;
               return (
                 <button
                   key={tab.id}
+                  type="button"
                   disabled={tab.disabled}
                   onClick={() => setCurrentTab(tab.id)}
                   style={{
@@ -80,7 +90,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     transition: 'all 0.15s ease',
                   }}
                 >
-                  <Icon size={16} />
+                  <Icon size={16} aria-hidden="true" />
                   <span>{tab.label}</span>
                 </button>
               );
@@ -97,7 +107,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: '#f87171' }}>
-              <AlertCircle size={14} />
+              <AlertCircle size={14} aria-hidden="true" />
               <span>Offline</span>
             </div>
           )}
@@ -106,4 +116,3 @@ export const Navbar: React.FC<NavbarProps> = ({
     </nav>
   );
 };
-

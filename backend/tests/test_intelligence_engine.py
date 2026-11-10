@@ -749,10 +749,14 @@ def test_full_report_backward_compat_and_html_export_xss_safety(client):
     rep = client.get(f"/api/v1/analyses/{analysis['id']}/report").json()
     assert rep["full_report"]["intelligence_report"]["schema_version"] == "2.0"
 
-    # HTML export includes Intelligence v2.0 section
+    # HTML export includes Intelligence v2.0 section, Replay banner, and print CSS
     html_res = client.get(f"/api/v1/analyses/{analysis['id']}/report/html")
     assert html_res.status_code == 200
     assert "AI Intelligence Assessment (v2.0)" in html_res.text
+    assert "SYNTHETIC REPLAY — UPLOADED BINARY NOT EXECUTED" in html_res.text
+    assert "@media print" in html_res.text
+    assert "Validation Summary &amp; Claim Matrix" in html_res.text
+    assert "SYNTHETIC PLACEHOLDER" in html_res.text
 
     # Direct HTML export check on intelligence_report narrative & claims escaping
     xss_payload = dict(rep["full_report"])

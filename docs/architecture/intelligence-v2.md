@@ -52,10 +52,17 @@ IntelligenceReport (schema_version="2.0") ──▶ FullReportSchema.intelligenc
 - **Consent & Sandbox Preflight**:
   - External providers (`llm`, `opencode`) fail closed (`403`) unless both `MALBOX_REPORTING_EXTERNAL_AI_CONSENT=true` and `external_transmission_consent=true`.
   - When `provider_mode="opencode"` is requested, the endpoint validates `OPENCODE_ENABLED`, `check_os_sandbox_support()`, and (when network egress is requested) `parse_approved_provider_target()` before dispatching work.
-- **Shared Bounded Executor, True Concurrency Accounting & Cancellation** ([`enrichment_guard.py`](file:///home/kali/Documents/malbox/backend/app/services/intelligence/enrichment_guard.py)):
+- **Shared Bounded Executor, True Concurrency Accounting & Cancellation** ([`enrichment_guard.py`](../../backend/app/services/intelligence/enrichment_guard.py)):
   - Reuses a single shared bounded `ThreadPoolExecutor` (`max_workers=REPORTING_MAX_CONCURRENT_JOBS`) rather than spawning an executor per request.
   - Sliding-window rate limit (`REPORTING_RATE_LIMIT_REQUESTS` / `REPORTING_RATE_LIMIT_WINDOW_SECONDS` -> `429` with `Retry-After`).
   - Concurrency slots (`_active_count`) and per-analysis locks (`_active_analyses`) are held until the worker callable actually exits its `finally` block — **never** released early on HTTP timeout, preventing parallel bypasses during wind-down.
   - On `REPORTING_ENRICHMENT_TIMEOUT_SECONDS`, `cancel_event.set()` propagates into `OpenCodeReportProvider` (immediate `os.killpg`) and `RealLLMProvider` (clamped `httpx.Timeout` + pre/post response cancel fence), blocking any stale post-timeout database writes (`cancel_event.is_set()` check + optimistic report digest verification -> `409`).
   - **Worker Process Scope**: Limits, locks, and the coordinator's thread pool operate in-process; under single-worker Uvicorn (`--workers 1`, default VM/local setup) they enforce global caps, whereas multi-worker deployments (`workers > 1`) enforce caps per worker process.
 - **Preservation on Failure & Redaction**: Wall-clock timeout, external fallback failure, or provider exception rolls back cleanly without overwriting the last known-good persisted `AnalysisReport`, and `redact_sensitive_text()` strips tokens, auth headers, keys, and local paths before returning errors.
+
+---
+
+## 4. Phase 2B.2 Frontend Intelligence UI & Exports
+
+- **Modular Dark-Mode Reporting UI** ([`ReportPage.tsx`](../../frontend/src/pages/ReportPage.tsx), [`IntelligenceReport/`](../../frontend/src/components/IntelligenceReport/index.ts)): Renders strict TypeScript contracts ([`types/index.ts`](../../frontend/src/types/index.ts)) separating deterministic scoring from AI analytical confidence, labeling synthetic Replay telemetry (`SYNTHETIC REPLAY — UPLOADED BINARY NOT EXECUTED`) and mock placeholder artifacts, differentiating `FACT` / `INFERENCE` / `HYPOTHESIS` claims (`VERIFIED` / `UNVERIFIED` / `REJECTED`), resolving clicked evidence IDs via [`EvidenceExplorer.tsx`](../../frontend/src/components/IntelligenceReport/EvidenceExplorer.tsx), and gating external enrichment behind in-memory `X-Reporting-Token` submission and explicit opt-in consent (`AIProviderStatus`).
+- **Print-Friendly Standalone HTML & JSON Exports**: [`export_html.py`](../../backend/app/services/reporting/export_html.py) enforces strict CSP + `html.escape` rendering, `@media print` stylesheets for browser PDF saving, complete AI provider metadata, claim validation statuses, truncation indicators, gaps, and limitations. See [INTELLIGENCE_REPORT_UI.md](../ai/INTELLIGENCE_REPORT_UI.md) for full UI component contracts and verification notes.
