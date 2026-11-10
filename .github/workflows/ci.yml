@@ -2,7 +2,7 @@ name: malbox-ai CI
 
 on:
   push:
-    branches: [ "main", "dev", "rebuild/*", "audit/*", "feat/*" ]
+    branches: [ "main", "dev", "rebuild/*", "audit/*", "feat/*", "fix/*" ]
   pull_request:
     branches: [ "main", "dev" ]
 
