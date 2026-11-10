@@ -26,6 +26,45 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
     timeline = report_data.get("execution_timeline", [])
     limitations = report_data.get("confidence_and_limitations", {})
     follow_up = report_data.get("recommended_follow_up", {})
+    intel = report_data.get("intelligence_report")
+    intel_section = ""
+    if isinstance(intel, dict):
+        pm = intel.get("provider_metadata") or {}
+        vs = intel.get("validation_summary") or {}
+        conf = intel.get("confidence_assessment") or {}
+        claims_rows = ""
+        for c in intel.get("technical_claims") or []:
+            c_type = html.escape(str(c.get("classification", "HYPOTHESIS")))
+            c_status = html.escape(str(c.get("validation_status", "VERIFIED")))
+            c_text = html.escape(str(c.get("claim_text", "")))
+            c_ids = html.escape(", ".join(str(i) for i in (c.get("supporting_evidence_ids") or []))) or "none"
+            c_id = html.escape(str(c.get("claim_id", "")))
+            claims_rows += (
+                f"<li style='margin-bottom:0.6rem;'>"
+                f"<strong>{c_id}</strong> "
+                f"<span class='badge' style='background:#334155;margin-right:4px;'>{c_type}</span>"
+                f"<span class='badge' style='background:#1e3a8a;margin-right:6px;'>{c_status}</span>"
+                f"{c_text}"
+                f"<div style='color:#94a3b8;font-size:0.8rem;'>Evidence IDs: <code>{c_ids}</code></div>"
+                f"</li>"
+            )
+        intel_narrative = html.escape(str(intel.get("behavioral_narrative", "")))
+        intel_mode = html.escape(str(pm.get("mode", "deterministic_mock")))
+        intel_provider = html.escape(str(pm.get("provider", "mock")))
+        intel_model = html.escape(str(pm.get("model", "n/a")))
+        intel_conf = html.escape(str(conf.get("overall_confidence", "n/a")))
+        intel_comp = html.escape(str(conf.get("evidence_completeness", "n/a")))
+        intel_passed = html.escape(str(vs.get("passed", True)))
+        intel_section = f"""
+            <div class="card">
+                <h2>AI Intelligence Assessment (v2.0)</h2>
+                <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:0.75rem;">
+                    Mode: <strong>{intel_mode}</strong> | Provider: <strong>{intel_provider}</strong> ({intel_model}) |
+                    Confidence: <strong>{intel_conf}</strong> ({intel_comp}) | Validation Passed: <strong>{intel_passed}</strong>
+                </p>
+                <p style="color:#e2e8f0;font-size:0.95rem;margin-bottom:1rem;">{intel_narrative}</p>
+                <ul style="color:#cbd5e1;font-size:0.9rem;padding-left:1.2rem;">{claims_rows}</ul>
+            </div>"""
 
     level_colors = {
         "Malicious": "#ef4444",
@@ -220,6 +259,7 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
                 <p style="color: #cbd5e1; font-size: 0.9rem;">{safe_evasion_risk}</p>
                 <div style="color: #94a3b8; font-size: 0.85rem;">Confinement: {safe_confinement}</div>
             </div>
+            {intel_section}
             <div class="card">
                 <h2>Recommended Follow-up Actions</h2>
                 <ul style="color: #cbd5e1; font-size: 0.9rem; padding-left: 1.2rem;">

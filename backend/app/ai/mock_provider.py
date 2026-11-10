@@ -111,12 +111,53 @@ class MockLLMProvider(LLMProvider):
         threat_score = findings_summary.get("score", 0)
         threat_level = findings_summary.get("level", "Clean")
         finding_titles = findings_summary.get("finding_titles", [])
+        is_replay = sample_metadata.get("is_replay")
+        scenario_id = sample_metadata.get("replay_scenario_id")
 
-        summary = (
-            f"AI Forensic Assessment: Sample '{filename}' was evaluated under isolated dynamic monitoring. "
-            f"The sample exhibited confirmed {threat_level.upper()} behavior with an explainable threat rating of {threat_score}/100. "
-            f"Key behavioral observations include: {', '.join(finding_titles) or 'no malicious indicators'}. "
-            "All findings are supported by verifiable execution events, reconstructed process ancestry, and filesystem telemetry."
+        if is_replay is True:
+            return (
+                f"AI Intelligence Summary (Synthetic Replay Scenario '{scenario_id or 'default'}'): "
+                f"Uploaded sample '{filename}' underwent static triage only and was NOT executed. "
+                f"Replayed scenario telemetry triggered a deterministic {threat_level.upper()} rating ({threat_score}/100). "
+                f"Key scenario indicators: {', '.join(finding_titles) or 'no malicious indicators'}."
+            )
+        if is_replay is False:
+            return (
+                f"AI Forensic Assessment: Sample '{filename}' was evaluated under isolated dynamic sandbox monitoring. "
+                f"Deterministic analysis yielded a {threat_level.upper()} rating ({threat_score}/100). "
+                f"Key behavioral observations: {', '.join(finding_titles) or 'no malicious indicators'}."
+            )
+        return (
+            f"AI Forensic Assessment: Static/behavioral evaluation of '{filename}' yielded a "
+            f"{threat_level.upper()} rating with an explainable threat rating of {threat_score}/100. "
+            f"Key observed indicators include: {', '.join(finding_titles) or 'no malicious indicators'}."
         )
-        return summary
+
+    def generate_intelligence_report(
+        self,
+        bundle: "VerifiedEvidenceBundle",
+        rules_text: "Optional[str]" = None,
+    ) -> "IntelligenceReport":
+        from datetime import datetime, timezone
+        from app.ai.intelligence_helper import build_deterministic_proposed_intelligence
+        from app.schemas.intelligence import AIProviderMetadata
+        from app.services.intelligence.validator import EvidenceValidator
+
+        proposed = build_deterministic_proposed_intelligence(bundle)
+        provider_meta = AIProviderMetadata(
+            mode="deterministic_mock",
+            provider="mock",
+            model="deterministic-local-v2",
+            tokens_used=0,
+            fallback_used=False,
+            fallback_reason=None,
+            rules_version="2.0",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return EvidenceValidator().validate_and_finalize(
+            raw_output=proposed,
+            bundle=bundle,
+            provider_meta=provider_meta,
+            fallback_fn=build_deterministic_proposed_intelligence,
+        )
 

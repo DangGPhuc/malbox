@@ -67,13 +67,37 @@ class ReportGenerator:
                     confidence=f.confidence,
                 )
 
+        # Phase 2A Evidence-Grounded Intelligence Generation
+        from app.ai.llm_client import get_reporting_llm_provider
+        from app.services.intelligence.bundle_builder import EvidenceBundleBuilder
+
+        evidence_bundle = EvidenceBundleBuilder(self.db).build(
+            analysis_id=analysis_id,
+            risk_assessment=risk_assessment,
+            env_metadata=env_metadata,
+        )
+        intelligence_report = get_reporting_llm_provider().generate_intelligence_report(
+            evidence_bundle
+        )
+
         # Baseline executive summary
         sample_name = sample.file_name if sample else "Unknown"
         sample_hash = sample.sha256 if sample else "N/A"
         finding_titles = ", ".join([f.title for f in findings_db[:3]]) or "No severe behavioral anomalies"
+        is_replay = analysis.backend_type == "replay"
+        scenario_id = analysis.replay_scenario_id or "default"
 
         if not ai_summary:
-            if not findings_db:
+            if intelligence_report and intelligence_report.executive_assessment:
+                executive_summary = intelligence_report.executive_assessment
+            elif is_replay:
+                executive_summary = (
+                    f"Synthetic Replay Assessment (scenario '{scenario_id}'): Uploaded sample '{sample_name}' "
+                    f"(SHA-256: {sample_hash[:16]}...) underwent static triage only and was NOT executed. "
+                    f"Deterministic evaluation of the replay scenario produced a risk classification of "
+                    f"{risk_assessment.level.upper()} ({risk_assessment.score}/100) across {len(findings_db)} finding(s)."
+                )
+            elif not findings_db:
                 executive_summary = (
                     f"Dynamic sandbox analysis of '{sample_name}' (SHA-256: {sample_hash[:16]}...) concluded with "
                     f"a threat classification of '{risk_assessment.level}' (score: 0/100). "
@@ -163,14 +187,23 @@ class ReportGenerator:
             "limitations_identified": ["Execution completed under bounded replay constraints."],
         }
 
-        # Artifacts list
+        # Artifacts list (explicitly label synthetic Replay mock stubs)
         artifacts_summary = []
         for ev in analysis.events:
             if ev.category == "artifact":
+                attrs = ev.attributes or {}
+                synthetic = is_replay or bool(attrs.get("is_synthetic", False))
                 artifacts_summary.append({
                     "name": ev.target_path,
-                    "type": ev.attributes.get("type", "unknown"),
-                    "description": ev.attributes.get("description", ""),
+                    "type": attrs.get("type", "unknown"),
+                    "description": attrs.get("description", ""),
+                    "is_synthetic": synthetic,
+                    "provenance": "synthetic_replay" if synthetic else "live_sandbox",
+                    "provenance_note": (
+                        "Synthetic mock artifact generated in Replay Mode (stub placeholder, not a live capture)."
+                        if synthetic
+                        else "Dynamic sandbox artifact."
+                    ),
                 })
 
         report_payload = FullReportSchema(
@@ -200,6 +233,7 @@ class ReportGenerator:
             confidence_and_limitations=limitations,
             recommended_follow_up=follow_up,
             artifacts=artifacts_summary,
+            intelligence_report=intelligence_report,
         )
 
         # Check for existing report record to update or insert

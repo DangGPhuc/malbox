@@ -285,21 +285,6 @@ class PipelineWorker:
 
             # 8. REPORTING
             safe_update_status(analysis, self.db, AnalysisStatus.REPORTING)
-            llm = get_llm_provider()
-            ai_summary = llm.generate_executive_summary(
-                sample_metadata={
-                    "file_name": sample.file_name,
-                    "sha256": sample.sha256,
-                    "file_size": sample.file_size,
-                },
-                findings_summary={
-                    "score": risk_assessment.score,
-                    "level": risk_assessment.level,
-                    "finding_titles": [f.title for f in findings],
-                },
-                timeline=[],
-            )
-
             reporter = ReportGenerator(self.db)
             raw_env = raw_results.get("metadata", {}).get("environment", {}) if "raw_results" in locals() and raw_results else {}
             if "raw_results" in locals() and raw_results:
@@ -311,7 +296,7 @@ class PipelineWorker:
             reporter.generate_report(
                 analysis.id,
                 risk_assessment,
-                ai_summary=ai_summary,
+                ai_summary=None,
                 ai_follow_up=follow_up.model_dump(),
                 env_metadata=raw_env,
             )

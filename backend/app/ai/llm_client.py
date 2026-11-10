@@ -193,9 +193,45 @@ class RealLLMProvider(LLMProvider):
             return mock.generate_executive_summary(sample_metadata, findings_summary, timeline)
 
 
+    def generate_intelligence_report(
+        self,
+        bundle: "VerifiedEvidenceBundle",
+        rules_text: "Optional[str]" = None,
+    ) -> "IntelligenceReport":
+        from app.ai.intelligence_helper import run_bounded_llm_intelligence
+
+        report, call_meta = run_bounded_llm_intelligence(
+            bundle=bundle,
+            api_key=self.api_key,
+            model=self.model,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            rules_text=rules_text,
+        )
+        self.last_call_meta = call_meta
+        return report
+
+
 def get_llm_provider() -> LLMProvider:
     """Factory returns active AI provider based on configuration."""
     if settings.AI_PROVIDER != "mock" and settings.AI_API_KEY:
+        return RealLLMProvider(
+            api_key=settings.AI_API_KEY,
+            model=settings.AI_MODEL,
+            base_url=settings.AI_BASE_URL,
+            timeout=settings.AI_TIMEOUT_SECONDS,
+        )
+    return MockLLMProvider()
+
+
+def get_reporting_llm_provider(force_external: bool = False) -> LLMProvider:
+    """
+    Returns reporting intelligence provider respecting AI_REPORTING_MODE.
+    Defaults to deterministic offline MockLLMProvider unless mode='llm'
+    or caller explicitly opts in with force_external=True.
+    """
+    mode = (getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in").strip().lower()
+    if (mode == "llm" or force_external) and settings.AI_PROVIDER != "mock" and settings.AI_API_KEY:
         return RealLLMProvider(
             api_key=settings.AI_API_KEY,
             model=settings.AI_MODEL,

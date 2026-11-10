@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # AI Orchestration
     AI_PROVIDER: str = "mock"  # mock, real, openai, ollama
+    AI_REPORTING_MODE: str = "opt_in"  # opt_in, deterministic, llm
     AI_MODEL: str = "gpt-4o-mini"
     AI_API_KEY: str = ""
     AI_BASE_URL: str = "https://api.openai.com/v1"

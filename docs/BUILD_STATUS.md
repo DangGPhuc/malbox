@@ -1,9 +1,9 @@
 # malbox-ai — Build Status & Verification Ledger
 
 **Project Codename:** `malbox-ai`  
-**Architecture Version:** 0.1.0  
-**Active Branch:** `audit/remediation-hardening`  
-**Status:** **OPERATIONAL, HARDENED & VM-EVALUATION READY**
+**Architecture Version:** 0.2.0-alpha (Phase 2A)  
+**Active Branch:** `feat/phase2-ai-reporting`  
+**Status:** **OPERATIONAL — PHASE 2A EVIDENCE-GROUNDED INTELLIGENCE & DOCTOR CLI VERIFIED**
 
 ---
 
@@ -18,36 +18,41 @@
 | **AI Analysis Orchestrator** | **VERIFIED** | `test_ai_orchestration.py`, `test_real_ai_provider.py` | Structured preflight planner, positive allowlist policy validation, RealLLMProvider (HTTP) + fallback to Mock, audit tracking with token metadata. Follow-up classified as advisory recommendation. |
 | **Deterministic Rule Engine** | **VERIFIED** | `test_detection_rules.py` | Contextual thresholds (T1490, T1486, T1547.001, T1059.001, T1555.003, T1071.001, T1046); negative regression tests for lone ransom note and normal HTTP POST. |
 | **Cytoscape.js Behavior Graph**| **VERIFIED** | `test_telemetry_integrity.py` | Unique process-instance identity (`proc_{ev.id}`), temporal PID reuse resolution, unattributed network activity isolated to `node_unattributed_network`, 100% grounded edges. |
-| **Evidence Provenance & Reporting**| **VERIFIED** | `test_telemetry_integrity.py`, `export_html.py` | Non-fabricated environment metadata, explicit replay disclaimers, XSS-safe HTML export with strict CSP. |
-| **Web User Interface** | **VERIFIED** | React 18 + TypeScript + Vite (`npm run build`) | Real-time interval polling, Replay scenario selection, Operator token gate, Cytoscape graph visualizer. Upgraded esbuild dependency to resolve GHSA-67mh-4wv8-2f99. |
+| **Evidence Provenance & Reporting**| **VERIFIED** | `test_telemetry_integrity.py`, `test_intelligence_engine.py`, `export_html.py` | Non-fabricated environment metadata, explicit Replay provenance, synthetic mock artifact labeling (`is_synthetic`), XSS-safe HTML export with strict CSP. |
+| **Evidence-Grounded AI Intelligence (v2.0)** | **VERIFIED** | `test_intelligence_engine.py`, `docs/architecture/intelligence-v2.md` | Bounded `VerifiedEvidenceBundle` (`EvidenceBundleBuilder`), strict `FACT`/`INFERENCE`/`HYPOTHESIS` validation (`EvidenceValidator`), Replay/static-analysis guardrails, `AI_REPORTING_MODE="opt_in"` default, opt-in `POST /api/v1/analyses/{id}/report/intelligence`, and safe fallback (`MockLLMProvider`). |
+| **Doctor & Bootstrap CLI** | **VERIFIED** | `test_doctor_cli.py` | Idempotent `./malbox doctor/start/stop/status`, strong OS PID/PGID ownership verification, 0600 `.env` & 0700 `.malbox` permissions, offline Replay setup. |
+| **Web User Interface** | **VERIFIED** | React 18 + TypeScript + Vite (`npm run build`) | Real-time interval polling, Replay scenario selection, Operator token gate, Cytoscape graph visualizer, backward-compatible report rendering. Upgraded esbuild dependency to resolve GHSA-67mh-4wv8-2f99. |
 | **Live CAPE Sandbox Backend** | **PARTIAL** | `test_cape_adapter.py` | Fully implemented and unit-tested adapter with readiness checks, task polling, report transformation, and cancellation. Real hypervisor execution remains disabled by policy. |
+| **Static Decompilation (Ghidra)** | **PLANNED (Phase 2B)** | `StaticAnalysisPlaceholder` | Explicit placeholder hook (`status="not_available"`) in `VerifiedEvidenceBundle`; hallucinated static disassembly claims are automatically rejected until Phase 2B integration. |
 
 ---
 
 ## 2. Test Execution Outcomes
 
 - **Test Framework:** `pytest` 9.2.0 with `pytest-asyncio` & `starlette.testclient`
-- **Total Test Cases:** 56
-- **Passed:** 56 (100%)
+- **Total Test Cases:** 80
+- **Passed:** 80 (100%)
 - **Failed:** 0
-- **Execution Time:** ~12.4 seconds
+- **Execution Time:** ~20.1 seconds
 
 ### Test Breakdown by Subsystem
 1. `backend/tests/test_ai_orchestration.py`: (5/5 PASSED)
 2. `backend/tests/test_cape_adapter.py`: (3/3 PASSED)
 3. `backend/tests/test_detection_rules.py`: (6/6 PASSED)
-4. `backend/tests/test_health.py`: (2/2 PASSED)
-5. `backend/tests/test_pe_parser.py`: (5/5 PASSED)
-6. `backend/tests/test_real_ai_provider.py`: (6/6 PASSED)
-7. `backend/tests/test_replay_pipeline.py`: (5/5 PASSED)
+4. `backend/tests/test_doctor_cli.py`: (11/11 PASSED)
+5. `backend/tests/test_health.py`: (2/2 PASSED)
+6. `backend/tests/test_intelligence_engine.py`: (13/13 PASSED)
+7. `backend/tests/test_pe_parser.py`: (5/5 PASSED)
+8. `backend/tests/test_real_ai_provider.py`: (6/6 PASSED)
+9. `backend/tests/test_replay_pipeline.py`: (5/5 PASSED)
    - `test_full_replay_analysis_pipeline` [PASSED]
    - `test_replay_scenario_wannacry_independent_of_profile` [PASSED]
    - `test_replay_scenario_redline_independent_of_profile` [PASSED]
    - `test_replay_scenario_alias_compatibility` [PASSED]
    - `test_replay_invalid_scenario_id_does_not_silently_fallback` [PASSED]
-8. `backend/tests/test_safety_and_lifecycle.py`: (14/14 PASSED)
-9. `backend/tests/test_submission.py`: (3/3 PASSED)
-10. `backend/tests/test_telemetry_integrity.py`: (7/7 PASSED)
+10. `backend/tests/test_safety_and_lifecycle.py`: (14/14 PASSED)
+11. `backend/tests/test_submission.py`: (3/3 PASSED)
+12. `backend/tests/test_telemetry_integrity.py`: (7/7 PASSED)
 
 ---
 

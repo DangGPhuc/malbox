@@ -28,3 +28,12 @@ class LLMProvider(ABC):
         """Produces evidence-grounded analyst executive summary."""
         pass
 
+    @abstractmethod
+    def generate_intelligence_report(
+        self,
+        bundle: "VerifiedEvidenceBundle",
+        rules_text: "Optional[str]" = None,
+    ) -> "IntelligenceReport":
+        """Produces schema-validated, evidence-grounded Phase 2A intelligence report."""
+        pass
+
