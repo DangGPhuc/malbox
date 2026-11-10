@@ -47,45 +47,35 @@ flowchart TD
 ## 2. Quickstart Installation Guide
 
 ### Prerequisites
-- Linux / macOS / WSL
-- Python 3.10+ (Tested on Python 3.14.7)
-- Node.js v18+ and npm (Tested on Node v24.19.0)
+- Linux / macOS / WSL2
+- Python 3.10+ (Tested on Python 3.12 / 3.14)
+- Node.js v18+ and npm (Tested on Node v20 / v24)
 
-### Step 1: Clone and Set Up Virtual Environment
+### One-Command Setup & Launch (Recommended)
 ```bash
-git clone <repo-url> malbox-ai
-cd malbox-ai
+git clone https://github.com/DangGPhuc/malbox.git
+cd malbox
+./malbox doctor
+./malbox start
+```
+- `./malbox doctor`: Checks OS, Python, Node/npm, resources, ports, `.env` safety, `.venv`, frontend deps, database schema, and replay fixtures, then safely sets up Replay Mode without modifying user secrets or running `sudo`.
+- `./malbox start`: Starts FastAPI backend (`http://127.0.0.1:8000`) and React/Vite UI (`http://127.0.0.1:5173`) in safe Replay Mode.
+- `./malbox status` / `./malbox stop`: Inspects health/PIDs or gracefully shuts down managed services.
 
-# Create and activate Python virtual environment
+For `--check`, `--repair`, `--json`, and recovery workflows, see [docs/DOCTOR_GUIDE.md](docs/DOCTOR_GUIDE.md).
+
+### Manual Setup (Optional / Foreground Launchers)
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install backend dependencies
 pip install -e "backend[dev]"
-```
+cd frontend && npm ci && cd ..
 
-### Step 2: Install Frontend Dependencies
-```bash
-cd frontend
-npm install
-cd ..
+# In terminal 1 & 2 (existing launcher scripts preserved):
+./scripts/run_backend.sh
+./scripts/run_frontend.sh
 ```
-
-### Step 3: Run the Backend Server
-```bash
-# In terminal 1 (with virtualenv active)
-export PYTHONPATH=backend
-python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-*API Swagger Documentation will be available at:* `http://127.0.0.1:8000/docs`
-
-### Step 4: Run the Frontend Application
-```bash
-# In terminal 2
-cd frontend
-npm run dev
-```
-*Web Dashboard will be accessible at:* `http://localhost:5173`
+*API Swagger Documentation:* `http://127.0.0.1:8000/docs` | *Web Dashboard:* `http://127.0.0.1:5173`
 
 ---
 
@@ -145,16 +135,18 @@ To demonstrate the platform during an academic presentation or evaluation:
 
 ## 6. Verification & Test Suite
 
-Run the full automated test suite:
+Run the full automated test suite sequentially:
 ```bash
-PYTHONPATH=backend ./.venv/bin/pytest backend/tests -v
+./malbox doctor --check
+.venv/bin/pytest backend/tests -v
 ```
 
-All 19 tests pass:
-- Static PE header & Shannon entropy triage
-- Sample deduplication by SHA-256
-- End-to-end replay pipeline (submission to report)
-- AI orchestration planning & policy allowlist enforcement
-- Command injection rejection
+Test coverage across **64 automated tests**:
+- Bootstrap CLI (`malbox doctor`, `--check`, `--repair`, `--json`, `start`/`stop`/`status`, idempotency, secret preservation, unsafe config blocking)
+- Static PE header & Shannon entropy triage & SHA-256 deduplication
+- End-to-end Replay pipeline for WannaCry & RedLine scenarios (scenario contract, provenance, artifacts)
+- AI orchestration planning, real/fallback LLM provider tracking, & policy allowlist enforcement
+- Live execution safety gate, fail-closed `MALBOX_OPERATOR_TOKEN` auth, & worker concurrency=1
+- Process tree PID reuse / out-of-order resilience & evidence-grounded Cytoscape behavior graph
 - CAPE Sandbox v2 API adapter error recovery & normalization
 
