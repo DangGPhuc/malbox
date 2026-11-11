@@ -309,12 +309,21 @@ class EvidenceBundleBuilder:
                 self.db.query(StaticAnalysisRecord)
                 .filter(
                     StaticAnalysisRecord.sample_sha256 == sample_sha256,
-                    (StaticAnalysisRecord.analysis_id == analysis.id)
-                    | (StaticAnalysisRecord.sample_id == analysis.sample_id),
+                    StaticAnalysisRecord.analysis_id == analysis.id,
                 )
                 .order_by(StaticAnalysisRecord.created_at.desc())
                 .first()
             )
+            if static_rec is None:
+                static_rec = (
+                    self.db.query(StaticAnalysisRecord)
+                    .filter(
+                        StaticAnalysisRecord.sample_sha256 == sample_sha256,
+                        StaticAnalysisRecord.sample_id == analysis.sample_id,
+                    )
+                    .order_by(StaticAnalysisRecord.created_at.desc())
+                    .first()
+                )
             parsed_static: Optional[StaticAnalysisResult] = None
             if static_rec and isinstance(static_rec.result_json, dict):
                 try:

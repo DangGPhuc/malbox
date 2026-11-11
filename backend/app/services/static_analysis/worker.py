@@ -278,10 +278,18 @@ class StaticAnalysisWorkerManager:
         db = SessionLocal()
         try:
             row = db.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == record_id).first()
-            if not row:
+            if not row or row.status != "QUEUED":
                 return
 
-            if cancel_event.is_set():
+            with self._lock:
+                shutting_down = self._shutting_down
+
+            if shutting_down or cancel_event.is_set():
+                fail_msg = (
+                    "Static analysis job interrupted by server shutdown prior to execution."
+                    if shutting_down
+                    else "Static analysis job cancelled prior to execution."
+                )
                 fail_res = StaticAnalysisResult(
                     status="FAILED",
                     provenance=StaticAnalysisProvenance(
@@ -293,10 +301,10 @@ class StaticAnalysisWorkerManager:
                         os_sandbox="none",
                     ),
                     truncation=StaticAnalysisTruncation(),
-                    errors=["Static analysis job cancelled prior to execution."],
+                    errors=[fail_msg],
                 )
                 row.status = "FAILED"
-                row.error_message = "Static analysis job cancelled prior to execution."
+                row.error_message = fail_msg
                 row.result_json = fail_res.model_dump(mode="json")
                 row.completed_at = datetime.now(timezone.utc)
                 db.commit()
@@ -319,19 +327,48 @@ class StaticAnalysisWorkerManager:
 
             db.expire(row)
             row = db.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == record_id).first()
-            if row:
-                row.status = bounded_result.status
-                row.ghidra_version = bounded_result.provenance.ghidra_version
-                row.is_partial = bounded_result.is_partial
-                row.error_message = "; ".join(bounded_result.errors)[:1000] if bounded_result.errors else None
-                row.result_json = bounded_result.model_dump(mode="json")
+            if not row or row.status not in ("QUEUED", "RUNNING"):
+                # Another shutdown/recovery handler already finalized this record; fence late write.
+                return
+
+            with self._lock:
+                shutting_down = self._shutting_down
+
+            if shutting_down or cancel_event.is_set():
+                fenced_reason = (
+                    "Static analysis job interrupted during server shutdown; late worker result discarded."
+                    if shutting_down
+                    else "Static analysis job cancelled; late worker result fenced."
+                )
+                fenced_res = StaticAnalysisResult(
+                    status="FAILED",
+                    provenance=bounded_result.provenance,
+                    truncation=bounded_result.truncation,
+                    errors=[fenced_reason],
+                    warnings=bounded_result.warnings[:5],
+                    is_partial=False,
+                )
+                row.status = "FAILED"
+                row.ghidra_version = fenced_res.provenance.ghidra_version
+                row.is_partial = False
+                row.error_message = fenced_reason
+                row.result_json = fenced_res.model_dump(mode="json")
                 row.completed_at = datetime.now(timezone.utc)
                 db.commit()
+                return
+
+            row.status = bounded_result.status
+            row.ghidra_version = bounded_result.provenance.ghidra_version
+            row.is_partial = bounded_result.is_partial
+            row.error_message = "; ".join(bounded_result.errors)[:1000] if bounded_result.errors else None
+            row.result_json = bounded_result.model_dump(mode="json")
+            row.completed_at = datetime.now(timezone.utc)
+            db.commit()
         except Exception as exc:
             try:
                 db.rollback()
                 row = db.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == record_id).first()
-                if row:
+                if row and row.status in ("QUEUED", "RUNNING"):
                     safe_err = redact_sensitive_text(f"{type(exc).__name__}: {exc}", max_chars=240)
                     row.status = "FAILED"
                     row.error_message = safe_err

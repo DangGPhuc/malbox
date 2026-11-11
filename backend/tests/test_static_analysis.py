@@ -1323,8 +1323,36 @@ def test_live_ghidra_bwrap_smoke_opt_in(tmp_path):
     assert res.program_metadata.address_size == 32
     assert len(res.functions) >= 1
     assert all(fn.is_executed is False for fn in res.functions)
-    assert not (ws_root / "ghidra_job_livesmoke01").exists()
-    print("LIVE_GHIDRA_RESULT:", json.dumps(res.model_dump(mode="json"), indent=2))
+    cleanup_ok = not (ws_root / "ghidra_job_livesmoke01").exists()
+    assert cleanup_ok
+
+    # Gate 0.1: Verify real decompiled pseudocode for known harmless PE32 entry stub OR explicit limitation
+    if res.decompiled_functions:
+        entry_decomp = next((d for d in res.decompiled_functions if d.name == "entry"), res.decompiled_functions[0])
+        if entry_decomp.decompile_status == "OK":
+            code_lower = entry_decomp.pseudocode.lower()
+            assert "return" in code_lower and ("0x2a" in code_lower or "42" in code_lower)
+            assert "does not prove runtime execution" in entry_decomp.provenance_note
+        else:
+            assert entry_decomp.error_message
+    else:
+        assert res.warnings or res.errors
+
+    evidence_summary = {
+        "ghidra_version": res.provenance.ghidra_version,
+        "java_version": res.provenance.java_version,
+        "status": res.status,
+        "function_count": len(res.functions),
+        "decompiled_count": len(res.decompiled_functions),
+        "decompiler_statuses": [d.decompile_status for d in res.decompiled_functions],
+        "cleanup_verified": cleanup_ok,
+        "binary_executed": res.provenance.binary_executed,
+        "os_sandbox": res.provenance.os_sandbox,
+        "memory_limit_backend": res.provenance.memory_limit_backend,
+        "memory_limit_mb": res.provenance.memory_limit_mb,
+        "heap_limit_mb": res.provenance.heap_limit_mb,
+    }
+    print("LIVE_GHIDRA_EVIDENCE:", json.dumps(evidence_summary, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -1734,3 +1762,233 @@ def test_worker_lifecycle_startup_shutdown_failed_submission_and_cancellation(cl
     )
     assert resp_503_cg.status_code == 503
     assert "cgroup" in resp_503_cg.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# 25. Gate 0: Fence late worker writes after shutdown/cancellation
+# ---------------------------------------------------------------------------
+def test_gate0_late_worker_writes_fenced_after_cancellation_or_shutdown(db_session, tmp_path, monkeypatch):
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=db_session.get_bind())
+    monkeypatch.setattr("app.services.static_analysis.worker.SessionLocal", session_factory)
+
+    pe_path, sha, _ = _write_pe_sample(tmp_path)
+    sample = Sample(
+        sha256=sha,
+        sha1="7" * 40,
+        md5="8" * 32,
+        file_name="late_write.exe",
+        file_size=len(_build_minimal_pe32()),
+        is_pe=True,
+        quarantine_path=str(pe_path),
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    # Case A: Worker finishes returning COMPLETED AFTER cancel_event fired / stop() ran
+    mgr = StaticAnalysisWorkerManager()
+    mgr.start()
+    running_ev = threading.Event()
+    finish_ev = threading.Event()
+
+    class _LateCompletedAnalyzer(GhidraStaticAnalyzer):
+        def analyze_sample(self, sample_id, sample_path, expected_sha256, analysis_id=None, job_id=None, cancel_event=None, allow_disabled=False):
+            running_ev.set()
+            finish_ev.wait(timeout=3.0)
+            return StaticAnalysisResult(
+                status="COMPLETED",
+                provenance=StaticAnalysisProvenance(
+                    analysis_id=analysis_id,
+                    sample_id=sample_id,
+                    sample_sha256=expected_sha256,
+                    ghidra_version="12.1.4",
+                    os_sandbox="bwrap",
+                ),
+                truncation=StaticAnalysisTruncation(),
+            )
+
+    rec = mgr.submit_job(db=db_session, sample=sample, analyzer=_LateCompletedAnalyzer(enabled=True))
+    assert running_ev.wait(timeout=2.0)
+    mgr.cancel_active()
+    finish_ev.set()
+    for _ in range(50):
+        if not mgr.is_busy():
+            break
+        time.sleep(0.02)
+    mgr.stop(wait_seconds=1.0)
+
+    db_session.expire_all()
+    row_a = db_session.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == rec.id).first()
+    assert row_a is not None
+    assert row_a.status == "FAILED"
+    assert "fenced" in (row_a.error_message or "").lower() or "interrupted" in (row_a.error_message or "").lower()
+
+    # Case B: DB row already finalized to FAILED (e.g. stop/recovery) before late _execute_background_job persists
+    mgr_b = StaticAnalysisWorkerManager()
+    mgr_b.start()
+    row_pre_failed = StaticAnalysisRecord(
+        sample_id=sample.id,
+        sample_sha256=sha,
+        status="FAILED",
+        error_message="Already finalized by shutdown recovery.",
+        is_partial=False,
+    )
+    db_session.add(row_pre_failed)
+    db_session.commit()
+
+    class _DirectOkAnalyzer(GhidraStaticAnalyzer):
+        def analyze_sample(self, sample_id, sample_path, expected_sha256, analysis_id=None, job_id=None, cancel_event=None, allow_disabled=False):
+            return StaticAnalysisResult(
+                status="COMPLETED",
+                provenance=StaticAnalysisProvenance(sample_id=sample_id, sample_sha256=expected_sha256, os_sandbox="bwrap"),
+                truncation=StaticAnalysisTruncation(),
+            )
+
+    mgr_b._execute_background_job(
+        record_id=row_pre_failed.id,
+        sample_id=sample.id,
+        quarantine_path=str(pe_path),
+        expected_sha256=sha,
+        analysis_id=None,
+        cancel_event=threading.Event(),
+        analyzer=_DirectOkAnalyzer(enabled=True),
+    )
+    db_session.expire_all()
+    row_b = db_session.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == row_pre_failed.id).first()
+    assert row_b is not None
+    assert row_b.status == "FAILED"
+    assert row_b.error_message == "Already finalized by shutdown recovery."
+
+    # Case C: Mid-execution DB row finalized to FAILED concurrently while analyze_sample ran -> late commit fenced
+    row_mid_fail = StaticAnalysisRecord(
+        sample_id=sample.id,
+        sample_sha256=sha,
+        status="QUEUED",
+        is_partial=False,
+    )
+    db_session.add(row_mid_fail)
+    db_session.commit()
+
+    class _ConcurrentFinalizeAnalyzer(GhidraStaticAnalyzer):
+        def analyze_sample(self, sample_id, sample_path, expected_sha256, analysis_id=None, job_id=None, cancel_event=None, allow_disabled=False):
+            # Simulate concurrent shutdown recovery marking DB row FAILED mid-run
+            s2 = session_factory()
+            try:
+                r2 = s2.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == row_mid_fail.id).first()
+                assert r2 is not None
+                r2.status = "FAILED"
+                r2.error_message = "Concurrent stop() finalized job."
+                s2.commit()
+            finally:
+                s2.close()
+            return StaticAnalysisResult(
+                status="COMPLETED",
+                provenance=StaticAnalysisProvenance(sample_id=sample_id, sample_sha256=expected_sha256, os_sandbox="bwrap"),
+                truncation=StaticAnalysisTruncation(),
+            )
+
+    mgr_b._execute_background_job(
+        record_id=row_mid_fail.id,
+        sample_id=sample.id,
+        quarantine_path=str(pe_path),
+        expected_sha256=sha,
+        analysis_id=None,
+        cancel_event=threading.Event(),
+        analyzer=_ConcurrentFinalizeAnalyzer(enabled=True),
+    )
+    db_session.expire_all()
+    row_c = db_session.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == row_mid_fail.id).first()
+    assert row_c is not None
+    assert row_c.status == "FAILED"
+    assert row_c.error_message == "Concurrent stop() finalized job."
+
+
+# ---------------------------------------------------------------------------
+# 26. Gate 0: Clarify analysis-specific vs sample-level provenance & disabled default
+# ---------------------------------------------------------------------------
+def test_gate0_analysis_vs_sample_static_provenance_and_default_disabled(client, db_session, tmp_path):
+    from app.core.config import Settings
+
+    assert Settings(_env_file=None).GHIDRA_ENABLED is False
+
+    pe_path, sha, _ = _write_pe_sample(tmp_path)
+    sample = Sample(
+        sha256=sha,
+        sha1="a" * 40,
+        md5="b" * 32,
+        file_name="prov_scope.exe",
+        file_size=len(_build_minimal_pe32()),
+        is_pe=True,
+        quarantine_path=str(pe_path),
+    )
+    db_session.add(sample)
+    db_session.flush()
+
+    a1 = Analysis(
+        sample_id=sample.id,
+        status=AnalysisStatus.COMPLETED.value,
+        backend_type="replay",
+        replay_scenario_id="ransomware_wannacry_mock",
+    )
+    a2 = Analysis(
+        sample_id=sample.id,
+        status=AnalysisStatus.COMPLETED.value,
+        backend_type="replay",
+        replay_scenario_id="infostealer_redline_mock",
+    )
+    db_session.add_all([a1, a2])
+    db_session.flush()
+
+    # Before any static run, unexecuted provenance_scope & ghidra_enabled reflected cleanly
+    unexec = client.get(f"/api/v1/analyses/{a1.id}/static-analysis")
+    assert unexec.status_code == 200
+    assert unexec.json()["status"] == "UNAVAILABLE"
+    assert unexec.json()["provenance"]["provenance_scope"] == "unexecuted"
+    assert unexec.json()["provenance"]["requested_analysis_id"] == a1.id
+
+    # Store static result specifically for analysis a1
+    fn_id = make_static_function_id(sha, "0x401000")
+    res_a1 = StaticAnalysisResult(
+        status="COMPLETED",
+        provenance=StaticAnalysisProvenance(
+            analysis_id=a1.id,
+            sample_id=sample.id,
+            sample_sha256=sha,
+            ghidra_version="12.1.4",
+            os_sandbox="bwrap",
+        ),
+        functions=[FunctionMetadata(function_id=fn_id, entry_address="0x401000", name="entry")],
+        truncation=StaticAnalysisTruncation(functions_discovered=1, functions_included=1),
+    )
+    db_session.add(
+        StaticAnalysisRecord(
+            sample_id=sample.id,
+            analysis_id=a1.id,
+            sample_sha256=sha,
+            status="COMPLETED",
+            ghidra_version="12.1.4",
+            result_json=res_a1.model_dump(mode="json"),
+        )
+    )
+    db_session.commit()
+
+    # Exact analysis match -> analysis_specific
+    r_a1 = client.get(f"/api/v1/analyses/{a1.id}/static-analysis")
+    assert r_a1.status_code == 200
+    p1 = r_a1.json()["provenance"]
+    assert p1["provenance_scope"] == "analysis_specific"
+    assert p1["analysis_id"] == a1.id
+    assert p1["requested_analysis_id"] == a1.id
+
+    # Second analysis on same sample -> sample_fallback preserving originating analysis_id a1
+    r_a2 = client.get(f"/api/v1/analyses/{a2.id}/static-analysis")
+    assert r_a2.status_code == 200
+    p2 = r_a2.json()["provenance"]
+    assert p2["provenance_scope"] == "sample_fallback"
+    assert p2["analysis_id"] == a1.id
+    assert p2["requested_analysis_id"] == a2.id
+    assert "Shared sample-level static analysis" in p2["provenance_note"]
+
+    # Sample endpoint -> sample_level
+    r_smp = client.get(f"/api/v1/samples/{sample.id}/static-analysis")
+    assert r_smp.status_code == 200
+    assert r_smp.json()["provenance"]["provenance_scope"] == "sample_level"

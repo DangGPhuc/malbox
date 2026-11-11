@@ -60,6 +60,15 @@ class StaticAnalysisProvenance(BaseModel):
     memory_limit_backend: str = "none"
     memory_limit_mb: Optional[int] = Field(default=None, ge=0)
     heap_limit_mb: Optional[int] = Field(default=None, ge=0)
+    requested_analysis_id: Optional[str] = None
+    provenance_scope: Literal[
+        "analysis_specific",
+        "sample_level",
+        "sample_fallback",
+        "unexecuted",
+    ] = "analysis_specific"
+    provenance_note: Optional[str] = None
+    ghidra_enabled: Optional[bool] = None
 
 
 class ProgramMetadata(BaseModel):

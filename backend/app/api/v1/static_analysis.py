@@ -55,26 +55,57 @@ def _record_to_result(
     record: Optional[StaticAnalysisRecord],
     sample: Sample,
     analysis_id: Optional[str] = None,
+    provenance_scope: str = "unexecuted",
 ) -> StaticAnalysisResult:
+    ghidra_enabled = bool(settings.GHIDRA_ENABLED)
     if record is None:
         return StaticAnalysisResult(
             status="UNAVAILABLE",
             provenance=StaticAnalysisProvenance(
                 analysis_id=analysis_id,
+                requested_analysis_id=analysis_id,
                 sample_id=sample.id,
                 sample_sha256=sample.sha256,
                 os_sandbox="none",
+                provenance_scope="unexecuted",
+                provenance_note=(
+                    "Ghidra Headless static analysis has not been executed for this sample/analysis."
+                    if ghidra_enabled
+                    else "Ghidra Headless static analysis is disabled by server configuration (MALBOX_GHIDRA_ENABLED=false)."
+                ),
+                ghidra_enabled=ghidra_enabled,
             ),
             truncation=StaticAnalysisTruncation(),
             warnings=["Ghidra static analysis has not been executed for this sample/analysis."],
         )
 
+    if provenance_scope == "sample_fallback":
+        origin_id = record.analysis_id or "sample-level"
+        prov_note = (
+            f"Shared sample-level static analysis (originally generated under analysis '{origin_id}'); "
+            "static disassembly reflects binary SHA-256 bytes and was not re-executed separately for this analysis."
+        )
+    elif provenance_scope == "sample_level":
+        prov_note = "Sample-level static disassembly record tied to quarantined binary SHA-256."
+    else:
+        prov_note = "Analysis-specific Ghidra Headless static disassembly record for this analysis."
+
     if isinstance(record.result_json, dict):
         try:
             parsed = StaticAnalysisResult.model_validate(record.result_json)
+            updated_prov = parsed.provenance.model_copy(
+                update={
+                    "analysis_id": record.analysis_id,
+                    "requested_analysis_id": analysis_id,
+                    "provenance_scope": provenance_scope,
+                    "provenance_note": prov_note,
+                    "ghidra_enabled": ghidra_enabled,
+                }
+            )
+            update_fields = {"provenance": updated_prov}
             if parsed.status != record.status and record.status in ("QUEUED", "RUNNING", "FAILED", "TIMED_OUT"):
-                parsed = parsed.model_copy(update={"status": record.status})  # type: ignore[arg-type]
-            return parsed
+                update_fields["status"] = record.status
+            return parsed.model_copy(update=update_fields)  # type: ignore[arg-type]
         except Exception:
             pass
 
@@ -82,11 +113,15 @@ def _record_to_result(
         status=record.status if record.status in ("PENDING", "QUEUED", "RUNNING", "COMPLETED", "PARTIAL", "FAILED", "TIMED_OUT", "UNAVAILABLE", "SKIPPED") else "FAILED",  # type: ignore[arg-type]
         provenance=StaticAnalysisProvenance(
             analysis_id=record.analysis_id,
+            requested_analysis_id=analysis_id,
             sample_id=sample.id,
             sample_sha256=sample.sha256,
             ghidra_version=record.ghidra_version,
             started_at=record.started_at.isoformat() if record.started_at else None,
             completed_at=record.completed_at.isoformat() if record.completed_at else None,
+            provenance_scope=provenance_scope if provenance_scope in ("analysis_specific", "sample_level", "sample_fallback", "unexecuted") else "sample_level",  # type: ignore[arg-type]
+            provenance_note=prov_note,
+            ghidra_enabled=ghidra_enabled,
         ),
         truncation=StaticAnalysisTruncation(),
         errors=[record.error_message] if record.error_message else [],
@@ -112,16 +147,35 @@ def get_analysis_static_analysis(
     if not sample:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent sample not found.")
 
-    record = (
+    exact_record = (
+        db.query(StaticAnalysisRecord)
+        .filter(StaticAnalysisRecord.analysis_id == analysis_id)
+        .order_by(StaticAnalysisRecord.created_at.desc())
+        .first()
+    )
+    if exact_record is not None:
+        return _record_to_result(
+            exact_record,
+            sample=sample,
+            analysis_id=analysis_id,
+            provenance_scope="analysis_specific",
+        )
+
+    fallback_record = (
         db.query(StaticAnalysisRecord)
         .filter(
-            (StaticAnalysisRecord.analysis_id == analysis_id)
-            | (StaticAnalysisRecord.sample_id == sample.id)
+            StaticAnalysisRecord.sample_id == sample.id,
+            StaticAnalysisRecord.sample_sha256 == sample.sha256,
         )
         .order_by(StaticAnalysisRecord.created_at.desc())
         .first()
     )
-    return _record_to_result(record, sample=sample, analysis_id=analysis_id)
+    return _record_to_result(
+        fallback_record,
+        sample=sample,
+        analysis_id=analysis_id,
+        provenance_scope="sample_fallback" if fallback_record is not None else "unexecuted",
+    )
 
 
 @router.post(
@@ -226,5 +280,9 @@ def get_sample_static_analysis(
         .order_by(StaticAnalysisRecord.created_at.desc())
         .first()
     )
-    return _record_to_result(record, sample=sample)
+    return _record_to_result(
+        record,
+        sample=sample,
+        provenance_scope="sample_level" if record is not None else "unexecuted",
+    )
 
