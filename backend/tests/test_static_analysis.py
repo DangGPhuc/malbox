@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import signal
 import struct
 import subprocess
 import sys
@@ -48,6 +49,11 @@ from app.schemas.static_analysis import (
 )
 from app.services.intelligence.bundle_builder import EvidenceBundleBuilder
 from app.services.intelligence.validator import EvidenceValidator
+from app.services.static_analysis.containment import (
+    CgroupMemorySupport,
+    check_vm_memory_headroom,
+    get_available_memory_mb,
+)
 from app.services.static_analysis.ghidra_adapter import (
     GhidraIsolationError,
     GhidraStaticAnalyzer,
@@ -64,7 +70,9 @@ from app.services.static_analysis.version_check import (
 )
 from app.services.static_analysis.worker import (
     StaticAnalysisBusyError,
+    StaticAnalysisSubmissionError,
     StaticAnalysisWorkerManager,
+    prepare_result_for_persistence,
     static_worker_manager,
 )
 from sqlalchemy.orm import sessionmaker
@@ -182,6 +190,37 @@ def _extract_output_path_from_bwrap_cmd(cmd: list[str], job_dir: Path) -> Path:
     container_out = Path(cmd[idx + 2])
     rel = container_out.relative_to("/work")
     return job_dir / rel
+
+
+def _mock_cg_support(supported: bool = True) -> CgroupMemorySupport:
+    if not supported:
+        return CgroupMemorySupport(supported=False, reason="systemd-run unavailable in test")
+    return CgroupMemorySupport(
+        supported=True,
+        backend="systemd_cgroup_v2",
+        runner_bin="/usr/bin/systemd-run",
+        systemctl_bin=None,
+        host_env={"XDG_RUNTIME_DIR": "/run/user/1000"},
+    )
+
+
+def _patch_valid_preflights(monkeypatch, rt, *, with_cgroup: bool = True, avail_mb: int = 4096):
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime",
+        lambda configured_home=None: rt,
+    )
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.check_os_sandbox_support",
+        lambda backend="bwrap": (True, "/usr/bin/bwrap", None),
+    )
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.check_vm_memory_headroom",
+        lambda min_available_mb, mem_reader=None: (avail_mb >= min_available_mb, avail_mb, "ok" if avail_mb >= min_available_mb else "Insufficient available VM memory"),
+    )
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.check_cgroup_memory_support",
+        lambda *a, **kw: _mock_cg_support(with_cgroup),
+    )
 
 
 def _fake_popen_writer(payload: object, *, stdout_bytes: bytes = b"INFO ok\n", returncode: int = 0):
@@ -414,8 +453,7 @@ def test_workspace_isolation_and_project_reuse_mismatch_refused(tmp_path, monkey
     jdk = _make_fake_jdk(tmp_path)
     rt = _mock_runtime(gh, jdk)
     sample_path, sha_real, _ = _write_pe_sample(tmp_path)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt)
     monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", _fake_popen_writer({"status": "COMPLETED", "functions": []}))
 
     analyzer = GhidraStaticAnalyzer(
@@ -457,8 +495,7 @@ def test_bwrap_and_analyze_headless_command_construction(tmp_path, monkeypatch):
         def wait(self, timeout=None):
             return 0
 
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt, with_cgroup=True)
     monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", _CaptureProc)
 
     analyzer = GhidraStaticAnalyzer(
@@ -467,18 +504,31 @@ def test_bwrap_and_analyze_headless_command_construction(tmp_path, monkeypatch):
         workspace_root=tmp_path / "ws",
         scripts_dir=SCRIPTS_DIR,
         max_memory_mb=768,
+        max_heap_mb=512,
         max_cpu=1,
         timeout_seconds=90,
     )
     res = analyzer.analyze_sample("smp-cmd", sample_path, sha)
     assert res.status == "COMPLETED"
     assert res.provenance.os_sandbox == "bwrap"
+    assert res.provenance.memory_limit_backend == "systemd_cgroup_v2"
+    assert res.provenance.memory_limit_mb == 768
+    assert res.provenance.heap_limit_mb == 512
+    assert res.provenance.process_exit_code == 0
 
     cmd = captured["cmd"]
     kwargs = captured["kwargs"]
-    assert cmd[0] == "/usr/bin/bwrap"
+    assert cmd[0] == "/usr/bin/systemd-run"
+    assert "MemoryMax=768M" in cmd
+    assert "MemorySwapMax=0" in cmd
+    assert "CPUQuota=100%" in cmd
+    assert "OOMPolicy=kill" in cmd
+    assert "/usr/bin/bwrap" in cmd
     for flag in ("--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"):
         assert flag in cmd
+    heap_idx = cmd.index("GHIDRA_HEADLESS_MAXMEM")
+    assert cmd[heap_idx - 1] == "--setenv"
+    assert cmd[heap_idx + 1] == "512m"
     assert "/input/sample.bin" in cmd
     assert "/ghidra_scripts" in cmd
     assert "-readOnly" in cmd
@@ -490,7 +540,7 @@ def test_bwrap_and_analyze_headless_command_construction(tmp_path, monkeypatch):
     assert str(REPO_ROOT / "backend") not in cmd
     assert kwargs["shell"] is False
     assert kwargs["stdin"] is subprocess.DEVNULL
-    assert kwargs["env"] == {}
+    assert set(kwargs["env"].keys()).issubset({"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"})
     assert kwargs["start_new_session"] is True
 
 
@@ -519,13 +569,12 @@ def test_timeout_terminates_process_group_and_cleans_workspace(tmp_path, monkeyp
         def wait(self, timeout=None):
             return self.returncode
 
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt, with_cgroup=True)
     monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", _HangingProc)
     monkeypatch.setattr(
         GhidraStaticAnalyzer,
         "_terminate_process_group",
-        staticmethod(lambda pid: killed_calls.append(pid)),
+        staticmethod(lambda proc, **kwargs: killed_calls.append(proc.pid)),
     )
 
     analyzer = GhidraStaticAnalyzer(
@@ -542,7 +591,7 @@ def test_timeout_terminates_process_group_and_cleans_workspace(tmp_path, monkeyp
 
 
 # ---------------------------------------------------------------------------
-# 9. Hard max_output_bytes rejection and bounded stream overflow warning
+# 9. Hard max_output_bytes rejection and immediate FAIL on stream overflow
 # ---------------------------------------------------------------------------
 def test_output_caps_and_hard_max_output_bytes_rejection(tmp_path, monkeypatch):
     gh = _make_fake_ghidra_install(tmp_path)
@@ -550,8 +599,7 @@ def test_output_caps_and_hard_max_output_bytes_rejection(tmp_path, monkeypatch):
     rt = _mock_runtime(gh, jdk)
     sample_path, sha, _ = _write_pe_sample(tmp_path)
 
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt, with_cgroup=True)
 
     # Oversized facts.json fails closed
     oversized_bytes = b"{" + b" " * 5000 + b"}"
@@ -570,7 +618,7 @@ def test_output_caps_and_hard_max_output_bytes_rejection(tmp_path, monkeypatch):
     assert res_over.status == "FAILED"
     assert "exceeded hard cap" in res_over.errors[0]
 
-    # Excessive console stdout adds truncation warning while preserving valid small facts.json
+    # Excessive console stdout terminates owned PGID cleanly and classifies as FAILED
     monkeypatch.setattr(
         "app.services.static_analysis.ghidra_adapter.subprocess.Popen",
         _fake_popen_writer({"status": "COMPLETED", "functions": []}, stdout_bytes=b"A" * 8000),
@@ -581,10 +629,12 @@ def test_output_caps_and_hard_max_output_bytes_rejection(tmp_path, monkeypatch):
         workspace_root=tmp_path / "ws_stream",
         scripts_dir=SCRIPTS_DIR,
         max_output_bytes=4096,
+        max_stream_bytes=4096,
+        kill_grace_seconds=0.05,
     )
     res_stream = analyzer_stream.analyze_sample("smp-stream", sample_path, sha)
-    assert res_stream.status == "COMPLETED"
-    assert any("exceeded buffer cap" in w for w in res_stream.warnings)
+    assert res_stream.status == "FAILED"
+    assert "exceeded bounded limit" in res_stream.errors[0]
 
 
 # ---------------------------------------------------------------------------
@@ -681,8 +731,7 @@ def test_normalization_function_ids_call_graph_xrefs_and_non_execution(tmp_path,
         "decompiled_functions": [],
     }
 
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt)
     monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", _fake_popen_writer(raw_export))
 
     analyzer = GhidraStaticAnalyzer(
@@ -781,8 +830,7 @@ def test_selective_decompilation_limits_and_statuses(tmp_path, monkeypatch):
         ],
     }
 
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt)
     monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", _fake_popen_writer(raw_export))
 
     analyzer = GhidraStaticAnalyzer(
@@ -852,8 +900,7 @@ def test_malformed_ghidra_json_fails_cleanly(tmp_path, monkeypatch):
     rt = _mock_runtime(gh, jdk)
     sample_path, sha, _ = _write_pe_sample(tmp_path)
 
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt)
     monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", _fake_popen_writer("{broken json"))
 
     analyzer = GhidraStaticAnalyzer(
@@ -873,8 +920,7 @@ def test_partial_analysis_result_sets_partial_status(tmp_path, monkeypatch):
     rt = _mock_runtime(gh, jdk)
     sample_path, sha, _ = _write_pe_sample(tmp_path)
 
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.validate_ghidra_runtime", lambda configured_home=None: rt)
-    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", "ok"))
+    _patch_valid_preflights(monkeypatch, rt)
     monkeypatch.setattr(
         "app.services.static_analysis.ghidra_adapter.subprocess.Popen",
         _fake_popen_writer(
@@ -1097,6 +1143,18 @@ def test_static_analysis_api_single_worker_409_conflict_and_auth(client, db_sess
     jdk = _make_fake_jdk(tmp_path)
     rt = _mock_runtime(gh, jdk)
     monkeypatch.setattr("app.api.v1.static_analysis.validate_ghidra_runtime", lambda configured_home=None: rt)
+    monkeypatch.setattr(
+        "app.api.v1.static_analysis.check_vm_memory_headroom",
+        lambda min_available_mb: (True, 4096, "ok"),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.static_analysis.check_os_sandbox_support",
+        lambda backend="bwrap": (True, "/usr/bin/bwrap", None),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.static_analysis.check_cgroup_memory_support",
+        lambda: _mock_cg_support(True),
+    )
 
     pe_path, sha, _ = _write_pe_sample(tmp_path)
     sample = Sample(
@@ -1223,7 +1281,7 @@ def test_disabled_by_default_policy_blocks_trigger_and_doctor_skips(client, db_s
 
 
 # ---------------------------------------------------------------------------
-# 19. Opt-in real Ghidra Headless + ExportProgramFacts.java + bwrap smoke test
+# 19. Opt-in real Ghidra Headless + ExportProgramFacts.java + bwrap + cgroup smoke test
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(
     os.environ.get("MALBOX_RUN_LIVE_GHIDRA_TEST") != "1",
@@ -1237,7 +1295,9 @@ def test_live_ghidra_bwrap_smoke_opt_in(tmp_path):
         ghidra_home=os.environ.get("MALBOX_GHIDRA_HOME", ""),
         workspace_root=ws_root,
         scripts_dir=SCRIPTS_DIR,
-        max_memory_mb=512,
+        max_memory_mb=1280,
+        max_heap_mb=512,
+        min_available_memory_mb=1024,
         max_cpu=1,
         timeout_seconds=90,
         max_functions=50,
@@ -1255,9 +1315,422 @@ def test_live_ghidra_bwrap_smoke_opt_in(tmp_path):
     assert res.status in ("COMPLETED", "PARTIAL"), f"Live Ghidra failed: {res.errors}"
     assert res.provenance.binary_executed is False
     assert res.provenance.os_sandbox == "bwrap"
+    assert res.provenance.memory_limit_backend == "systemd_cgroup_v2"
+    assert res.provenance.memory_limit_mb == 1280
+    assert res.provenance.heap_limit_mb == 512
+    assert res.provenance.process_exit_code == 0
     assert res.program_metadata is not None
     assert res.program_metadata.address_size == 32
     assert len(res.functions) >= 1
     assert all(fn.is_executed is False for fn in res.functions)
     assert not (ws_root / "ghidra_job_livesmoke01").exists()
     print("LIVE_GHIDRA_RESULT:", json.dumps(res.model_dump(mode="json"), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# 20. Task 1: Strict exit-code integrity & nonzero return handling
+# ---------------------------------------------------------------------------
+def test_exit_code_integrity_nonzero_never_completed_and_distinguishes_cases(tmp_path, monkeypatch):
+    gh = _make_fake_ghidra_install(tmp_path)
+    jdk = _make_fake_jdk(tmp_path)
+    rt = _mock_runtime(gh, jdk)
+    sample_path, sha, _ = _write_pe_sample(tmp_path)
+    _patch_valid_preflights(monkeypatch, rt)
+
+    analyzer = GhidraStaticAnalyzer(
+        enabled=True, ghidra_home=str(gh), workspace_root=tmp_path / "ws_rc", scripts_dir=SCRIPTS_DIR
+    )
+
+    # Case A: rc=1 + valid-looking COMPLETED JSON -> MUST fail, never COMPLETED
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.subprocess.Popen",
+        _fake_popen_writer(
+            {
+                "status": "COMPLETED",
+                "functions": [{"entry_address": "0x401000", "name": "entry", "size_bytes": 16}],
+            },
+            returncode=1,
+        ),
+    )
+    res_rc1 = analyzer.analyze_sample("smp-rc1", sample_path, sha, job_id="jobrc001")
+    assert res_rc1.status == "FAILED"
+    assert res_rc1.is_partial is False
+    assert res_rc1.provenance.process_exit_code == 1
+    assert "exited nonzero (rc=1)" in res_rc1.errors[0]
+    assert not (tmp_path / "ws_rc" / "ghidra_job_jobrc001").exists()
+
+    # Case B: rc=1 + PARTIAL JSON -> JSON must NOT override process failure
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.subprocess.Popen",
+        _fake_popen_writer(
+            {"status": "PARTIAL", "errors": ["Decompiler crashed"], "functions": []},
+            returncode=1,
+        ),
+    )
+    res_rc1_part = analyzer.analyze_sample("smp-rc1p", sample_path, sha, job_id="jobrc002")
+    assert res_rc1_part.status == "FAILED"
+    assert res_rc1_part.provenance.process_exit_code == 1
+    assert "facts.json reported status=PARTIAL" in res_rc1_part.errors[0]
+
+    # Case C: rc=0 + FAILED JSON -> FAILED
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.subprocess.Popen",
+        _fake_popen_writer({"status": "FAILED", "errors": ["Program load aborted"]}, returncode=0),
+    )
+    res_rc0_fail = analyzer.analyze_sample("smp-rc0f", sample_path, sha, job_id="jobrc003")
+    assert res_rc0_fail.status == "FAILED"
+    assert "Program load aborted" in res_rc0_fail.errors[0]
+
+    # Case D: rc=0 + missing output -> FAILED
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.subprocess.Popen",
+        _fake_popen_writer(None, returncode=0),
+    )
+    res_missing = analyzer.analyze_sample("smp-miss", sample_path, sha, job_id="jobrc004")
+    assert res_missing.status == "FAILED"
+    assert "without producing facts.json" in res_missing.errors[0]
+
+
+# ---------------------------------------------------------------------------
+# 21. Task 2: Immediate overflow kill, SIGTERM grace -> SIGKILL, safe PGID guard
+# ---------------------------------------------------------------------------
+def test_stream_overflow_immediate_kill_grace_period_and_sigkill_escalation(tmp_path, monkeypatch):
+    gh = _make_fake_ghidra_install(tmp_path)
+    jdk = _make_fake_jdk(tmp_path)
+    rt = _mock_runtime(gh, jdk)
+    sample_path, sha, _ = _write_pe_sample(tmp_path)
+    _patch_valid_preflights(monkeypatch, rt)
+
+    class _NoisyStream:
+        def __init__(self, proc):
+            self._proc = proc
+
+        def read(self, size=4096):
+            if self._proc.poll() is not None:
+                return b""
+            time.sleep(0.01)
+            return b"X" * size
+
+        def close(self):
+            pass
+
+    signals_sent: list[tuple[str, int, int]] = []
+
+    class _StubbornProc:
+        def __init__(self, cmd, **kwargs):
+            self.pid = 88888
+            self.returncode = None
+            self.waited = False
+            self.stdout = _NoisyStream(self)
+            self.stderr = io.BytesIO(b"")
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return self.returncode
+
+    last_proc: list[_StubbornProc] = []
+
+    def _make_stubborn(cmd, **kwargs):
+        p = _StubbornProc(cmd, **kwargs)
+        last_proc.append(p)
+        return p
+
+    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", _make_stubborn)
+    monkeypatch.setattr(os, "getpgrp", lambda: 1000)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 88888)
+
+    def _fake_killpg(pgid, sig):
+        signals_sent.append(("killpg", pgid, sig))
+        if sig == signal.SIGKILL and last_proc:
+            last_proc[-1].returncode = -9
+
+    monkeypatch.setattr(os, "killpg", _fake_killpg)
+
+    analyzer = GhidraStaticAnalyzer(
+        enabled=True,
+        ghidra_home=str(gh),
+        workspace_root=tmp_path / "ws_ov",
+        scripts_dir=SCRIPTS_DIR,
+        timeout_seconds=30,  # Must abort well before 30s!
+        max_stream_bytes=8192,
+        kill_grace_seconds=0.1,
+    )
+    t0 = time.monotonic()
+    res = analyzer.analyze_sample("smp-ov", sample_path, sha, job_id="jobov01")
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 3.0
+    assert res.status == "FAILED"
+    assert "exceeded bounded limit" in res.errors[0]
+    assert last_proc and last_proc[0].waited is True
+    assert ("killpg", 88888, signal.SIGTERM) in signals_sent
+    assert ("killpg", 88888, signal.SIGKILL) in signals_sent
+    assert signals_sent.index(("killpg", 88888, signal.SIGTERM)) < signals_sent.index(("killpg", 88888, signal.SIGKILL))
+    assert not (tmp_path / "ws_ov" / "ghidra_job_jobov01").exists()
+
+    # Safety guard: NEVER call os.killpg if getpgid returns foreign/own process group
+    signals_sent.clear()
+    pid_kills: list[tuple[int, int]] = []
+
+    class _GracefulProc:
+        def __init__(self):
+            self.pid = 99999
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    gp = _GracefulProc()
+    monkeypatch.setattr(os, "getpgrp", lambda: 5555)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 5555)  # Unsafe: matches own pgrp!
+
+    def _fake_kill(pid, sig):
+        pid_kills.append((pid, sig))
+        if sig == signal.SIGTERM:
+            gp.returncode = -15
+
+    monkeypatch.setattr(os, "kill", _fake_kill)
+    GhidraStaticAnalyzer._terminate_process_group(gp, grace_seconds=0.2)
+    assert not any(call[0] == "killpg" for call in signals_sent)
+    assert pid_kills == [(99999, signal.SIGTERM)]  # Graceful exit skips SIGKILL
+
+
+# ---------------------------------------------------------------------------
+# 22. Task 3: Available-RAM preflight & fail-closed cgroup containment checks
+# ---------------------------------------------------------------------------
+def test_vm_memory_headroom_and_cgroup_containment_fail_closed(tmp_path, monkeypatch):
+    memfile = tmp_path / "meminfo"
+    memfile.write_text("MemTotal:        8000000 kB\nMemAvailable:     512000 kB\n", encoding="utf-8")
+    assert get_available_memory_mb(memfile) == 500
+    ok_mem, avail, msg = check_vm_memory_headroom(1280, mem_reader=lambda: get_available_memory_mb(memfile))
+    assert ok_mem is False
+    assert avail == 500
+    assert "500 MiB" in msg
+
+    gh = _make_fake_ghidra_install(tmp_path)
+    jdk = _make_fake_jdk(tmp_path)
+    rt = _mock_runtime(gh, jdk)
+    sample_path, sha, _ = _write_pe_sample(tmp_path)
+
+    # Insufficient RAM -> UNAVAILABLE without launching subprocess
+    _patch_valid_preflights(monkeypatch, rt, with_cgroup=True, avail_mb=400)
+    popen_mock = MagicMock()
+    monkeypatch.setattr("app.services.static_analysis.ghidra_adapter.subprocess.Popen", popen_mock)
+
+    analyzer = GhidraStaticAnalyzer(
+        enabled=True,
+        ghidra_home=str(gh),
+        workspace_root=tmp_path / "ws_mem",
+        scripts_dir=SCRIPTS_DIR,
+        min_available_memory_mb=1280,
+    )
+    res_low = analyzer.analyze_sample("smp-lowmem", sample_path, sha)
+    assert res_low.status == "UNAVAILABLE"
+    assert "Insufficient available VM memory" in res_low.errors[0]
+    popen_mock.assert_not_called()
+
+    # Cgroup unavailable with require_cgroup_memory_limit=True -> UNAVAILABLE (fail closed)
+    _patch_valid_preflights(monkeypatch, rt, with_cgroup=False, avail_mb=4096)
+    res_nocg = analyzer.analyze_sample("smp-nocg", sample_path, sha)
+    assert res_nocg.status == "UNAVAILABLE"
+    assert "cgroup v2" in res_nocg.errors[0]
+    popen_mock.assert_not_called()
+
+    # Explicit opt-out require_cgroup_memory_limit=False runs with warning & memory_limit_backend="none"
+    monkeypatch.setattr(
+        "app.services.static_analysis.ghidra_adapter.subprocess.Popen",
+        _fake_popen_writer({"status": "COMPLETED", "functions": []}),
+    )
+    analyzer_optout = GhidraStaticAnalyzer(
+        enabled=True,
+        ghidra_home=str(gh),
+        workspace_root=tmp_path / "ws_optout",
+        scripts_dir=SCRIPTS_DIR,
+        require_cgroup_memory_limit=False,
+    )
+    res_opt = analyzer_optout.analyze_sample("smp-optout", sample_path, sha)
+    assert res_opt.status == "COMPLETED"
+    assert res_opt.provenance.memory_limit_backend == "none"
+    assert any("cgroup memory containment disabled" in w for w in res_opt.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 23. Task 5: Ancestor symlink traversal & DB persistence size gating
+# ---------------------------------------------------------------------------
+def test_ancestor_symlink_rejection_and_persistence_size_bound(tmp_path):
+    real_base = tmp_path / "real_base"
+    real_base.mkdir()
+    sample_path, sha, _ = _write_pe_sample(real_base)
+
+    sym_anc = tmp_path / "sym_ancestor"
+    sym_anc.symlink_to(real_base)
+
+    # Ancestor symlink two levels above nested workspace/sample must fail closed
+    with pytest.raises(GhidraIsolationError, match="symlink"):
+        prepare_isolated_project_workspace(sym_anc / "nested" / "ws", "jobanc01", sha)
+
+    nested_dir = real_base / "sub" / "quarantine"
+    nested_dir.mkdir(parents=True)
+    inner_sample, inner_sha, _ = _write_pe_sample(nested_dir)
+    with pytest.raises(GhidraIsolationError, match="symlink"):
+        validate_sample_for_static_analysis(sym_anc / "sub" / "quarantine" / inner_sample.name, inner_sha, 1024 * 1024)
+    _, gh_sym_err = locate_ghidra_home(str(sym_anc / "ghidra"))
+    assert gh_sym_err is not None and "symlink" in gh_sym_err.lower()
+
+    # Persistence gate shrinks oversized pseudocode gracefully while staying valid
+    fn_id = make_static_function_id(sha, "0x401000")
+    huge_res = StaticAnalysisResult(
+        status="COMPLETED",
+        provenance=StaticAnalysisProvenance(sample_id="s1", sample_sha256=sha, os_sandbox="bwrap"),
+        functions=[FunctionMetadata(function_id=fn_id, entry_address="0x401000", name="big_fn")],
+        decompiled_functions=[
+            DecompiledFunction(
+                function_id=fn_id,
+                entry_address="0x401000",
+                name="big_fn",
+                pseudocode="Z" * 30000,
+                pseudocode_bytes=30000,
+            )
+        ],
+        truncation=StaticAnalysisTruncation(functions_discovered=1, functions_included=1, decompiled_included=1),
+    )
+    bounded = prepare_result_for_persistence(huge_res, max_persisted_bytes=16384)
+    assert len(bounded.model_dump_json().encode("utf-8")) <= 16384
+    assert bounded.status == "PARTIAL"
+    assert bounded.decompiled_functions[0].decompile_status == "SKIPPED_CAP"
+
+
+# ---------------------------------------------------------------------------
+# 24. Task 4: Worker lifecycle (failed submission, cancellation, shutdown, 503 API)
+# ---------------------------------------------------------------------------
+def test_worker_lifecycle_startup_shutdown_failed_submission_and_cancellation(client, db_session, tmp_path, monkeypatch):
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=db_session.get_bind())
+    monkeypatch.setattr("app.services.static_analysis.worker.SessionLocal", session_factory)
+
+    pe_path, sha, _ = _write_pe_sample(tmp_path)
+    sample = Sample(
+        sha256=sha,
+        sha1="5" * 40,
+        md5="6" * 32,
+        file_name="lifecycle.exe",
+        file_size=len(_build_minimal_pe32()),
+        is_pe=True,
+        quarantine_path=str(pe_path),
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    mgr = StaticAnalysisWorkerManager()
+    mgr.start()
+
+    # 1. Executor submission failure MUST mark DB FAILED and clear active job ID (no stuck QUEUED!)
+    bad_exec = MagicMock()
+    bad_exec.submit.side_effect = RuntimeError("executor boom")
+    monkeypatch.setattr(mgr, "_get_executor", lambda: bad_exec)
+
+    with pytest.raises(StaticAnalysisSubmissionError):
+        mgr.submit_job(db=db_session, sample=sample, analysis_id=None)
+
+    assert mgr.is_busy() is False
+    assert mgr.active_job_id() is None
+    row_after_fail = db_session.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.sample_id == sample.id).first()
+    assert row_after_fail is not None
+    assert row_after_fail.status == "FAILED"
+    assert "executor boom" in (row_after_fail.error_message or "")
+
+    # 1b. Repeated sequential submissions reuse worker cleanly
+    class _FastOkAnalyzer(GhidraStaticAnalyzer):
+        def analyze_sample(self, sample_id, sample_path, expected_sha256, analysis_id=None, job_id=None, cancel_event=None, allow_disabled=False):
+            return StaticAnalysisResult(
+                status="COMPLETED",
+                provenance=StaticAnalysisProvenance(analysis_id=analysis_id, sample_id=sample_id, sample_sha256=expected_sha256, os_sandbox="bwrap"),
+                truncation=StaticAnalysisTruncation(),
+            )
+
+    mgr_seq = StaticAnalysisWorkerManager()
+    mgr_seq.start()
+    for _idx in range(2):
+        r_seq = mgr_seq.submit_job(db=db_session, sample=sample, analyzer=_FastOkAnalyzer(enabled=True))
+        for _ in range(40):
+            if not mgr_seq.is_busy():
+                break
+            time.sleep(0.02)
+        db_session.expire_all()
+        db_row = db_session.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == r_seq.id).first()
+        assert db_row is not None and db_row.status == "COMPLETED"
+    mgr_seq.stop(wait_seconds=1.0)
+
+    # 2. Active job cancelled cleanly during shutdown (`stop()`) and rejects subsequent submissions until `start()`
+    mgr2 = StaticAnalysisWorkerManager()
+    mgr2.start()
+    entered_ev = threading.Event()
+    saw_cancel_ev = threading.Event()
+
+    class _CancelAwareAnalyzer(GhidraStaticAnalyzer):
+        def analyze_sample(self, sample_id, sample_path, expected_sha256, analysis_id=None, job_id=None, cancel_event=None, allow_disabled=False):
+            entered_ev.set()
+            assert cancel_event is not None
+            assert cancel_event.wait(timeout=3.0)
+            saw_cancel_ev.set()
+            return StaticAnalysisResult(
+                status="FAILED",
+                provenance=StaticAnalysisProvenance(analysis_id=analysis_id, sample_id=sample_id, sample_sha256=expected_sha256, os_sandbox="bwrap"),
+                truncation=StaticAnalysisTruncation(),
+                errors=["Cancelled by shutdown"],
+            )
+
+    rec2 = mgr2.submit_job(db=db_session, sample=sample, analyzer=_CancelAwareAnalyzer(enabled=True))
+    assert entered_ev.wait(timeout=2.0)
+    interrupted = mgr2.stop(wait_seconds=3.0)
+    assert interrupted >= 1
+    assert saw_cancel_ev.is_set()
+    assert mgr2.is_busy() is False
+
+    db_session.expire_all()
+    rec2_db = db_session.query(StaticAnalysisRecord).filter(StaticAnalysisRecord.id == rec2.id).first()
+    assert rec2_db is not None
+    assert rec2_db.status == "FAILED"
+
+    with pytest.raises(StaticAnalysisSubmissionError, match="shutting down"):
+        mgr2.submit_job(db=db_session, sample=sample, analyzer=_CancelAwareAnalyzer(enabled=True))
+
+    # 3. API 503 preflight when cgroup containment or VM RAM headroom fails
+    monkeypatch.setattr(settings, "GHIDRA_ENABLED", True)
+    monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "static-test-secret")
+    monkeypatch.setattr(settings, "GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT", True)
+    gh = _make_fake_ghidra_install(tmp_path)
+    jdk = _make_fake_jdk(tmp_path)
+    rt = _mock_runtime(gh, jdk)
+    analysis = Analysis(
+        sample_id=sample.id,
+        status=AnalysisStatus.COMPLETED.value,
+        backend_type="replay",
+        replay_scenario_id="ransomware_wannacry_mock",
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    monkeypatch.setattr("app.api.v1.static_analysis.validate_ghidra_runtime", lambda configured_home=None: rt)
+    monkeypatch.setattr("app.api.v1.static_analysis.check_vm_memory_headroom", lambda min_available_mb: (False, 300, "Insufficient available VM memory"))
+    resp_503_ram = client.post(
+        f"/api/v1/analyses/{analysis.id}/static-analysis",
+        headers={"X-Reporting-Token": "static-test-secret"},
+    )
+    assert resp_503_ram.status_code == 503
+    assert "Insufficient" in resp_503_ram.json()["detail"]
+
+    monkeypatch.setattr("app.api.v1.static_analysis.check_vm_memory_headroom", lambda min_available_mb: (True, 4096, "ok"))
+    monkeypatch.setattr("app.api.v1.static_analysis.check_os_sandbox_support", lambda backend="bwrap": (True, "/usr/bin/bwrap", None))
+    monkeypatch.setattr("app.api.v1.static_analysis.check_cgroup_memory_support", lambda: _mock_cg_support(False))
+    resp_503_cg = client.post(
+        f"/api/v1/analyses/{analysis.id}/static-analysis",
+        headers={"X-Reporting-Token": "static-test-secret"},
+    )
+    assert resp_503_cg.status_code == 503
+    assert "cgroup" in resp_503_cg.json()["detail"].lower()

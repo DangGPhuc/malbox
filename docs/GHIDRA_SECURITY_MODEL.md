@@ -8,9 +8,9 @@ Processing untrusted malware binaries inside a complex disassembler and decompil
 
 - Uploaded binaries are **never executed** by Malbox or Ghidra (`StaticAnalysisProvenance.binary_executed` and `FunctionMetadata.is_executed` are schema-locked to `Literal[False]`).
 - `analyzeHeadless` is invoked with `-readOnly` and imports binaries strictly as dead data bytes into an ephemeral Ghidra project database.
-- [`validate_sample_for_static_analysis()`](../backend/app/services/static_analysis/ghidra_adapter.py) validates every sample **before** launching Ghidra:
+- [`validate_sample_for_static_analysis()`](../backend/app/services/static_analysis/ghidra_adapter.py) and [`has_symlink_ancestor()`](../backend/app/services/static_analysis/containment.py) validate every sample and workspace path **before** launching Ghidra:
   1. Rejects empty paths and any `..` traversal components.
-  2. Rejects symlinked files (`sample_path.is_symlink()`) and files inside symlinked quarantine directories (`sample_path.parent.is_symlink()`).
+  2. Rejects symlinked files, symlinked parent directories, and symlinked ancestor directories along sample, workspace, and configured `GHIDRA_HOME` paths.
   3. Rejects empty files and binaries larger than `MALBOX_GHIDRA_MAX_SAMPLE_BYTES` (default `16 MiB`).
   4. Re-computes `SHA-256` byte-by-byte and rejects any hash mismatch against `Sample.sha256`.
   5. Validates the binary header via `parse_pe_metadata()` so non-PE files fail closed without launching a JVM.
@@ -40,18 +40,18 @@ Ghidra ignores dot-prefixed project directories and risks cross-contaminating an
 
 ---
 
-## 4. Resource Exhaustion, Caps & Timeout Enforcement
+## 4. Resource Exhaustion, Process-Tree Memory Budget & Termination Controls
 
-- **Single-Concurrency Queue**: [`StaticAnalysisWorkerManager`](../backend/app/services/static_analysis/worker.py) enforces `max_workers=1` and returns `HTTP 409 Conflict` if another job is active, plus recovers interrupted `QUEUED`/`RUNNING` DB records cleanly on server startup.
-- **JVM & POSIX Rlimits**:
-  - `GHIDRA_HEADLESS_MAXMEM` (default `1024m`), `-XX:MaxMetaspaceSize=256m`, `-XX:ReservedCodeCacheSize=128m`, `-max-cpu` (clamped `1..4`).
-  - `RLIMIT_CPU` bound to `timeout_seconds`, `RLIMIT_CORE=0` (no core dumps of untrusted buffers), and `RLIMIT_FSIZE=256 MiB`.
-- **Two-Layer Timeouts & Process-Group Kill**:
-  - Ghidra receives `-analysisTimeoutPerFile` and `ExportProgramFacts.java` sets a per-function decompiler timeout via `DecompInterface`.
-  - If wall-clock execution exceeds `MALBOX_GHIDRA_TIMEOUT_SECONDS`, `_terminate_process_group()` sends `SIGTERM` followed by `SIGKILL` to the entire OS process group (`os.killpg`) so headless JVMs and C++ `decompile` helpers cannot orphan.
-- **Export & Console Truncation Guards**:
-  - [`ExportProgramFacts.java`](../ghidra_scripts/ExportProgramFacts.java) writes using built-in string serialization (zero third-party JAR dependencies), truncates long strings/pseudocode, respects `maxFunctions`, `maxDecompileFunctions`, and byte budgets.
-  - Adapter rejects `facts.json` larger than `MALBOX_GHIDRA_MAX_OUTPUT_BYTES` (`FAILED`) and drains stdout/stderr via a bounded reader.
+- **Single-Concurrency Queue & Multi-Worker Lock**: [`StaticAnalysisWorkerManager`](../backend/app/services/static_analysis/worker.py) enforces `max_workers=1`, rejects concurrent triggers with `HTTP 409 Conflict`, rejects failed executor submissions immediately (never leaving jobs `QUEUED`), recovers interrupted rows on startup, cancels active Ghidra subprocesses on backend shutdown (`stop()`), and coordinates across multi-worker processes sharing `GHIDRA_WORKSPACE_ROOT` via non-blocking POSIX `fcntl.flock` (`malbox_static_worker.lock`). Single-worker Uvicorn (`--workers 1`) remains the supported production deployment for Kali VMs.
+- **Process-Tree Cgroup v2 Memory Containment & VM Headroom Preflight** ([`containment.py`](../backend/app/services/static_analysis/containment.py)):
+  - Before invoking Java, `check_vm_memory_headroom()` reads `/proc/meminfo` (`MemAvailable`) and fails closed (`UNAVAILABLE`) if available host RAM falls below `MALBOX_GHIDRA_MIN_AVAILABLE_MEMORY_MB` (default `1280 MiB`).
+  - Rather than relying on ineffective `RLIMIT_RSS` or broken HotSpot `RLIMIT_AS`, Ghidra runs wrapped in unprivileged `systemd-run --user --scope` cgroup v2 controls (`MemoryHigh`, `MemoryMax=1280M`, `MemorySwapMax=0`, `CPUQuota=100%`, `TasksMax=128`, `OOMPolicy=kill`) bounding the **entire process tree** (JVM heap + Metaspace `192m` + CodeCache `96m` + native C++ `decompile` children) without `sudo` or privilege escalation.
+  - When `MALBOX_GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT=true` (default), unsupported hosts fail closed (`UNAVAILABLE`) rather than running unconfined JVMs.
+- **JVM, POSIX Rlimits & Immediate Stream/Exit Enforcement**:
+  - Conservative heap default `MALBOX_GHIDRA_MAX_HEAP_MB=512` (`GHIDRA_HEADLESS_MAXMEM=512m`) clamped inside `GHIDRA_MAX_MEMORY_MB`, `-max-cpu` (`1..4`), `RLIMIT_CPU`, `RLIMIT_CORE=0`, and `RLIMIT_FSIZE=256 MiB`.
+  - **Exit-Code Integrity**: Nonzero subprocess return codes NEVER produce `COMPLETED` and NEVER let `facts.json` status override process failure; partial exports (`status="PARTIAL"`) are accepted only from `rc == 0` runs that preserve verified schemas and truncation metadata.
+  - **Immediate Console Overflow Termination**: `_collect_bounded_output()` monitors `MALBOX_GHIDRA_MAX_STREAM_BYTES` (`256 KiB`), immediately wakes the monitor on overflow, signals **only** the verified owned child PGID (`pgid == proc.pid != os.getpgrp()`) with `SIGTERM`, waits a bounded grace period before `SIGKILL` escalation, reaps cleanly, closes pipes so reader threads cannot block, tears down transient systemd scope units, and returns `FAILED`.
+- **Persistence Byte Gate**: `prepare_result_for_persistence()` strictly re-validates `StaticAnalysisResult` schemas and bounds JSON payload size (`MALBOX_GHIDRA_MAX_PERSISTED_RESULT_BYTES`, `1 MiB`) prior to SQLite writes.
 
 ---
 
@@ -66,6 +66,7 @@ Ghidra ignores dot-prefixed project directories and risks cross-contaminating an
 
 1. **Parser Complexity**: While isolated in Bubblewrap without network access or write access outside `/work`, malformed PE headers still exercise Ghidra's Java/C++ loaders inside the sandbox.
 2. **Packed / Obfuscated Binaries**: UPX-packed, virtualized, or heavily obfuscated executables may yield small function counts, thunk stubs, or `TIMED_OUT`/`PARTIAL` decompiler results without dynamic unpacking.
-3. **Host-Specific Isolation**: Linux Bubblewrap requires unprivileged user namespaces on the host Linux kernel (verified on Kali host; CI runners without `bwrap`/Ghidra run the unit suite with mocked subprocess execution).
-4. **Heuristic Signals Only**: `FunctionAnalysisFinding.rank_score` surfaces suspicious static API/string patterns for analyst triage and does not assert maliciousness or runtime execution.
+3. **Host-Specific Isolation**: Linux Bubblewrap requires unprivileged user namespaces and `systemd-run --user` requires a delegated cgroup v2 `memory` controller (verified on Kali Linux host; CI runners and headless containers lacking user cgroups fail closed when `MALBOX_GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT=true` and execute mocked unit tests).
+4. **Single Uvicorn Worker Model**: In-process queue accounting assumes Uvicorn `--workers 1`; multi-worker deployments must still respect the shared workspace file lock (`HTTP 409`/`FAILED` on contention).
+5. **Heuristic Signals Only**: `FunctionAnalysisFinding.rank_score` surfaces suspicious static API/string patterns for analyst triage and does not assert maliciousness or runtime execution.
 

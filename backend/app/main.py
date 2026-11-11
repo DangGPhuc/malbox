@@ -20,10 +20,12 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    # Start background job queue consumer
+    # Start background job queue consumers
+    static_worker_manager.start()
     job_queue_manager.start()
     yield
-    # Stop background consumer gracefully
+    # Stop background consumers gracefully (propagate cancellation to any active Ghidra subprocess)
+    static_worker_manager.stop(wait_seconds=5.0)
     job_queue_manager.stop()
 
 app = FastAPI(

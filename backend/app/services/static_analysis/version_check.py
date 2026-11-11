@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from app.services.static_analysis.containment import has_symlink_ancestor
+
 
 DEFAULT_GHIDRA_CANDIDATES = (
     "/usr/share/ghidra",
@@ -79,8 +81,8 @@ def locate_ghidra_home(configured_home: Optional[str] = None) -> Tuple[Optional[
         cand = Path(raw)
         if not cand.is_absolute():
             return None, f"Configured GHIDRA_HOME '{raw}' must be an absolute path."
-        if cand.is_symlink():
-            return None, f"Configured GHIDRA_HOME '{raw}' cannot be a symlink."
+        if has_symlink_ancestor(cand) is not None:
+            return None, f"Configured GHIDRA_HOME '{raw}' cannot be or traverse a symlink."
         resolved = cand.resolve()
         if not resolved.is_dir():
             return None, f"Configured GHIDRA_HOME does not exist: {resolved}"

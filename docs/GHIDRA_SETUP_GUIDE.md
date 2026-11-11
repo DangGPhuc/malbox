@@ -10,7 +10,7 @@ Tested baseline environment (Kali Linux):
 - **Ghidra**: `12.1.4` (install root e.g. `/usr/share/ghidra` or `/opt/ghidra`, containing `support/analyzeHeadless` and `Ghidra/application.properties`)
 - **Java Development Kit (JDK)**: OpenJDK **21+** with **both `java` and `javac`** (tested with OpenJDK `25.0.4.1`).
   - *Important:* A bare JRE (`java` without `javac`) is rejected because Ghidra's headless launcher compiles `.java` post-scripts and non-interactive startup via `LaunchSupport.jar` requires JDK detection when no TTY prompt is permitted.
-- **Bubblewrap (`bwrap`)**: Mandatory Linux namespace isolation binary (`--unshare-all`, airgapped execution).
+- **Bubblewrap (`bwrap`)** & **Unprivileged User Cgroup v2 (`systemd-run --user`)**: Mandatory Linux namespace isolation (`--unshare-all`) and process-tree memory containment (`MemoryMax`) without `sudo`.
 
 On Debian/Kali hosts, install via standard system packages (never automatically invoked by Malbox):
 ```bash
@@ -30,8 +30,11 @@ MALBOX_GHIDRA_ENABLED=true
 MALBOX_GHIDRA_HOME=/usr/share/ghidra
 # Isolated non-hidden workspace root (auto-enforced mode 0700)
 MALBOX_GHIDRA_WORKSPACE_ROOT=data/ghidra_projects
-# Resource & output safety caps
-MALBOX_GHIDRA_MAX_MEMORY_MB=1024
+# Conservative ~8GB Kali VM resource & cgroup containment budgets
+MALBOX_GHIDRA_MAX_MEMORY_MB=1280
+MALBOX_GHIDRA_MAX_HEAP_MB=512
+MALBOX_GHIDRA_MIN_AVAILABLE_MEMORY_MB=1280
+MALBOX_GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT=true
 MALBOX_GHIDRA_MAX_CPU=1
 MALBOX_GHIDRA_TIMEOUT_SECONDS=120
 MALBOX_GHIDRA_MAX_SAMPLE_BYTES=16777216
@@ -39,21 +42,23 @@ MALBOX_GHIDRA_MAX_FUNCTIONS=250
 MALBOX_GHIDRA_MAX_DECOMPILE_FUNCTIONS=10
 MALBOX_GHIDRA_MAX_PSEUDOCODE_CHARS=8192
 MALBOX_GHIDRA_MAX_OUTPUT_BYTES=524288
+MALBOX_GHIDRA_MAX_STREAM_BYTES=262144
+MALBOX_GHIDRA_MAX_PERSISTED_RESULT_BYTES=1048576
 ```
 
-Triggering `POST /api/v1/analyses/{analysis_id}/static-analysis` also requires configuring `MALBOX_REPORTING_AUTH_TOKEN` and sending the matching `X-Reporting-Token` header.
+Triggering `POST /api/v1/analyses/{analysis_id}/static-analysis` also requires configuring `MALBOX_REPORTING_AUTH_TOKEN` and sending the matching `X-Reporting-Token` header. Static analysis assumes single-worker Uvicorn (`--workers 1`).
 
 ---
 
 ## 3. VM Resource Sizing Guidelines
 
-HotSpot JVMs reserve significant native heap, metaspace, and code cache memory alongside the Ghidra C++ `decompile` child process:
+HotSpot JVMs reserve significant native heap, metaspace (`192m`), and code cache (`96m`) memory alongside native C++ `decompile` child processes:
 
-| Host / VM Available RAM | Recommended `MAX_MEMORY_MB` | `MAX_CPU` | Concurrency Policy |
-| :--- | :--- | :--- | :--- |
-| `< 2.5 GB` available | `512` (recommended smoke/triage ceiling) | `1` | Fixed `1` (hardcoded) |
-| `2.5 GB – 6 GB` available | `768 – 1024` (default `1024`) | `1` | Fixed `1` (hardcoded) |
-| `> 6 GB` available | `1024 – 2048` | `1 – 2` | Fixed `1` (hardcoded) |
+| Host / VM Available RAM | Recommended Process-Tree `MAX_MEMORY_MB` | `MAX_HEAP_MB` | `MAX_CPU` | Concurrency Policy |
+| :--- | :--- | :--- | :--- | :--- |
+| `< 1.28 GB` available | Deferred automatically (`UNAVAILABLE`) | — | `1` | Fixed `1` (hardcoded) |
+| `1.3 GB – 6 GB` available (~8 GB Kali VM) | `1280` (default) | `512` (default) | `1` | Fixed `1` (hardcoded) |
+| `> 6 GB` available | `1536 – 2048` | `512 – 1024` | `1 – 2` | Fixed `1` (hardcoded) |
 
 - Concurrent triggers while a job is running are intentionally rejected with **`HTTP 409 Conflict`**.
 - Never launch parallel pytest JVMs or concurrent manual `analyzeHeadless` runs inside a `< 8 GB` analysis VM.

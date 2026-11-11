@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
+
 from app.ai.opencode_sandbox import check_os_sandbox_support
 from app.core.config import settings
 from app.core.security import redact_sensitive_text
@@ -33,6 +38,14 @@ from app.schemas.static_analysis import (
     make_static_function_id,
     make_static_string_id,
     normalize_entry_address,
+)
+from app.services.static_analysis.containment import (
+    CgroupMemorySupport,
+    build_cgroup_scope_prefix,
+    check_cgroup_memory_support,
+    check_vm_memory_headroom,
+    has_symlink_ancestor,
+    stop_cgroup_scope,
 )
 from app.services.static_analysis.ranker import rank_functions
 from app.services.static_analysis.version_check import GhidraRuntimeValidation, validate_ghidra_runtime
@@ -73,11 +86,13 @@ def validate_sample_for_static_analysis(
     """
     if not sample_path or ".." in sample_path.parts:
         raise GhidraIsolationError("Unsafe sample path (contains traversal or empty specification).")
-    if sample_path.is_symlink():
-        raise GhidraIsolationError(f"Refusing symlinked sample file: {sample_path}")
-    # Also reject symlinked immediate directory holding sample (e.g. forged quarantine dir)
-    if sample_path.parent.is_symlink():
-        raise GhidraIsolationError(f"Refusing sample inside symlinked directory: {sample_path.parent}")
+    sym_hit = has_symlink_ancestor(sample_path)
+    if sym_hit is not None:
+        if sym_hit == sample_path:
+            raise GhidraIsolationError(f"Refusing symlinked sample file: {sample_path}")
+        if sym_hit == sample_path.parent:
+            raise GhidraIsolationError(f"Refusing sample inside symlinked directory: {sample_path.parent}")
+        raise GhidraIsolationError(f"Refusing sample path traversing symlinked ancestor directory: {sym_hit}")
     if not sample_path.exists() or not sample_path.is_file():
         raise GhidraIsolationError(f"Sample binary does not exist as a regular file: {sample_path}")
 
@@ -119,8 +134,9 @@ def prepare_isolated_project_workspace(
         raise GhidraIsolationError(f"Unsafe static analysis job identifier: '{job_id}'")
     if ".." in workspace_root.parts:
         raise GhidraIsolationError("GHIDRA_WORKSPACE_ROOT contains unsafe traversal segments.")
-    if workspace_root.is_symlink():
-        raise GhidraIsolationError("GHIDRA_WORKSPACE_ROOT cannot be a symlink.")
+    ws_sym = has_symlink_ancestor(workspace_root)
+    if ws_sym is not None:
+        raise GhidraIsolationError(f"GHIDRA_WORKSPACE_ROOT cannot be or traverse a symlink: {ws_sym}")
 
     workspace_root.mkdir(parents=True, exist_ok=True)
     os.chmod(workspace_root, 0o700)
@@ -131,6 +147,9 @@ def prepare_isolated_project_workspace(
         raise GhidraIsolationError("Project directory name cannot start with '.'.")
 
     job_dir = resolved_root / job_dir_name
+    job_sym = has_symlink_ancestor(job_dir)
+    if job_sym is not None:
+        raise GhidraIsolationError(f"Refusing symlinked Ghidra project workspace: {job_sym}")
     manifest_path = job_dir / "malbox_project_manifest.json"
 
     if job_dir.exists():
@@ -228,9 +247,10 @@ def build_ghidra_sandbox_command(
     max_memory_mb: int,
     max_cpu: int,
     headless_args: List[str],
+    max_heap_mb: Optional[int] = None,
 ) -> Tuple[List[str], Dict[str, str]]:
     """
-    Confines analyzeHeadless inside Linux Bubblewrap namespaces (--unshare-all --unshare-net)
+    Confines analyzeHeadless inside Linux Bubblewrap namespaces (--unshare-all)
     with read-only system libs, Ghidra installation, script directory, and single sample file,
     plus an isolated RW /work directory and stripped environment.
     """
@@ -255,9 +275,14 @@ def build_ghidra_sandbox_command(
         *headless_args[8:],
     ]
 
+    effective_heap = (
+        max(256, min(int(max_heap_mb), max(256, int(max_memory_mb) - 256)))
+        if max_heap_mb is not None
+        else max(256, min(1024, int(max_memory_mb) - 256 if max_memory_mb > 512 else int(max_memory_mb)))
+    )
     java_opts = (
-        f"-XX:MaxMetaspaceSize=256m "
-        f"-XX:ReservedCodeCacheSize=128m "
+        f"-XX:MaxMetaspaceSize=192m "
+        f"-XX:ReservedCodeCacheSize=96m "
         f"-Dapplication.settingsdir=/work/cfg "
         f"-Dapplication.cachedir=/work/cache "
         f"-Dapplication.tempdir=/work/tmp "
@@ -275,7 +300,7 @@ def build_ghidra_sandbox_command(
         "TMPDIR": "/work/tmp",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "GHIDRA_HEADLESS_MAXMEM": f"{max(256, min(4096, max_memory_mb))}m",
+        "GHIDRA_HEADLESS_MAXMEM": f"{effective_heap}m",
         "GHIDRA_HEADLESS_JAVA_OPTIONS": java_opts,
     }
     if runtime.java_home is not None:
@@ -377,6 +402,9 @@ class GhidraStaticAnalyzer:
         workspace_root: Optional[Path] = None,
         scripts_dir: Optional[Path] = None,
         max_memory_mb: Optional[int] = None,
+        max_heap_mb: Optional[int] = None,
+        min_available_memory_mb: Optional[int] = None,
+        require_cgroup_memory_limit: Optional[bool] = None,
         max_cpu: Optional[int] = None,
         timeout_seconds: Optional[int] = None,
         max_sample_bytes: Optional[int] = None,
@@ -384,12 +412,24 @@ class GhidraStaticAnalyzer:
         max_decompile_functions: Optional[int] = None,
         max_pseudocode_chars: Optional[int] = None,
         max_output_bytes: Optional[int] = None,
+        max_stream_bytes: Optional[int] = None,
+        kill_grace_seconds: float = 1.5,
     ) -> None:
         self.enabled = settings.GHIDRA_ENABLED if enabled is None else enabled
         self.ghidra_home = ghidra_home if ghidra_home is not None else settings.GHIDRA_HOME
         self.workspace_root = Path(workspace_root) if workspace_root is not None else Path(settings.GHIDRA_WORKSPACE_ROOT)
         self.scripts_dir = Path(scripts_dir) if scripts_dir is not None else Path(settings.GHIDRA_SCRIPTS_DIR)
-        self.max_memory_mb = int(max_memory_mb if max_memory_mb is not None else settings.GHIDRA_MAX_MEMORY_MB)
+        self.max_memory_mb = max(512, int(max_memory_mb if max_memory_mb is not None else settings.GHIDRA_MAX_MEMORY_MB))
+        raw_heap = int(max_heap_mb if max_heap_mb is not None else settings.GHIDRA_MAX_HEAP_MB)
+        self.max_heap_mb = max(256, min(raw_heap, max(256, self.max_memory_mb - 256)))
+        self.min_available_memory_mb = int(
+            min_available_memory_mb if min_available_memory_mb is not None else settings.GHIDRA_MIN_AVAILABLE_MEMORY_MB
+        )
+        self.require_cgroup_memory_limit = (
+            settings.GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT
+            if require_cgroup_memory_limit is None
+            else bool(require_cgroup_memory_limit)
+        )
         self.max_cpu = int(max_cpu if max_cpu is not None else settings.GHIDRA_MAX_CPU)
         self.timeout_seconds = int(timeout_seconds if timeout_seconds is not None else settings.GHIDRA_TIMEOUT_SECONDS)
         self.max_sample_bytes = int(max_sample_bytes if max_sample_bytes is not None else settings.GHIDRA_MAX_SAMPLE_BYTES)
@@ -403,6 +443,11 @@ class GhidraStaticAnalyzer:
             max_pseudocode_chars if max_pseudocode_chars is not None else settings.GHIDRA_MAX_PSEUDOCODE_CHARS
         )
         self.max_output_bytes = int(max_output_bytes if max_output_bytes is not None else settings.GHIDRA_MAX_OUTPUT_BYTES)
+        self.max_stream_bytes = max(
+            4096,
+            int(max_stream_bytes if max_stream_bytes is not None else settings.GHIDRA_MAX_STREAM_BYTES),
+        )
+        self.kill_grace_seconds = max(0.05, float(kill_grace_seconds))
 
     def analyze_sample(
         self,
@@ -422,6 +467,9 @@ class GhidraStaticAnalyzer:
             ghidra_ver: Optional[str] = None,
             java_ver: Optional[str] = None,
             sandbox_label: str = "bwrap",
+            exit_code: Optional[int] = None,
+            mem_backend: str = "none",
+            mem_limit_mb: Optional[int] = None,
         ) -> StaticAnalysisProvenance:
             return StaticAnalysisProvenance(
                 analysis_id=analysis_id,
@@ -434,6 +482,10 @@ class GhidraStaticAnalyzer:
                 execution_duration_ms=max(0, int((time.monotonic() - t_start) * 1000)),
                 project_isolated=True,
                 os_sandbox=sandbox_label,
+                process_exit_code=exit_code,
+                memory_limit_backend=mem_backend,
+                memory_limit_mb=mem_limit_mb,
+                heap_limit_mb=self.max_heap_mb,
             )
 
         def _error_result(
@@ -442,20 +494,35 @@ class GhidraStaticAnalyzer:
             ghidra_ver: Optional[str] = None,
             java_ver: Optional[str] = None,
             sandbox_label: str = "none",
+            exit_code: Optional[int] = None,
+            mem_backend: str = "none",
+            mem_limit_mb: Optional[int] = None,
+            extra_warnings: Optional[List[str]] = None,
         ) -> StaticAnalysisResult:
             safe_msg = redact_sensitive_text(msg, max_chars=400)
             return StaticAnalysisResult(
                 status=status_val,
-                provenance=_make_provenance(ghidra_ver, java_ver, sandbox_label=sandbox_label),
+                provenance=_make_provenance(
+                    ghidra_ver,
+                    java_ver,
+                    sandbox_label=sandbox_label,
+                    exit_code=exit_code,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_limit_mb,
+                ),
                 truncation=StaticAnalysisTruncation(
                     max_output_bytes=self.max_output_bytes,
                     max_functions=self.max_functions,
                     max_decompile_functions=self.max_decompile_functions,
                 ),
                 errors=[safe_msg],
-                warnings=[],
+                warnings=[redact_sensitive_text(w, max_chars=260) for w in (extra_warnings or [])],
                 is_partial=(status_val == "PARTIAL"),
             )
+
+        # 0. Pre-execution cancellation check
+        if cancel_event is not None and cancel_event.is_set():
+            return _error_result("FAILED", "Static analysis job cancelled before execution started.")
 
         # 1. Policy check
         if not self.enabled and not allow_disabled:
@@ -497,7 +564,17 @@ class GhidraStaticAnalyzer:
                 java_ver=runtime.java_version,
             )
 
-        # 5. Mandatory OS namespace boundary preflight (fail closed)
+        # 5. Available VM memory headroom preflight (no sudo, defer safely under memory pressure)
+        mem_ok, _avail_mb, mem_msg = check_vm_memory_headroom(self.min_available_memory_mb)
+        if not mem_ok:
+            return _error_result(
+                "UNAVAILABLE",
+                mem_msg,
+                ghidra_ver=runtime.ghidra_version,
+                java_ver=runtime.java_version,
+            )
+
+        # 6. Mandatory OS namespace boundary preflight (fail closed)
         sb_ok, resolved_bwrap, sb_reason = check_os_sandbox_support("bwrap")
         if not sb_ok or not resolved_bwrap:
             return _error_result(
@@ -507,24 +584,110 @@ class GhidraStaticAnalyzer:
                 java_ver=runtime.java_version,
             )
 
-        # 6. Prepare isolated, non-hidden, manifest-bound per-job Ghidra project directory
-        job_dir: Optional[Path] = None
-        try:
-            job_dir, project_name = prepare_isolated_project_workspace(
-                workspace_root=self.workspace_root,
-                job_id=effective_job_id,
-                sample_sha256=expected_sha256,
-            )
-        except GhidraIsolationError as exc:
-            return _error_result(
-                "FAILED",
-                str(exc),
-                ghidra_ver=runtime.ghidra_version,
-                java_ver=runtime.java_version,
-                sandbox_label="bwrap",
+        # 7. Process-tree memory containment preflight (Linux cgroup v2 via systemd-run --user)
+        cg_support: CgroupMemorySupport = check_cgroup_memory_support()
+        pre_warnings: List[str] = []
+        if not cg_support.supported:
+            if self.require_cgroup_memory_limit:
+                return _error_result(
+                    "UNAVAILABLE",
+                    (
+                        "Required process-tree memory containment (Linux cgroup v2 MemoryMax via systemd-run --user) "
+                        f"is unavailable: {cg_support.reason}"
+                    ),
+                    ghidra_ver=runtime.ghidra_version,
+                    java_ver=runtime.java_version,
+                    sandbox_label="bwrap",
+                )
+            pre_warnings.append(
+                f"Process-tree cgroup memory containment disabled/unavailable ({cg_support.reason}); relying on JVM heap cap only."
             )
 
+        mem_backend = cg_support.backend if cg_support.supported else "none"
+        mem_cap_mb = self.max_memory_mb if cg_support.supported else None
+
+        # 8. Inter-process single-worker lock preventing concurrent JVMs across Uvicorn workers
+        if ".." in self.workspace_root.parts:
+            return _error_result(
+                "FAILED",
+                "GHIDRA_WORKSPACE_ROOT contains unsafe traversal segments.",
+                ghidra_ver=runtime.ghidra_version,
+                java_ver=runtime.java_version,
+            )
+        ws_sym = has_symlink_ancestor(self.workspace_root)
+        if ws_sym is not None:
+            return _error_result(
+                "FAILED",
+                f"GHIDRA_WORKSPACE_ROOT traverses symlink component: {ws_sym}",
+                ghidra_ver=runtime.ghidra_version,
+                java_ver=runtime.java_version,
+            )
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.workspace_root, 0o700)
+
+        lock_fd: Optional[int] = None
+        lock_file = self.workspace_root.resolve() / "malbox_static_worker.lock"
+        if fcntl is not None:
+            try:
+                lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+                os.chmod(lock_file, 0o600)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if lock_fd is not None:
+                    os.close(lock_fd)
+                    lock_fd = None
+                return _error_result(
+                    "FAILED",
+                    "Another Malbox worker process holds the active Ghidra static-analysis lock; concurrent JVMs blocked.",
+                    ghidra_ver=runtime.ghidra_version,
+                    java_ver=runtime.java_version,
+                    sandbox_label="bwrap",
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
+                )
+            except OSError as exc:
+                if lock_fd is not None:
+                    os.close(lock_fd)
+                    lock_fd = None
+                return _error_result(
+                    "FAILED",
+                    f"Unable to acquire static analysis worker lock: {type(exc).__name__}",
+                    ghidra_ver=runtime.ghidra_version,
+                    java_ver=runtime.java_version,
+                )
+
+        job_dir: Optional[Path] = None
+        unit_name: Optional[str] = None
         try:
+            # 9. Prepare isolated, non-hidden, manifest-bound per-job Ghidra project directory
+            try:
+                job_dir, project_name = prepare_isolated_project_workspace(
+                    workspace_root=self.workspace_root,
+                    job_id=effective_job_id,
+                    sample_sha256=expected_sha256,
+                )
+            except GhidraIsolationError as exc:
+                return _error_result(
+                    "FAILED",
+                    str(exc),
+                    ghidra_ver=runtime.ghidra_version,
+                    java_ver=runtime.java_version,
+                    sandbox_label="bwrap",
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
+                )
+
+            if cancel_event is not None and cancel_event.is_set():
+                return _error_result(
+                    "FAILED",
+                    "Static analysis job cancelled prior to subprocess launch.",
+                    ghidra_ver=runtime.ghidra_version,
+                    java_ver=runtime.java_version,
+                    sandbox_label="bwrap",
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
+                )
+
             per_file_timeout = max(10, min(self.timeout_seconds, max(15, self.timeout_seconds - 10)))
             per_func_timeout = max(2, min(20, per_file_timeout // 3))
             headless_args = build_ghidra_headless_args(
@@ -543,21 +706,36 @@ class GhidraStaticAnalyzer:
                 max_cpu=self.max_cpu,
             )
 
-            cmd, env_vars = build_ghidra_sandbox_command(
+            bwrap_cmd, _env_vars = build_ghidra_sandbox_command(
                 resolved_bwrap=resolved_bwrap,
                 runtime=runtime,
                 job_dir=job_dir,
                 sample_file=validated_sample,
                 scripts_dir=scripts_resolved,
                 max_memory_mb=self.max_memory_mb,
+                max_heap_mb=self.max_heap_mb,
                 max_cpu=self.max_cpu,
                 headless_args=headless_args,
             )
 
+            popen_env: Dict[str, str] = {}
+            cmd = bwrap_cmd
+            if cg_support.supported:
+                safe_suffix = re.sub(r"[^a-zA-Z0-9_-]", "", effective_job_id)[:24] or "job"
+                unit_name = f"malbox-ghidra-{safe_suffix}"
+                scope_prefix = build_cgroup_scope_prefix(
+                    support=cg_support,
+                    unit_name=unit_name,
+                    max_memory_mb=self.max_memory_mb,
+                    max_cpu=self.max_cpu,
+                )
+                cmd = [*scope_prefix, *bwrap_cmd]
+                popen_env = dict(cg_support.host_env)
+
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(job_dir),
-                env={},
+                env=popen_env,
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -570,7 +748,10 @@ class GhidraStaticAnalyzer:
                 proc=proc,
                 timeout=float(self.timeout_seconds),
                 cancel_event=cancel_event,
+                unit_name=unit_name,
+                cg_support=cg_support,
             )
+            rc = proc.returncode
 
             if cancelled:
                 return _error_result(
@@ -579,6 +760,9 @@ class GhidraStaticAnalyzer:
                     ghidra_ver=runtime.ghidra_version,
                     java_ver=runtime.java_version,
                     sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
                 )
 
             if timed_out:
@@ -588,9 +772,59 @@ class GhidraStaticAnalyzer:
                     ghidra_ver=runtime.ghidra_version,
                     java_ver=runtime.java_version,
                     sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
+                )
+
+            if stream_overflow:
+                return _error_result(
+                    "FAILED",
+                    (
+                        f"Ghidra console stdout/stderr exceeded bounded limit ({self.max_stream_bytes} bytes); "
+                        "owned process group was terminated."
+                    ),
+                    ghidra_ver=runtime.ghidra_version,
+                    java_ver=runtime.java_version,
+                    sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
                 )
 
             output_file = job_dir / "output" / "facts.json"
+
+            # Strict Task 1 exit-code integrity: NEVER mark nonzero exit COMPLETED, NEVER let JSON status override failure
+            if rc is None or rc != 0:
+                diag_stream = stderr_b.decode("utf-8", errors="replace") or stdout_b.decode("utf-8", errors="replace")
+                err_tail = redact_sensitive_text(diag_stream[-400:], max_chars=300)
+                script_note = ""
+                if output_file.is_file():
+                    try:
+                        if output_file.stat().st_size <= self.max_output_bytes:
+                            raw_obj = json.loads(output_file.read_text(encoding="utf-8"))
+                            if isinstance(raw_obj, dict):
+                                reported = str(raw_obj.get("status") or "UNKNOWN")
+                                raw_errs = "; ".join(str(x) for x in (raw_obj.get("errors") or [])[:3])
+                                script_note = f"; facts.json reported status={reported}" + (f" ({raw_errs})" if raw_errs else "")
+                    except Exception:
+                        script_note = "; facts.json unreadable"
+                return _error_result(
+                    "FAILED",
+                    (
+                        f"Ghidra headless exited nonzero (rc={rc}); refusing to treat output as verified"
+                        f"{script_note}"
+                        + (f" [{err_tail}]" if err_tail else ".")
+                    ),
+                    ghidra_ver=runtime.ghidra_version,
+                    java_ver=runtime.java_version,
+                    sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
+                    extra_warnings=pre_warnings,
+                )
+
             if not output_file.is_file():
                 err_tail = redact_sensitive_text(
                     (stderr_b.decode("utf-8", errors="replace") or stdout_b.decode("utf-8", errors="replace"))[-400:],
@@ -598,10 +832,13 @@ class GhidraStaticAnalyzer:
                 )
                 return _error_result(
                     "FAILED",
-                    f"Ghidra headless finished (rc={proc.returncode}) without producing facts.json ({err_tail or 'no output'}).",
+                    f"Ghidra headless finished (rc=0) without producing facts.json ({err_tail or 'no output'}).",
                     ghidra_ver=runtime.ghidra_version,
                     java_ver=runtime.java_version,
                     sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
                 )
 
             raw_size = output_file.stat().st_size
@@ -612,6 +849,9 @@ class GhidraStaticAnalyzer:
                     ghidra_ver=runtime.ghidra_version,
                     java_ver=runtime.java_version,
                     sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
                 )
 
             try:
@@ -624,18 +864,29 @@ class GhidraStaticAnalyzer:
                     ghidra_ver=runtime.ghidra_version,
                     java_ver=runtime.java_version,
                     sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
                 )
 
-            return self._normalize_and_rank_result(
+            res_obj = self._normalize_and_rank_result(
                 raw_json=parsed_json,
                 raw_output_bytes=raw_size,
                 pe_meta=pe_meta,
                 sample_id=sample_id,
                 sample_sha256=expected_sha256.lower(),
                 analysis_id=analysis_id,
-                provenance=_make_provenance(runtime.ghidra_version, runtime.java_version, sandbox_label="bwrap"),
-                stream_overflow=stream_overflow,
+                provenance=_make_provenance(
+                    runtime.ghidra_version,
+                    runtime.java_version,
+                    sandbox_label="bwrap",
+                    exit_code=rc,
+                    mem_backend=mem_backend,
+                    mem_limit_mb=mem_cap_mb,
+                ),
+                extra_warnings=pre_warnings,
             )
+            return res_obj
 
         except Exception as exc:
             return _error_result(
@@ -644,10 +895,24 @@ class GhidraStaticAnalyzer:
                 ghidra_ver=runtime.ghidra_version,
                 java_ver=runtime.java_version,
                 sandbox_label="bwrap",
+                mem_backend=mem_backend,
+                mem_limit_mb=mem_cap_mb,
             )
         finally:
+            if unit_name and cg_support.supported:
+                stop_cgroup_scope(cg_support.systemctl_bin, unit_name, host_env=cg_support.host_env)
             if job_dir is not None and job_dir.exists():
                 shutil.rmtree(job_dir, ignore_errors=True)
+            if lock_fd is not None:
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
 
     def _make_rlimit_preexec(self):
         cpu_limit = max(5, int(self.timeout_seconds))
@@ -657,7 +922,7 @@ class GhidraStaticAnalyzer:
 
             resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-            # Allow bounded project database writes up to 256 MiB per file
+            # Allow bounded project database writes up to 256 MiB per file (avoid RLIMIT_AS which breaks HotSpot reservation)
             max_file = 256 * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_FSIZE, (max_file, max_file))
 
@@ -668,28 +933,38 @@ class GhidraStaticAnalyzer:
         proc: subprocess.Popen,
         timeout: float,
         cancel_event: Optional[threading.Event] = None,
+        unit_name: Optional[str] = None,
+        cg_support: Optional[CgroupMemorySupport] = None,
     ) -> Tuple[bytes, bytes, bool, bool, bool]:
         out_chunks: List[bytes] = []
         err_chunks: List[bytes] = []
-        limit = max(4096, self.max_output_bytes)
+        limit = max(4096, self.max_stream_bytes)
         state = {"total": 0, "overflowed": False}
         lock = threading.Lock()
+        overflow_event = threading.Event()
 
         def _drain(stream, bucket: List[bytes]) -> None:
             if stream is None:
                 return
             try:
-                while True:
+                while not overflow_event.is_set():
                     chunk = stream.read(4096)
                     if not chunk:
                         break
                     with lock:
-                        if state["total"] + len(chunk) <= limit:
+                        remaining = limit - state["total"]
+                        if len(chunk) <= remaining:
                             state["total"] += len(chunk)
                             bucket.append(chunk)
                         else:
+                            if remaining > 0:
+                                bucket.append(chunk[:remaining])
+                                state["total"] += remaining
                             state["overflowed"] = True
+                            overflow_event.set()
                             break
+            except (OSError, ValueError):
+                pass
             finally:
                 try:
                     stream.close()
@@ -708,39 +983,124 @@ class GhidraStaticAnalyzer:
         while proc.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True
-                self._terminate_process_group(proc.pid)
+                self._terminate_process_group(
+                    proc,
+                    grace_seconds=self.kill_grace_seconds,
+                    unit_name=unit_name,
+                    cg_support=cg_support,
+                )
+                break
+            if overflow_event.is_set():
+                self._terminate_process_group(
+                    proc,
+                    grace_seconds=self.kill_grace_seconds,
+                    unit_name=unit_name,
+                    cg_support=cg_support,
+                )
                 break
             if time.monotonic() >= deadline:
                 timed_out = True
-                self._terminate_process_group(proc.pid)
+                self._terminate_process_group(
+                    proc,
+                    grace_seconds=self.kill_grace_seconds,
+                    unit_name=unit_name,
+                    cg_support=cg_support,
+                )
                 break
-            time.sleep(0.05)
+            time.sleep(0.02)
 
-        t_out.join(timeout=1.5)
-        t_err.join(timeout=1.5)
         if proc.poll() is None:
-            self._terminate_process_group(proc.pid)
+            self._terminate_process_group(
+                proc,
+                grace_seconds=self.kill_grace_seconds,
+                unit_name=unit_name,
+                cg_support=cg_support,
+            )
+
+        try:
+            proc.wait(timeout=1.5)
+        except Exception:
+            pass
+
+        t_out.join(timeout=0.75)
+        t_err.join(timeout=0.75)
+        # Ensure reader threads can never hang if a grandchild kept pipe FDs open
+        if t_out.is_alive() and proc.stdout is not None:
             try:
-                proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
+                proc.stdout.close()
+            except OSError:
                 pass
+            t_out.join(timeout=0.5)
+        if t_err.is_alive() and proc.stderr is not None:
+            try:
+                proc.stderr.close()
+            except OSError:
+                pass
+            t_err.join(timeout=0.5)
 
         return b"".join(out_chunks), b"".join(err_chunks), state["overflowed"], timed_out, cancelled
 
     @staticmethod
-    def _terminate_process_group(pid: int) -> None:
-        try:
-            pgid = os.getpgid(pid)
-        except OSError:
-            pgid = pid
-        for sig in (signal.SIGTERM, signal.SIGKILL):
+    def _terminate_process_group(
+        proc: subprocess.Popen,
+        grace_seconds: float = 1.5,
+        unit_name: Optional[str] = None,
+        cg_support: Optional[CgroupMemorySupport] = None,
+    ) -> None:
+        pid = getattr(proc, "pid", None)
+        if not isinstance(pid, int) or pid <= 1:
+            return
+
+        pgid: Optional[int] = None
+        if hasattr(os, "getpgid"):
             try:
-                os.killpg(pgid, sig)
+                pgid = os.getpgid(pid)
             except OSError:
+                pgid = None
+
+        own_pgrp = os.getpgrp() if hasattr(os, "getpgrp") else None
+        # Only signal the OS process group when verified to belong strictly to this child session
+        use_pgid = (
+            pgid is not None
+            and pgid > 1
+            and pgid == pid
+            and (own_pgrp is None or pgid != own_pgrp)
+        )
+
+        def _send(sig: int) -> None:
+            if use_pgid and pgid is not None:
                 try:
-                    os.kill(pid, sig)
+                    os.killpg(pgid, sig)
+                    return
                 except OSError:
                     pass
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                try:
+                    if sig == signal.SIGTERM:
+                        proc.terminate()
+                    elif sig == signal.SIGKILL:
+                        proc.kill()
+                except Exception:
+                    pass
+
+        _send(signal.SIGTERM)
+        grace_deadline = time.monotonic() + max(0.05, grace_seconds)
+        while time.monotonic() < grace_deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.02)
+
+        if proc.poll() is None:
+            _send(signal.SIGKILL)
+            try:
+                proc.wait(timeout=1.5)
+            except Exception:
+                pass
+
+        if unit_name and cg_support and cg_support.supported:
+            stop_cgroup_scope(cg_support.systemctl_bin, unit_name, host_env=cg_support.host_env)
 
     def _normalize_and_rank_result(
         self,
@@ -751,7 +1111,8 @@ class GhidraStaticAnalyzer:
         sample_sha256: str,
         analysis_id: Optional[str],
         provenance: StaticAnalysisProvenance,
-        stream_overflow: bool,
+        stream_overflow: bool = False,
+        extra_warnings: Optional[List[str]] = None,
     ) -> StaticAnalysisResult:
         if not isinstance(raw_json, dict):
             return StaticAnalysisResult(
@@ -765,11 +1126,28 @@ class GhidraStaticAnalyzer:
                 errors=["Ghidra JSON root is not an object."],
             )
 
-        raw_status = str(raw_json.get("status") or "COMPLETED").upper()
-        errors: List[str] = [str(e) for e in (raw_json.get("errors") or [])]
-        warnings: List[str] = [str(w) for w in (raw_json.get("warnings") or [])]
+        raw_status = str(raw_json.get("status") or "").strip().upper()
+        errors: List[str] = [redact_sensitive_text(str(e), max_chars=260) for e in (raw_json.get("errors") or [])]
+        warnings: List[str] = [redact_sensitive_text(str(w), max_chars=260) for w in (raw_json.get("warnings") or [])]
+        for ew in (extra_warnings or []):
+            warnings.append(redact_sensitive_text(ew, max_chars=260))
         if stream_overflow:
             warnings.append("Ghidra console stdout/stderr exceeded buffer cap and was truncated.")
+
+        if raw_status not in ("COMPLETED", "PARTIAL", "FAILED"):
+            return StaticAnalysisResult(
+                status="FAILED",
+                provenance=provenance,
+                truncation=StaticAnalysisTruncation(
+                    output_bytes=raw_output_bytes,
+                    max_output_bytes=self.max_output_bytes,
+                    max_functions=self.max_functions,
+                    max_decompile_functions=self.max_decompile_functions,
+                ),
+                errors=errors or [f"Unrecognized or missing Ghidra export status '{raw_status or 'empty'}'."],
+                warnings=warnings,
+                is_partial=False,
+            )
 
         if raw_status == "FAILED":
             return StaticAnalysisResult(
@@ -988,9 +1366,22 @@ class GhidraStaticAnalyzer:
             total_strings=int(raw_prog.get("total_strings") or len(strings)),
         )
 
+        sha_prefix = sample_sha256[:16].lower()
+        for cg in call_graph:
+            if not cg.caller_function_id.startswith(f"func:{sha_prefix}:"):
+                raise ValueError("Call graph caller function ID prefix mismatch.")
+            if cg.callee_function_id is not None and not cg.callee_function_id.startswith(f"func:{sha_prefix}:"):
+                raise ValueError("Call graph callee function ID prefix mismatch.")
+        for xr in cross_refs:
+            if xr.from_function_id is not None and not xr.from_function_id.startswith(f"func:{sha_prefix}:"):
+                raise ValueError("Cross-reference source function ID prefix mismatch.")
+            if xr.to_function_id is not None and not xr.to_function_id.startswith(f"func:{sha_prefix}:"):
+                raise ValueError("Cross-reference target function ID prefix mismatch.")
+
         is_partial = (
             raw_status == "PARTIAL"
             or bool(raw_json.get("truncated"))
+            or bool(raw_json.get("partial_failure"))
             or func_omitted > 0
             or decomp_cap_triggered
             or decomp_errors_or_timeouts

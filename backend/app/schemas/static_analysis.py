@@ -56,6 +56,10 @@ class StaticAnalysisProvenance(BaseModel):
     execution_duration_ms: Optional[int] = Field(default=None, ge=0)
     project_isolated: bool = True
     os_sandbox: str = "none"
+    process_exit_code: Optional[int] = None
+    memory_limit_backend: str = "none"
+    memory_limit_mb: Optional[int] = Field(default=None, ge=0)
+    heap_limit_mb: Optional[int] = Field(default=None, ge=0)
 
 
 class ProgramMetadata(BaseModel):

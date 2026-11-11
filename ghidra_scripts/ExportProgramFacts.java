@@ -189,6 +189,7 @@ public class ExportProgramFacts extends GhidraScript {
 
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
+        boolean partialFailure = false;
 
         if (currentProgram == null) {
             errors.add("No active program loaded inside Ghidra headless session.");
@@ -250,7 +251,13 @@ public class ExportProgramFacts extends GhidraScript {
                 if (strings.size() >= maxStrings) {
                     continue;
                 }
-                String rawVal = d.getDefaultValueRepresentation();
+                String rawVal;
+                Object valObj = d.getValue();
+                if (valObj instanceof String) {
+                    rawVal = (String) valObj;
+                } else {
+                    rawVal = d.getDefaultValueRepresentation();
+                }
                 if (rawVal == null) rawVal = "";
                 if (rawVal.length() > MAX_STRING_LEN) {
                     rawVal = rawVal.substring(0, MAX_STRING_LEN) + "...";
@@ -310,8 +317,12 @@ public class ExportProgramFacts extends GhidraScript {
                             blocks++;
                         }
                     }
-                } catch (Exception ignored) {
+                } catch (Exception bbEx) {
                     blocks = 0;
+                    partialFailure = true;
+                    if (warnings.size() < 20) {
+                        warnings.add("Basic block scan failed at " + fr.address + ": " + bbEx.getClass().getSimpleName());
+                    }
                 }
                 fr.basicBlocks = blocks;
 
@@ -343,8 +354,12 @@ public class ExportProgramFacts extends GhidraScript {
                 Set<Function> calledSet = Collections.emptySet();
                 try {
                     calledSet = fn.getCalledFunctions(monitor);
-                } catch (Exception ignored) {
+                } catch (Exception callEx) {
                     calledSet = Collections.emptySet();
+                    partialFailure = true;
+                    if (warnings.size() < 20) {
+                        warnings.add("Callee resolution failed at " + fr.address + ": " + callEx.getClass().getSimpleName());
+                    }
                 }
                 Set<String> apiNames = new LinkedHashSet<>();
                 Set<String> calleeAddrs = new LinkedHashSet<>();
@@ -427,11 +442,17 @@ public class ExportProgramFacts extends GhidraScript {
                     DecompileOptions opts = new DecompileOptions();
                     ifc.setOptions(opts);
                     if (!ifc.openProgram(currentProgram)) {
-                        warnings.add("DecompInterface failed to initialize on program.");
+                        partialFailure = true;
+                        errors.add("DecompInterface failed to initialize on program.");
                     } else {
                         int count = 0;
                         for (FuncRecord fr : candidates) {
-                            if (count >= maxDecompileFuncs || monitor.isCancelled()) {
+                            if (monitor.isCancelled()) {
+                                partialFailure = true;
+                                warnings.add("Ghidra monitor cancelled during selective decompilation.");
+                                break;
+                            }
+                            if (count >= maxDecompileFuncs) {
                                 break;
                             }
                             count++;
@@ -444,14 +465,17 @@ public class ExportProgramFacts extends GhidraScript {
                                     dr.status = "ERROR";
                                     dr.pseudocode = "";
                                     dr.errorMessage = "Null decompilation response.";
+                                    partialFailure = true;
                                 } else if (res.isTimedOut()) {
                                     dr.status = "TIMED_OUT";
                                     dr.pseudocode = "";
                                     dr.errorMessage = "Per-function decompilation exceeded timeout (" + perFuncTimeoutSec + "s).";
+                                    partialFailure = true;
                                 } else if (!res.decompileCompleted() || res.getDecompiledFunction() == null) {
                                     dr.status = "ERROR";
                                     dr.pseudocode = "";
                                     dr.errorMessage = res.getErrorMessage() != null ? res.getErrorMessage() : "Decompilation did not complete.";
+                                    partialFailure = true;
                                 } else {
                                     String code = res.getDecompiledFunction().getC();
                                     if (code == null) code = "";
@@ -469,6 +493,7 @@ public class ExportProgramFacts extends GhidraScript {
                                 dr.status = "ERROR";
                                 dr.pseudocode = "";
                                 dr.errorMessage = decompEx.getClass().getSimpleName() + ": " + decompEx.getMessage();
+                                partialFailure = true;
                             }
                             decompRecords.add(dr);
                         }
@@ -479,6 +504,11 @@ public class ExportProgramFacts extends GhidraScript {
                     } catch (Exception ignored) {
                     }
                 }
+            }
+
+            if (monitor.isCancelled()) {
+                partialFailure = true;
+                warnings.add("Ghidra task monitor reported cancellation prior to finalization.");
             }
 
             boolean wasTruncated =
@@ -504,6 +534,7 @@ public class ExportProgramFacts extends GhidraScript {
                     decompileRequested,
                     decompiledSkippedCap,
                     wasTruncated,
+                    partialFailure,
                     maxOutputBytes
             );
             writePayload(outFile, jsonOut);
@@ -531,19 +562,23 @@ public class ExportProgramFacts extends GhidraScript {
             int decompileRequested,
             int decompiledSkippedCap,
             boolean baseTruncated,
+            boolean basePartialFailure,
             int maxOutputBytes
     ) {
         // Attempt serialization and shrink bulky sections gracefully if needed to honor hard cap
         List<DecompileRecord> curDecomp = new ArrayList<>(decompRecords);
         List<XrefRecord> curXrefs = new ArrayList<>(xrefs);
         List<StringRecord> curStrings = new ArrayList<>(strings);
+        List<CallRecord> curCalls = new ArrayList<>(callGraph);
+        List<FuncRecord> curFuncs = new ArrayList<>(funcRecords);
         boolean truncated = baseTruncated;
 
-        for (int attempt = 0; attempt < 4; attempt++) {
+        for (int attempt = 0; attempt < 6; attempt++) {
             String candidate = buildJsonString(
                     errors, warnings, totalFuncs, totalImports, totalExports, totalStrings,
-                    entryPoints, imports, exports, curStrings, funcRecords, callGraph,
-                    curXrefs, curDecomp, decompileRequested, decompiledSkippedCap, truncated
+                    entryPoints, imports, exports, curStrings, curFuncs, curCalls,
+                    curXrefs, curDecomp, decompileRequested, decompiledSkippedCap,
+                    truncated, basePartialFailure
             );
             if (candidate.getBytes(StandardCharsets.UTF_8).length <= maxOutputBytes) {
                 return candidate;
@@ -564,15 +599,33 @@ public class ExportProgramFacts extends GhidraScript {
                 if (curStrings.size() > 50) {
                     curStrings = curStrings.subList(0, 50);
                 }
-            } else {
+            } else if (attempt == 3) {
                 curDecomp.clear();
+                if (curCalls.size() > 100) {
+                    curCalls = curCalls.subList(0, 100);
+                }
+            } else if (attempt == 4) {
+                curCalls.clear();
+                if (curFuncs.size() > 50) {
+                    curFuncs = curFuncs.subList(0, 50);
+                }
+            } else {
+                curStrings.clear();
+                if (curFuncs.size() > 10) {
+                    curFuncs = curFuncs.subList(0, 10);
+                }
             }
         }
-        return buildJsonString(
+        String finalCandidate = buildJsonString(
                 errors, warnings, totalFuncs, totalImports, totalExports, totalStrings,
-                entryPoints, imports, exports, curStrings, funcRecords, callGraph,
-                curXrefs, curDecomp, decompileRequested, decompiledSkippedCap, true
+                entryPoints, imports, exports, curStrings, curFuncs, curCalls,
+                curXrefs, curDecomp, decompileRequested, decompiledSkippedCap,
+                true, true
         );
+        if (finalCandidate.getBytes(StandardCharsets.UTF_8).length <= maxOutputBytes) {
+            return finalCandidate;
+        }
+        return "{\"status\":\"FAILED\",\"errors\":[\"Exported JSON exceeded maxOutputBytes hard cap.\"]}";
     }
 
     private String buildJsonString(
@@ -592,7 +645,8 @@ public class ExportProgramFacts extends GhidraScript {
             List<DecompileRecord> decompRecords,
             int decompileRequested,
             int decompiledSkippedCap,
-            boolean truncated
+            boolean truncated,
+            boolean partialFailure
     ) {
         String langId = currentProgram.getLanguageID() != null ? currentProgram.getLanguageID().getIdAsString() : null;
         String arch = currentProgram.getLanguage() != null && currentProgram.getLanguage().getProcessor() != null
@@ -605,9 +659,11 @@ public class ExportProgramFacts extends GhidraScript {
                 ? currentProgram.getAddressFactory().getDefaultAddressSpace().getSize()
                 : 32;
 
+        boolean incomplete = partialFailure || truncated || !errors.isEmpty();
         StringBuilder sb = new StringBuilder(16384);
         sb.append('{');
-        sb.append("\"status\":").append(escapeJson(errors.isEmpty() ? (truncated ? "PARTIAL" : "COMPLETED") : "PARTIAL")).append(',');
+        sb.append("\"status\":").append(escapeJson(incomplete ? "PARTIAL" : "COMPLETED")).append(',');
+        sb.append("\"partial_failure\":").append(partialFailure).append(',');
         sb.append("\"errors\":").append(jsonStringList(errors)).append(',');
         sb.append("\"warnings\":").append(jsonStringList(warnings)).append(',');
         sb.append("\"truncated\":").append(truncated).append(',');

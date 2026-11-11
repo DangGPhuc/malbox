@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.ai.opencode_sandbox import check_os_sandbox_support
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.analysis import Analysis
@@ -16,8 +17,13 @@ from app.schemas.static_analysis import (
     StaticAnalysisResult,
     StaticAnalysisTruncation,
 )
+from app.services.static_analysis.containment import check_cgroup_memory_support, check_vm_memory_headroom
 from app.services.static_analysis.version_check import validate_ghidra_runtime
-from app.services.static_analysis.worker import StaticAnalysisBusyError, static_worker_manager
+from app.services.static_analysis.worker import (
+    StaticAnalysisBusyError,
+    StaticAnalysisSubmissionError,
+    static_worker_manager,
+)
 
 router = APIRouter()
 
@@ -148,6 +154,28 @@ def trigger_analysis_static_analysis(
             detail=f"Ghidra Headless runtime unavailable: {runtime.error}",
         )
 
+    mem_ok, _avail_mb, mem_msg = check_vm_memory_headroom(settings.GHIDRA_MIN_AVAILABLE_MEMORY_MB)
+    if not mem_ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=mem_msg,
+        )
+
+    sb_ok, _bwrap, sb_reason = check_os_sandbox_support("bwrap")
+    if not sb_ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Required Bubblewrap OS isolation unavailable for Ghidra: {sb_reason}",
+        )
+
+    if settings.GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT:
+        cg = check_cgroup_memory_support()
+        if not cg.supported:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Required Linux cgroup process-tree memory limit unavailable: {cg.reason}",
+            )
+
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis task not found.")
@@ -161,6 +189,11 @@ def trigger_analysis_static_analysis(
     except StaticAnalysisBusyError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except StaticAnalysisSubmissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
 

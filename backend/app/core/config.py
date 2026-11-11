@@ -90,14 +90,20 @@ class Settings(BaseSettings):
     GHIDRA_SCRIPTS_DIR: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parent.parent.parent.parent / "ghidra_scripts"
     )
-    GHIDRA_MAX_MEMORY_MB: int = 1024
+    # Process-tree memory ceiling (JVM heap + metaspace + native decompiler RSS) suitable for ~8GB Kali VM
+    GHIDRA_MAX_MEMORY_MB: int = 1280
+    GHIDRA_MAX_HEAP_MB: int = 512
+    GHIDRA_MIN_AVAILABLE_MEMORY_MB: int = 1280
+    GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT: bool = True
     GHIDRA_MAX_CPU: int = 1
     GHIDRA_TIMEOUT_SECONDS: int = 120
     GHIDRA_MAX_SAMPLE_BYTES: int = 16777216  # 16 MiB
     GHIDRA_MAX_FUNCTIONS: int = 250
     GHIDRA_MAX_DECOMPILE_FUNCTIONS: int = 10
     GHIDRA_MAX_PSEUDOCODE_CHARS: int = 8192
-    GHIDRA_MAX_OUTPUT_BYTES: int = 524288  # 512 KiB
+    GHIDRA_MAX_OUTPUT_BYTES: int = 524288  # 512 KiB facts.json hard cap
+    GHIDRA_MAX_STREAM_BYTES: int = 262144  # 256 KiB bounded stdout/stderr cap
+    GHIDRA_MAX_PERSISTED_RESULT_BYTES: int = 1048576  # 1 MiB DB persistence ceiling
 
     # Pluggable Sandbox Settings
     DEFAULT_SANDBOX_BACKEND: str = "replay"  # replay, cape

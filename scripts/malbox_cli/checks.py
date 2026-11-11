@@ -755,6 +755,31 @@ def _probe_ghidra_and_jdk(
             java_major = None
 
     jdk_ok = bool(java_bin and javac_bin and java_major is not None and java_major >= req_java_min)
+    bwrap_bin = which_fn("bwrap")
+    systemd_run_bin = which_fn("systemd-run")
+    cgroup_mem_ok = False
+    if systemd_run_bin and which_fn is shutil.which:
+        try:
+            cg_probe = runner(
+                [systemd_run_bin, "--user", "--scope", "-p", "MemoryMax=64M", "--collect", "--quiet", "--", "/bin/true"],
+            )
+            cgroup_mem_ok = cg_probe.returncode == 0
+        except Exception:
+            cgroup_mem_ok = False
+
+    avail_ram_mb: Optional[int] = None
+    try:
+        meminfo = Path("/proc/meminfo")
+        if meminfo.is_file():
+            for line in meminfo.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        avail_ram_mb = int(parts[1]) // 1024
+                    break
+    except OSError:
+        avail_ram_mb = None
+
     return {
         "installed": True,
         "ghidra_home": str(ghidra_dir) if ghidra_dir else None,
@@ -766,6 +791,9 @@ def _probe_ghidra_and_jdk(
         "java_version": java_raw,
         "java_major": java_major,
         "jdk_compatible": jdk_ok,
+        "bwrap_available": bool(bwrap_bin),
+        "cgroup_memory_supported": cgroup_mem_ok,
+        "available_memory_mb": avail_ram_mb,
     }
 
 
@@ -839,6 +867,23 @@ def check_optional_integrations(
             details={**g_info, "ghidra_enabled": ghidra_enabled},
             remediation=f"Install OpenJDK {g_info['required_java_major']}+ JDK package (including javac) without running doctor with sudo.",
         ))
+    elif ghidra_enabled and (not g_info.get("bwrap_available") or (parse_bool(config.get("MALBOX_GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT"), default=True) and not g_info.get("cgroup_memory_supported"))):
+        missing_parts = []
+        if not g_info.get("bwrap_available"):
+            missing_parts.append("Bubblewrap (bwrap)")
+        if not g_info.get("cgroup_memory_supported"):
+            missing_parts.append("user cgroup v2 MemoryMax scope (systemd-run --user)")
+        results.append(CheckResult(
+            id="opt_ghidra",
+            name="Optional: Ghidra Headless",
+            status=CheckStatus.WARN,
+            summary=(
+                f"Ghidra {g_info['ghidra_version']} enabled, but required containment is unavailable: "
+                f"{', '.join(missing_parts)} (fail-closed; Replay Mode unaffected)."
+            ),
+            details={**g_info, "ghidra_enabled": True},
+            remediation="Ensure bubblewrap and user systemd cgroup v2 delegation are active on this Linux host.",
+        ))
     else:
         results.append(CheckResult(
             id="opt_ghidra",
@@ -847,7 +892,9 @@ def check_optional_integrations(
             summary=(
                 f"Optional Ghidra {g_info['ghidra_version']} & JDK {g_info['java_major']} verified "
                 f"({g_info['ghidra_home'] or g_info['analyze_headless']}; "
-                f"{'enabled' if ghidra_enabled else 'disabled by default'})."
+                f"{'enabled' if ghidra_enabled else 'disabled by default'}; "
+                f"bwrap={'ok' if g_info.get('bwrap_available') else 'missing'}, "
+                f"cgroup_mem={'ok' if g_info.get('cgroup_memory_supported') else 'unverified'})."
             ),
             details={**g_info, "ghidra_enabled": ghidra_enabled},
         ))
