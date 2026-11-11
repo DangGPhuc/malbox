@@ -588,6 +588,7 @@ describe('Phase 4B — Correlation Explorer & Intelligence Report Integration', 
     });
 
     // Safe hash deep link into CorrelationPage inside App
+    cleanup();
     vi.spyOn(api, 'getHealth').mockResolvedValue({
       status: 'healthy',
       service: 'malbox-ai',
@@ -604,8 +605,10 @@ describe('Phase 4B — Correlation Explorer & Intelligence Report Integration', 
     ).toBeInTheDocument();
 
     // Responsive containers & keyboard-accessible search/tab controls verified
-    expect(appView.container.querySelector('.correlation-explorer-page')).toBeInTheDocument();
-    expect(appView.container.querySelector('.corr-main-grid')).toBeInTheDocument();
-    expect(appView.container.querySelector('.corr-kpi-grid')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(appView.container.querySelector('.correlation-explorer-page')).toBeInTheDocument();
+      expect(appView.container.querySelector('.corr-main-grid')).toBeInTheDocument();
+      expect(appView.container.querySelector('.corr-kpi-grid')).toBeInTheDocument();
+    });
   });
 });
