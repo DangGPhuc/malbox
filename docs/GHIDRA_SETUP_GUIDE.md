@@ -88,3 +88,12 @@ HotSpot JVMs reserve significant native heap, metaspace (`192m`), and code cache
 4. **Replay Independence:**
    Replay workflows (`POST /api/v1/analyses?run_sync=true`) never invoke Ghidra automatically and continue functioning with `static_analysis.status = "not_available"` unless explicitly triggered.
 
+---
+
+## 5. Using the Phase 3B Function Explorer UI
+
+- **Navigation:** Open any analysis and click **Static Analysis** in the navigation bar (or **Static Function Explorer** in the Analysis Workspace or Intelligence Report header / `StaticAnalysisSummaryCard`), or navigate directly to `#static/<analysis_id>`.
+- **Default Disabled Behavior:** When `MALBOX_GHIDRA_ENABLED=false`, the explorer displays `DISABLED BY CONFIG` cleanly and keeps the trigger button disabled; existing persisted facts (if any) remain browsable read-only.
+- **Triggering Manually:** Click **Run Static Analysis**, provide `X-Reporting-Token` (held in transient React state only), and click **Queue Ghidra Run**. Bounded polling tracks `QUEUED` -> `RUNNING` until completion (`COMPLETED` / `PARTIAL` / `TIMED_OUT` / `FAILED`) and never auto-sends recovered decompiler pseudocode to external LLM providers.
+- **Additional UI Architecture Details:** See [Phase 3B Ghidra Function Explorer Documentation](ai/GHIDRA_FUNCTION_EXPLORER.md).
+

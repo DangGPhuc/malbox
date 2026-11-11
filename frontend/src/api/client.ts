@@ -10,6 +10,8 @@ import {
   ReportResponse,
   ArtifactItem,
   IntelligenceEnrichRequest,
+  StaticAnalysisResult,
+  StaticAnalysisJobAcceptedResponse,
 } from '../types';
 
 const BASE_URL = '/api/v1';
@@ -23,6 +25,16 @@ export class EnrichmentApiError extends Error {
     this.name = 'EnrichmentApiError';
     this.status = status;
     this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+export class StaticAnalysisApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'StaticAnalysisApiError';
+    this.status = status;
   }
 }
 
@@ -194,6 +206,51 @@ export const api = {
   async getArtifacts(analysisId: string): Promise<ArtifactItem[]> {
     const res = await fetch(`${BASE_URL}/analyses/${analysisId}/artifacts`);
     if (!res.ok) throw new Error('Failed to retrieve artifacts');
+    return res.json();
+  },
+
+  async getStaticAnalysis(analysisId: string): Promise<StaticAnalysisResult> {
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/static-analysis`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Failed to retrieve static analysis (${res.status})` }));
+      const detail = typeof errBody?.detail === 'string' ? errBody.detail : 'Failed to retrieve static analysis';
+      throw new StaticAnalysisApiError(detail, res.status);
+    }
+    return res.json();
+  },
+
+  async getSampleStaticAnalysis(sampleId: string): Promise<StaticAnalysisResult> {
+    const res = await fetch(`${BASE_URL}/samples/${sampleId}/static-analysis`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Failed to retrieve sample static analysis (${res.status})` }));
+      const detail = typeof errBody?.detail === 'string' ? errBody.detail : 'Failed to retrieve sample static analysis';
+      throw new StaticAnalysisApiError(detail, res.status);
+    }
+    return res.json();
+  },
+
+  async triggerStaticAnalysis(
+    analysisId: string,
+    reportingToken: string
+  ): Promise<StaticAnalysisJobAcceptedResponse> {
+    const headers: Record<string, string> = {};
+    const trimmed = reportingToken.trim();
+    if (trimmed) {
+      headers['X-Reporting-Token'] = trimmed;
+    }
+
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/static-analysis`, {
+      method: 'POST',
+      headers,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Static analysis trigger failed (${res.status})` }));
+      const detail =
+        typeof errBody?.detail === 'string'
+          ? errBody.detail
+          : `Static analysis trigger failed with status ${res.status}.`;
+      throw new StaticAnalysisApiError(detail, res.status);
+    }
     return res.json();
   },
 

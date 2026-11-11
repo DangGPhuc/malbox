@@ -11,5 +11,6 @@ export { ConfidencePanel } from './ConfidencePanel';
 export { ValidationSummaryPanel } from './ValidationSummaryPanel';
 export { InvestigationRecommendations } from './InvestigationRecommendations';
 export { EvidenceExplorer } from './EvidenceExplorer';
+export { StaticAnalysisSummaryCard } from './StaticAnalysisSummaryCard';
 export * from './utils';
 

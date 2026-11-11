@@ -9,6 +9,9 @@ export default defineConfig({
     __INDEX_CSS_RAW__: JSON.stringify(
       fs.readFileSync(resolve(__dirname, 'src/index.css'), 'utf-8')
     ),
+    __STATIC_CSS_RAW__: JSON.stringify(
+      fs.readFileSync(resolve(__dirname, 'src/pages/StaticAnalysis.css'), 'utf-8')
+    ),
   },
   test: {
     environment: 'jsdom',

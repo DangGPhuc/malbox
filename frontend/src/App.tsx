@@ -10,12 +10,15 @@ import { HealthStatus } from './types';
 const BehaviorGraphPage = lazy(() =>
   import('./pages/BehaviorGraphPage').then((mod) => ({ default: mod.BehaviorGraphPage }))
 );
+const StaticAnalysisPage = lazy(() =>
+  import('./pages/StaticAnalysisPage').then((mod) => ({ default: mod.StaticAnalysisPage }))
+);
 
 function readInitialHashRoute(): { tab: string; analysisId: string | null } {
   if (typeof window === 'undefined' || !window.location.hash) {
     return { tab: 'dashboard', analysisId: null };
   }
-  const match = window.location.hash.match(/^#(workspace|graph|report)\/([a-zA-Z0-9_-]{4,80})$/);
+  const match = window.location.hash.match(/^#(workspace|graph|report|static)\/([a-zA-Z0-9_-]{4,80})$/);
   if (!match) {
     return { tab: 'dashboard', analysisId: null };
   }
@@ -90,6 +93,21 @@ export default function App() {
             analysisId={activeAnalysisId}
             onNavigateTab={(tab) => setCurrentTab(tab)}
           />
+        )}
+
+        {currentTab === 'static' && activeAnalysisId && (
+          <Suspense
+            fallback={
+              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+                Loading Ghidra static function explorer...
+              </div>
+            }
+          >
+            <StaticAnalysisPage
+              analysisId={activeAnalysisId}
+              onNavigateTab={(tab) => setCurrentTab(tab)}
+            />
+          </Suspense>
         )}
       </main>
     </div>

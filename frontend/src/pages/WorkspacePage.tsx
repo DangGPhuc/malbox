@@ -9,6 +9,7 @@ import {
   Download,
   AlertOctagon,
   ArrowRight,
+  Cpu,
   Filter,
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -125,9 +126,12 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
           <button onClick={() => onNavigateTab('graph')} className="btn btn-secondary">
             Behavior Graph <ArrowRight size={14} />
+          </button>
+          <button onClick={() => onNavigateTab('static')} className="btn btn-secondary">
+            <Cpu size={14} /> Static Function Explorer
           </button>
           <button onClick={() => onNavigateTab('report')} className="btn btn-primary">
             Full Intelligence Report <ArrowRight size={14} />

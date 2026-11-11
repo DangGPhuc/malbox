@@ -1,9 +1,9 @@
 # malbox-ai — Build Status & Verification Ledger
 
 **Project Codename:** `malbox-ai`  
-**Architecture Version:** 0.2.4-alpha (Phase 3A.1 Ghidra Runtime Hardening)  
-**Active Branch:** `fix/phase3a-ghidra-runtime-hardening`  
-**Status:** **OPERATIONAL — PHASE 3A.1 GHIDRA RUNTIME HARDENING & CONTAINMENT VERIFIED**
+**Architecture Version:** 0.2.5-alpha (Phase 3B Ghidra Function Explorer UI)  
+**Active Branch:** `feat/phase3b-function-explorer`  
+**Status:** **OPERATIONAL — PHASE 3B GHIDRA FUNCTION EXPLORER UI & GATE 0 HARDENING VERIFIED**
 
 ---
 
@@ -24,21 +24,21 @@
 | **Doctor & Bootstrap CLI** | **VERIFIED** | `test_doctor_cli.py` | Idempotent `./malbox doctor/start/stop/status`, strong OS PID/PGID ownership verification, 0600 `.env` & 0700 `.malbox` permissions, offline Replay setup. |
 | **Intelligence Report Web UI** | **VERIFIED** | Vitest + React Testing Library (`15/15 PASSED`), `tsc --noEmit`, `vite build`, `npm audit` (`0 vulnerabilities`) | Modular evidence-grounded dark-mode report dashboard (`frontend/src/components/IntelligenceReport/`), strict TypeScript contracts, Replay & synthetic artifact badges, FACT/INFERENCE/HYPOTHESIS + EvidenceExplorer, explicit in-memory `X-Reporting-Token` & external consent enrichment UX, print-friendly PDF & CSP-safe HTML exports, lazy-loaded Cytoscape graph, `auto`-mode consent enforcement, multi-page event lookup pagination, and full-report print state restoration. |
 | **Live CAPE Sandbox Backend** | **PARTIAL** | `test_cape_adapter.py` | Fully implemented and unit-tested adapter with readiness checks, task polling, report transformation, and cancellation. Real hypervisor execution remains disabled by policy. |
-| **Static Decompilation (Ghidra Phase 3A.1)** | **VERIFIED (HARDENED FOUNDATION)** | `test_static_analysis.py`, [`static-analysis-v1.md`](architecture/static-analysis-v1.md), [`GHIDRA_SETUP_GUIDE.md`](GHIDRA_SETUP_GUIDE.md), [`GHIDRA_SECURITY_MODEL.md`](GHIDRA_SECURITY_MODEL.md) | Optional, disabled-by-default (`MALBOX_GHIDRA_ENABLED=false`) non-executing Ghidra Headless PE analyzer (`binary_executed=False`) with mandatory Bubblewrap (`--unshare-all --cap-drop ALL --clearenv`) + unprivileged Linux cgroup v2 process-tree memory containment (`systemd-run --user MemoryMax=1280M`, `MemorySwapMax=0`, `GHIDRA_MAX_HEAP_MB=512`), VM `MemAvailable` preflight, strict subprocess exit-code integrity, immediate owned-PGID termination on stream overflow (`SIGTERM` grace -> `SIGKILL`), ancestor symlink rejection, shutdown cancellation propagation, persistence size gate, deterministic `rank_functions()` prioritization, and Intelligence bridge (`decompiled_omitted_for_external_ai=True`). Phase 3B UI views and Phase 4 correlation remain out of scope. |
+| **Static Decompilation (Ghidra Phase 3A.1 & 3B UI)** | **VERIFIED (FOUNDATION + FUNCTION EXPLORER UI)** | `test_static_analysis.py`, `StaticAnalysisPage.test.tsx`, [`static-analysis-v1.md`](architecture/static-analysis-v1.md), [`GHIDRA_FUNCTION_EXPLORER.md`](ai/GHIDRA_FUNCTION_EXPLORER.md), [`GHIDRA_SETUP_GUIDE.md`](GHIDRA_SETUP_GUIDE.md) | Optional, disabled-by-default (`MALBOX_GHIDRA_ENABLED=false`) non-executing Ghidra Headless PE analyzer (`binary_executed=False`) with mandatory Bubblewrap + `systemd-run --user` memory containment, Gate 0 late-write cancellation fencing, analysis-specific vs. sample provenance tracking, lazy-loaded `StaticAnalysisPage` UI (`FunctionExplorerPanel`, XSS-safe read-only `DecompilerViewer`, bounded `<=60` nodes / `<=100` edges Cytoscape `StaticCallGraphPanel`, `StaticArtifactsPanel`, manual in-memory `X-Reporting-Token` trigger), and read-only `StaticAnalysisSummaryCard` on `ReportPage`. Phase 4 cross-layer correlation remains next. |
 
 ---
 
 ## 2. Test Execution Outcomes
 
 ### Backend (`pytest` 9.2.0)
-- **Local Host Default Suite (Kali, `bwrap` + `opencode v2.1.4`):** **116 passed, 1 skipped** (`test_live_ghidra_bwrap_smoke_opt_in` skipped by default unless `MALBOX_RUN_LIVE_GHIDRA_TEST=1`)
-- **Opt-In Live Ghidra + Bubblewrap + Cgroup v2 Smoke Test (`MALBOX_RUN_LIVE_GHIDRA_TEST=1`):** **1 passed** (Ghidra `12.1.4` + OpenJDK `25.0.4.1` + `ExportProgramFacts.java` inside `systemd-run --user --scope` + `bwrap` on harmless constructed PE32 stub in 48.56s; `binary_executed=False`)
+- **Local Host Default Suite (Kali, `bwrap` + `opencode v2.1.4`):** **118 passed, 1 skipped** (`test_live_ghidra_bwrap_smoke_opt_in` skipped by default unless `MALBOX_RUN_LIVE_GHIDRA_TEST=1`)
+- **Opt-In Live Ghidra + Bubblewrap + Cgroup v2 Smoke Test (`MALBOX_RUN_LIVE_GHIDRA_TEST=1`):** **Verified in Gate 0 (`843947c`)** (Ghidra `12.1.4` + OpenJDK `25.0.4.1` + `ExportProgramFacts.java` inside `systemd-run --user --scope` + `bwrap` on harmless constructed PE32 stub with decompiler `entry` output verified; `binary_executed=False`)
 - **Hosted `ubuntu-latest` CI Note:** Tests requiring host Linux `bwrap`/`opencode`/`ghidra` binaries (`test_real_bwrap_sandbox_and_real_opencode_cli_integration`, `test_live_ghidra_bwrap_smoke_opt_in`) skip cleanly when absent on hosted CI runners.
 
 ### Frontend (`tsc --noEmit` + `vitest` 4.1.12 + `vite` 6.4.6)
-- **Frontend Unit Tests:** **15/15 PASSED** across `frontend/src/__tests__/ReportPage.test.tsx` (11) and `frontend/src/__tests__/EnrichmentFlow.test.tsx` (4)
+- **Frontend Unit Tests:** **27/27 PASSED** across `frontend/src/__tests__/ReportPage.test.tsx` (11), `frontend/src/__tests__/EnrichmentFlow.test.tsx` (4), and `frontend/src/__tests__/StaticAnalysisPage.test.tsx` (12)
 - **TypeScript Strict Check:** `npm run typecheck` PASSED (0 errors)
-- **Production Build:** `npm run build` PASSED (1.67s)
+- **Production Build:** `npm run build` PASSED (lazy-loaded `StaticAnalysisPage` & split `cytoscape.esm` chunks)
 - **Dependency Audit Baseline:** `npm audit` -> 0 vulnerabilities (`vite@^6.4.6`, `vitest@^4.1.12`)
 
 ### Test Breakdown by Subsystem
@@ -58,7 +58,7 @@
    - `test_replay_scenario_alias_compatibility` [PASSED]
    - `test_replay_invalid_scenario_id_does_not_silently_fallback` [PASSED]
 11. `backend/tests/test_safety_and_lifecycle.py`: (14/14 PASSED)
-12. `backend/tests/test_static_analysis.py`: (23/23 unit PASSED, 1 opt-in live test skipped by default; 1/1 live PASSED with `MALBOX_RUN_LIVE_GHIDRA_TEST=1`)
+12. `backend/tests/test_static_analysis.py`: (25/25 unit PASSED, 1 opt-in live test skipped by default; live smoke strengthened & verified in Gate 0)
 13. `backend/tests/test_submission.py`: (3/3 PASSED)
 14. `backend/tests/test_telemetry_integrity.py`: (7/7 PASSED)
 

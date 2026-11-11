@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, Activity, UploadCloud, Network, FileText, AlertCircle } from 'lucide-react';
+import { Shield, Activity, UploadCloud, Network, FileText, AlertCircle, Cpu } from 'lucide-react';
 import { HealthStatus } from '../types';
 
 interface NavbarProps {
@@ -20,6 +20,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'submit', label: 'Submit Sample', icon: UploadCloud },
     { id: 'workspace', label: 'Analysis Workspace', icon: Shield, disabled: !activeAnalysisId },
     { id: 'graph', label: 'Behavior Graph', icon: Network, disabled: !activeAnalysisId },
+    { id: 'static', label: 'Static Analysis', icon: Cpu, disabled: !activeAnalysisId },
     { id: 'report', label: 'Analysis Report', icon: FileText, disabled: !activeAnalysisId },
   ];
 

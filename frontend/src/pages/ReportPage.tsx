@@ -14,6 +14,7 @@ import {
   AnalysisEvent,
   ArtifactItem,
   ReportResponse,
+  StaticAnalysisResult,
 } from '../types';
 import {
   AIProviderStatus,
@@ -27,6 +28,7 @@ import {
   InvestigationRecommendations,
   IOCIntelligenceTable,
   ReplayProvenanceBanner,
+  StaticAnalysisSummaryCard,
   ValidationSummaryPanel,
   getReplayScenarioId,
   isReplayReport,
@@ -45,6 +47,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({
 }) => {
   const [reportData, setReportData] = useState<ReportResponse | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
+  const [staticData, setStaticData] = useState<StaticAnalysisResult | null>(null);
+  const [staticLoading, setStaticLoading] = useState<boolean>(false);
   const [eventsCache, setEventsCache] = useState<AnalysisEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [eventsFetchError, setEventsFetchError] = useState<string | null>(null);
@@ -102,16 +106,24 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     try {
       setLoading(true);
       setLoadError(null);
-      const [rep, arts] = await Promise.all([
+      setStaticLoading(true);
+      const staticPromise =
+        typeof api.getStaticAnalysis === 'function'
+          ? api.getStaticAnalysis(analysisId).catch(() => null)
+          : Promise.resolve(null);
+      const [rep, arts, staticRes] = await Promise.all([
         api.getReport(analysisId),
         api.getArtifacts(analysisId).catch(() => [] as ArtifactItem[]),
+        staticPromise,
       ]);
       setReportData(rep);
       setArtifacts(arts);
+      setStaticData(staticRes);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Unable to load analysis report.');
     } finally {
       setLoading(false);
+      setStaticLoading(false);
     }
   }, [analysisId]);
 
@@ -265,6 +277,13 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         analysisId={analysisId}
         providerMetadata={intel?.provider_metadata ?? null}
         onEnrichmentSuccess={fetchReport}
+      />
+
+      <StaticAnalysisSummaryCard
+        analysisId={analysisId}
+        staticData={staticData}
+        loading={staticLoading}
+        onOpenStaticExplorer={onNavigateTab ? () => onNavigateTab('static') : undefined}
       />
 
       {selectedEvidenceId && (

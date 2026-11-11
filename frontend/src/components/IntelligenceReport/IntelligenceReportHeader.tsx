@@ -103,6 +103,13 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
               >
                 <Network size={14} aria-hidden="true" /> Behavior Graph
               </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => onNavigateTab('static')}
+              >
+                <Cpu size={14} aria-hidden="true" /> Static Function Explorer
+              </button>
             </div>
           )}
         </div>

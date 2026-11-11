@@ -456,3 +456,188 @@ export interface ArtifactItem {
   artifact_type: string;
   relative_path: string;
 }
+
+// =========================================================================
+// Phase 3A / 3B Static Analysis (Ghidra Headless) Strictly Typed Contracts
+// =========================================================================
+
+export type StaticAnalysisStatus =
+  | 'PENDING'
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'PARTIAL'
+  | 'FAILED'
+  | 'TIMED_OUT'
+  | 'UNAVAILABLE'
+  | 'SKIPPED';
+
+export type StaticProvenanceScope =
+  | 'analysis_specific'
+  | 'sample_level'
+  | 'sample_fallback'
+  | 'unexecuted';
+
+export type DecompileStatus = 'OK' | 'TIMED_OUT' | 'ERROR' | 'SKIPPED_CAP';
+
+export interface StaticAnalysisProvenance {
+  schema_version: string;
+  analysis_id?: string | null;
+  sample_id: string;
+  sample_sha256: string;
+  source_tool: 'ghidra_headless' | string;
+  ghidra_version?: string | null;
+  java_version?: string | null;
+  binary_executed: false;
+  started_at?: string | null;
+  completed_at?: string | null;
+  execution_duration_ms?: number | null;
+  project_isolated: boolean;
+  os_sandbox: string;
+  process_exit_code?: number | null;
+  memory_limit_backend: string;
+  memory_limit_mb?: number | null;
+  heap_limit_mb?: number | null;
+  requested_analysis_id?: string | null;
+  provenance_scope?: StaticProvenanceScope;
+  provenance_note?: string | null;
+  ghidra_enabled?: boolean | null;
+}
+
+export interface ProgramMetadata {
+  program_name: string;
+  executable_format?: string | null;
+  language_id?: string | null;
+  architecture?: string | null;
+  endianness?: string | null;
+  address_size?: number | null;
+  image_base?: string | null;
+  entry_points: string[];
+  total_functions_discovered: number;
+  total_imports: number;
+  total_exports: number;
+  total_strings: number;
+}
+
+export interface ImportedSymbol {
+  library: string;
+  name: string;
+  address?: string | null;
+  ordinal?: number | null;
+}
+
+export interface CrossReference {
+  from_address: string;
+  to_address: string;
+  ref_type: string;
+  from_function_id?: string | null;
+  to_function_id?: string | null;
+  target_symbol?: string | null;
+}
+
+export interface FunctionCallRelationship {
+  caller_function_id: string;
+  caller_address: string;
+  caller_name: string;
+  callee_function_id?: string | null;
+  callee_address?: string | null;
+  callee_name: string;
+  is_external_import: boolean;
+  call_site_address?: string | null;
+}
+
+export interface StaticStringEvidence {
+  string_id: string;
+  address: string;
+  value: string;
+  length: number;
+  section?: string | null;
+  referencing_function_ids: string[];
+}
+
+export interface FunctionMetadata {
+  function_id: string;
+  entry_address: string;
+  name: string;
+  size_bytes: number;
+  basic_block_count?: number | null;
+  is_thunk: boolean;
+  is_external: boolean;
+  is_executed: false;
+  calling_convention?: string | null;
+  signature?: string | null;
+  imported_api_calls: string[];
+  called_function_ids: string[];
+  caller_function_ids: string[];
+  string_refs: string[];
+  xref_in_count: number;
+  xref_out_count: number;
+  rank_score: number;
+  rank_reasons: string[];
+}
+
+export interface DecompiledFunction {
+  function_id: string;
+  entry_address: string;
+  name: string;
+  pseudocode: string;
+  pseudocode_bytes: number;
+  truncated: boolean;
+  decompile_status: DecompileStatus;
+  error_message?: string | null;
+  provenance_note: string;
+}
+
+export interface FunctionAnalysisFinding {
+  function_id: string;
+  entry_address: string;
+  name: string;
+  score: number;
+  reasons: string[];
+  imported_apis: string[];
+  string_signals: string[];
+  disclaimer: string;
+}
+
+export interface StaticAnalysisTruncation {
+  truncated: boolean;
+  functions_discovered: number;
+  functions_included: number;
+  functions_omitted: number;
+  decompiled_requested: number;
+  decompiled_included: number;
+  decompiled_omitted_cap: number;
+  strings_included: number;
+  strings_omitted: number;
+  output_bytes: number;
+  max_output_bytes: number;
+  max_functions: number;
+  max_decompile_functions: number;
+}
+
+export interface StaticAnalysisResult {
+  schema_version: string;
+  status: StaticAnalysisStatus;
+  provenance: StaticAnalysisProvenance;
+  program_metadata?: ProgramMetadata | null;
+  functions: FunctionMetadata[];
+  call_graph: FunctionCallRelationship[];
+  cross_references: CrossReference[];
+  imports: ImportedSymbol[];
+  exports: string[];
+  strings: StaticStringEvidence[];
+  decompiled_functions: DecompiledFunction[];
+  ranked_findings: FunctionAnalysisFinding[];
+  truncation: StaticAnalysisTruncation;
+  errors: string[];
+  warnings: string[];
+  is_partial: boolean;
+}
+
+export interface StaticAnalysisJobAcceptedResponse {
+  job_id: string;
+  sample_id: string;
+  analysis_id?: string | null;
+  status: StaticAnalysisStatus | string;
+  message: string;
+}
