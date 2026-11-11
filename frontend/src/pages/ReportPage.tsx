@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   AlertTriangle,
   Layers,
@@ -45,13 +46,57 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   const [reportData, setReportData] = useState<ReportResponse | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [eventsCache, setEventsCache] = useState<AnalysisEvent[]>([]);
-  const [eventsLoaded, setEventsLoaded] = useState(false);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [eventsFetchError, setEventsFetchError] = useState<string | null>(null);
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<ReportViewTab>('all');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const eventsCacheRef = useRef<AnalysisEvent[]>([]);
+  const eventsNextPageRef = useRef<number>(1);
+  const eventsExhaustedRef = useRef<boolean>(false);
+  const activeSectionRef = useRef<ReportViewTab>('all');
+  const beforePrintSectionRef = useRef<ReportViewTab | null>(null);
+
+  useEffect(() => {
+    activeSectionRef.current = activeSection;
+  }, [activeSection]);
+
+  useEffect(() => {
+    const onBeforePrint = () => {
+      if (activeSectionRef.current !== 'all') {
+        beforePrintSectionRef.current = activeSectionRef.current;
+        flushSync(() => setActiveSection('all'));
+      }
+    };
+    const onAfterPrint = () => {
+      if (beforePrintSectionRef.current) {
+        const prev = beforePrintSectionRef.current;
+        beforePrintSectionRef.current = null;
+        setActiveSection(prev);
+      }
+    };
+    window.addEventListener('beforeprint', onBeforePrint);
+    window.addEventListener('afterprint', onAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', onBeforePrint);
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
+  }, []);
+
+  const handlePrintFullReport = useCallback(() => {
+    const prev = activeSectionRef.current;
+    if (prev !== 'all') {
+      flushSync(() => setActiveSection('all'));
+    }
+    if (typeof window !== 'undefined' && typeof window.print === 'function') {
+      window.print();
+    }
+    if (prev !== 'all') {
+      setActiveSection(prev);
+    }
+  }, []);
 
   const fetchReport = useCallback(async () => {
     try {
@@ -71,8 +116,10 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   }, [analysisId]);
 
   useEffect(() => {
+    eventsCacheRef.current = [];
+    eventsNextPageRef.current = 1;
+    eventsExhaustedRef.current = false;
     setEventsCache([]);
-    setEventsLoaded(false);
     setSelectedEvidenceId(null);
     setEventsFetchError(null);
     void fetchReport();
@@ -80,13 +127,17 @@ export const ReportPage: React.FC<ReportPageProps> = ({
 
   const ensureEventsLoaded = useCallback(
     async (targetEvidenceId: string) => {
-      if (eventsLoaded || loadingEvents) return;
+      if (eventsExhaustedRef.current || loadingEvents) return;
+      if (eventsCacheRef.current.some((e) => e.id === targetEvidenceId)) return;
       // Sample/artifact/finding references resolve cleanly without fetching /events unless needed
       if (
         targetEvidenceId.startsWith('sample:') ||
         targetEvidenceId.startsWith('artifact:') ||
         targetEvidenceId.startsWith('finding:') ||
-        targetEvidenceId.startsWith('rule:')
+        targetEvidenceId.startsWith('rule:') ||
+        reportData?.full_report.findings.some(
+          (f) => f.id === targetEvidenceId || f.rule_id === targetEvidenceId
+        )
       ) {
         return;
       }
@@ -94,20 +145,35 @@ export const ReportPage: React.FC<ReportPageProps> = ({
       setLoadingEvents(true);
       setEventsFetchError(null);
       try {
-        const firstPage = await api.getEvents(analysisId, { page: 1, page_size: 200 });
-        let collected = [...firstPage.items];
-        const foundInFirst = collected.some((e) => e.id === targetEvidenceId);
-        // Bounded pagination only if event ID wasn't on page 1 and more pages exist
-        if (!foundInFirst && firstPage.total > collected.length) {
-          const maxPages = Math.min(3, Math.ceil(firstPage.total / 200));
-          for (let page = 2; page <= maxPages; page += 1) {
-            const next = await api.getEvents(analysisId, { page, page_size: 200 });
-            collected = collected.concat(next.items);
-            if (next.items.some((e) => e.id === targetEvidenceId)) break;
+        const seen = new Set(eventsCacheRef.current.map((e) => e.id));
+        const merged = [...eventsCacheRef.current];
+        const maxPagesPerClick = 5;
+        let fetched = 0;
+
+        while (!eventsExhaustedRef.current && fetched < maxPagesPerClick) {
+          const page = eventsNextPageRef.current;
+          const res = await api.getEvents(analysisId, { page, page_size: 200 });
+          eventsNextPageRef.current = page + 1;
+          fetched += 1;
+
+          for (const item of res.items) {
+            if (!seen.has(item.id)) {
+              seen.add(item.id);
+              merged.push(item);
+            }
+          }
+
+          if (res.items.length === 0 || merged.length >= res.total) {
+            eventsExhaustedRef.current = true;
+          }
+
+          if (res.items.some((e) => e.id === targetEvidenceId)) {
+            break;
           }
         }
-        setEventsCache(collected);
-        setEventsLoaded(true);
+
+        eventsCacheRef.current = merged;
+        setEventsCache(merged);
       } catch (err) {
         setEventsFetchError(
           err instanceof Error ? err.message : 'Failed to fetch telemetry events from backend.'
@@ -116,7 +182,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         setLoadingEvents(false);
       }
     },
-    [analysisId, eventsLoaded, loadingEvents]
+    [analysisId, loadingEvents, reportData]
   );
 
   const handleInspectEvidence = useCallback(
@@ -184,6 +250,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         analysisId={analysisId}
         reportData={reportData}
         onNavigateTab={onNavigateTab}
+        onPrintFullReport={handlePrintFullReport}
       />
 
       <ReplayProvenanceBanner

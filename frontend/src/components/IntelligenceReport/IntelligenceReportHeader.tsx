@@ -22,12 +22,14 @@ interface IntelligenceReportHeaderProps {
   analysisId: string;
   reportData: ReportResponse;
   onNavigateTab?: (tab: string) => void;
+  onPrintFullReport?: () => void;
 }
 
 export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> = ({
   analysisId,
   reportData,
   onNavigateTab,
+  onPrintFullReport,
 }) => {
   const { full_report, risk_score, risk_level } = reportData;
   const intel = full_report.intelligence_report ?? null;
@@ -105,7 +107,11 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
           )}
         </div>
 
-        <ReportExportToolbar analysisId={analysisId} reportData={reportData} />
+        <ReportExportToolbar
+          analysisId={analysisId}
+          reportData={reportData}
+          onPrintFullReport={onPrintFullReport}
+        />
       </div>
 
       {/* Distinct Verdict vs Analytical Confidence vs Provider Provenance KPI Strip */}

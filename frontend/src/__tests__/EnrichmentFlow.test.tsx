@@ -153,4 +153,39 @@ describe('ReportPage & AIProviderStatus — Enrichment Consent, Auth & Failure P
 
     vi.unstubAllGlobals();
   });
+
+  it('Gate 0 regression: requires explicit external AI consent for auto mode before permitting execution', async () => {
+    const initial = createWannaCryReplayReport();
+    vi.spyOn(api, 'getReport').mockResolvedValue(initial);
+    vi.spyOn(api, 'getArtifacts').mockResolvedValue(wannacryArtifactsFixture);
+    const enrichSpy = vi.spyOn(api, 'enrichReportIntelligence').mockResolvedValueOnce(initial);
+
+    render(<ReportPage analysisId="ana-wc-001" />);
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Run \/ Re-Generate Intelligence/i })
+    );
+
+    const modeSelect = screen.getByLabelText(/Enrichment Mode/i);
+    const tokenInput = screen.getByLabelText(/X-Reporting-Token/i);
+    const submitBtn = screen.getByRole('button', { name: /Execute Enrichment/i });
+
+    fireEvent.change(modeSelect, { target: { value: 'auto' } });
+    fireEvent.change(tokenInput, { target: { value: 'report-tok' } });
+
+    // auto mode may use an external provider -> disabled until consent checkbox checked
+    expect(submitBtn).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('checkbox'));
+    expect(submitBtn).not.toBeDisabled();
+
+    fireEvent.click(submitBtn);
+    await waitFor(() =>
+      expect(enrichSpy).toHaveBeenCalledWith(
+        'ana-wc-001',
+        { mode: 'auto', external_transmission_consent: true },
+        'report-tok'
+      )
+    );
+  });
 });

@@ -105,7 +105,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
 
   const metaDisplay = classifyProviderDisplay(providerMetadata);
   const isExternalMode = mode === 'llm' || mode === 'opencode' || mode === 'auto';
-  const requiresConsentBeforeRun = (mode === 'llm' || mode === 'opencode') && !consentChecked;
+  const requiresConsentBeforeRun = isExternalMode && !consentChecked;
   const missingToken = reportingToken.trim().length === 0;
 
   const runEnrichment = async () => {

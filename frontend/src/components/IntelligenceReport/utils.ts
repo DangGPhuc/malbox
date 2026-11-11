@@ -134,7 +134,19 @@ export function classifyProviderDisplay(meta: AIProviderMetadata | undefined | n
       providerSummary: `${meta.provider} (${meta.model})`,
     };
   }
-  if (modeLower === 'llm' || provLower === 'real_llm' || provLower === 'openai') {
+  const isMockOffline =
+    provLower === 'mock' ||
+    provLower === 'deterministic' ||
+    modeLower === 'deterministic_mock' ||
+    modeLower === 'deterministic';
+  if (
+    modeLower === 'llm' ||
+    modeLower === 'llm_enriched' ||
+    provLower === 'real' ||
+    provLower === 'real_llm' ||
+    provLower === 'openai' ||
+    !isMockOffline
+  ) {
     return {
       badgeLabel: 'EXTERNAL LLM ENRICHMENT',
       badgeClass: 'badge-info',

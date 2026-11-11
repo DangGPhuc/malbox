@@ -246,4 +246,94 @@ describe('ReportPage — Intelligence Report UI Coverage', () => {
     expect(__INDEX_CSS_RAW__).toContain('@media print');
     expect(__INDEX_CSS_RAW__).toContain('overflow-wrap: anywhere');
   });
+
+  it('Gate 0 regression: labels provider="real" + mode="llm_enriched" as EXTERNAL LLM ENRICHMENT', async () => {
+    const rep = createRedLineOpenCodeReport({ fallbackUsed: false });
+    rep.full_report.intelligence_report!.provider_metadata = {
+      mode: 'llm_enriched',
+      provider: 'real',
+      model: 'gpt-4o-mini',
+      tokens_used: 318,
+      fallback_used: false,
+      fallback_reason: null,
+      rules_version: '2.0',
+      generated_at: '2026-11-10T17:00:00Z',
+    };
+    vi.spyOn(api, 'getReport').mockResolvedValue(rep);
+    vi.spyOn(api, 'getArtifacts').mockResolvedValue([]);
+
+    render(<ReportPage analysisId="ana-rl-002" />);
+
+    expect((await screen.findAllByText('EXTERNAL LLM ENRICHMENT')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('DETERMINISTIC OFFLINE ENGINE')).not.toBeInTheDocument();
+  });
+
+  it('Gate 0 regression: resumes paginated /events lookup across later pages after initial page load', async () => {
+    vi.spyOn(api, 'getReport').mockResolvedValue(createWannaCryReplayReport());
+    vi.spyOn(api, 'getArtifacts').mockResolvedValue(wannacryArtifactsFixture);
+    const getEventsSpy = vi
+      .spyOn(api, 'getEvents')
+      .mockResolvedValueOnce({
+        total: 2,
+        page: 1,
+        page_size: 200,
+        items: [wannacryEventsFixture[0]],
+      })
+      .mockResolvedValueOnce({
+        total: 2,
+        page: 2,
+        page_size: 200,
+        items: [wannacryEventsFixture[1]],
+      });
+
+    render(<ReportPage analysisId="ana-wc-001" />);
+
+    // First click resolves ev-wc-1 on page 1 cleanly
+    const ev1Btn = (await screen.findAllByRole('button', { name: /ev-wc-1/ }))[0];
+    fireEvent.click(ev1Btn);
+    await waitFor(() => expect(getEventsSpy).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/\/i/)).toBeInTheDocument();
+
+    // Second click on ev-wc-2 MUST continue to page 2 instead of stopping at page 1
+    const ev2Btn = screen.getAllByRole('button', { name: /ev-wc-2/ })[0];
+    fireEvent.click(ev2Btn);
+    await waitFor(() => expect(getEventsSpy).toHaveBeenCalledTimes(2));
+    expect(getEventsSpy).toHaveBeenNthCalledWith(2, 'ana-wc-001', { page: 2, page_size: 200 });
+    expect((await screen.findAllByText(/delete shadows \/all \/quiet/)).length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findByText('Resolved: Execution Telemetry Event')).toBeInTheDocument();
+  });
+
+  it('Gate 0 regression: Print / Save PDF renders complete report even when on a filtered tab and restores prior tab', async () => {
+    vi.spyOn(api, 'getReport').mockResolvedValue(createWannaCryReplayReport());
+    vi.spyOn(api, 'getArtifacts').mockResolvedValue(wannacryArtifactsFixture);
+
+    let sawExecutiveDuringPrint = false;
+    let sawClaimsDuringPrint = false;
+    let sawTimelineDuringPrint = false;
+
+    const printSpy = vi.fn(() => {
+      sawExecutiveDuringPrint = screen.queryByText(/Executive Threat Assessment/i) !== null;
+      sawClaimsDuringPrint = screen.queryByText(/Evidence-Linked Analytical Claims/i) !== null;
+      sawTimelineDuringPrint = screen.queryByText(/Chronological Attack Story/i) !== null;
+    });
+    Object.defineProperty(window, 'print', { value: printSpy, writable: true });
+
+    render(<ReportPage analysisId="ana-wc-001" />);
+    const timelineTab = await screen.findByRole('tab', { name: /Attack Story/i });
+    fireEvent.click(timelineTab);
+
+    // Filtered out on screen prior to print
+    expect(screen.queryByText(/Executive Threat Assessment/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Print \/ Save PDF/i }));
+
+    expect(printSpy).toHaveBeenCalledTimes(1);
+    expect(sawExecutiveDuringPrint).toBe(true);
+    expect(sawClaimsDuringPrint).toBe(true);
+    expect(sawTimelineDuringPrint).toBe(true);
+
+    // Selected tab is cleanly restored after printing
+    expect(screen.queryByText(/Executive Threat Assessment/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Chronological Attack Story/i)).toBeInTheDocument();
+  });
 });

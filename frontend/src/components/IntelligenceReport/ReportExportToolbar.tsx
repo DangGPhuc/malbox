@@ -6,11 +6,13 @@ import { api } from '../../api/client';
 interface ReportExportToolbarProps {
   analysisId: string;
   reportData: ReportResponse;
+  onPrintFullReport?: () => void;
 }
 
 export const ReportExportToolbar: React.FC<ReportExportToolbarProps> = ({
   analysisId,
   reportData,
+  onPrintFullReport,
 }) => {
   const handleDownloadJSON = () => {
     const exportPayload = {
@@ -40,6 +42,10 @@ export const ReportExportToolbar: React.FC<ReportExportToolbarProps> = ({
   };
 
   const handlePrint = () => {
+    if (onPrintFullReport) {
+      onPrintFullReport();
+      return;
+    }
     if (typeof window !== 'undefined' && typeof window.print === 'function') {
       window.print();
     }
