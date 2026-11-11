@@ -834,4 +834,159 @@ describe('Phase 3B Ghidra Static Function Explorer UI', () => {
       expect(screen.getByTestId('static-analysis-page')).toBeInTheDocument();
     });
   });
+
+  it('Gate 0 (1-3): blocks overlapping poll GETs, prevents in-flight responses from restarting Pause Polling, and aborts/fences stale requests on analysisId switch', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let pollResolve!: (val: StaticAnalysisResult) => void;
+    const signals: Array<AbortSignal | undefined> = [];
+
+    const runningState = makeStaticResult({
+      status: 'RUNNING',
+      functions: [],
+      decompiled_functions: [],
+      ranked_findings: [],
+    });
+    const staleOldState = makeStaticResult({
+      status: 'COMPLETED',
+    });
+    staleOldState.functions[0].name = 'stale_old_analysis_fn';
+
+    const newAnalysisState = makeStaticResult({
+      status: 'COMPLETED',
+    });
+    newAnalysisState.provenance.analysis_id = 'ana_new_2';
+    newAnalysisState.provenance.requested_analysis_id = 'ana_new_2';
+    newAnalysisState.functions[0].name = 'fresh_new_analysis_fn';
+
+    const getSpy = vi
+      .spyOn(api, 'getStaticAnalysis')
+      .mockImplementation(async (id: string, signal?: AbortSignal) => {
+        signals.push(signal);
+        if (id === 'ana_static_demo_1' && getSpy.mock.calls.length === 1) {
+          return runningState;
+        }
+        if (id === 'ana_static_demo_1') {
+          return new Promise<StaticAnalysisResult>((resolve) => {
+            pollResolve = resolve;
+          });
+        }
+        return newAnalysisState;
+      });
+
+    const { rerender } = render(<StaticAnalysisPage analysisId="ana_static_demo_1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Pause Polling/i })).toBeInTheDocument();
+    });
+
+    // Trigger 1st background poll interval (holds poll #2 open in flight)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2600);
+    });
+    expect(getSpy).toHaveBeenCalledTimes(2);
+
+    // Advance another 5s while poll #2 is STILL pending -> NO overlapping poll GETs allowed!
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5200);
+    });
+    expect(getSpy).toHaveBeenCalledTimes(2);
+
+    // Pause Polling WHILE poll #2 is still in-flight!
+    fireEvent.click(screen.getByRole('button', { name: /Pause Polling/i }));
+    expect(screen.queryByRole('button', { name: /Pause Polling/i })).not.toBeInTheDocument();
+
+    // Now resolve the in-flight RUNNING GET response -> Pause Polling MUST stay paused!
+    await act(async () => {
+      pollResolve(runningState);
+    });
+    expect(screen.queryByRole('button', { name: /Pause Polling/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Resume Polling/i })).toBeInTheDocument();
+
+    const callsWhilePaused = getSpy.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(getSpy.mock.calls.length).toBe(callsWhilePaused);
+
+    // Now simulate slow stale fetch under old analysis followed by switching to new analysisId
+    fireEvent.click(screen.getByRole('button', { name: /Resume Polling/i }));
+    await waitFor(() => {
+      expect(typeof pollResolve).toBe('function');
+    });
+    const oldSignal = signals[signals.length - 1];
+    expect(oldSignal?.aborted).toBe(false);
+
+    rerender(<StaticAnalysisPage analysisId="ana_new_2" />);
+    expect(oldSignal?.aborted).toBe(true);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('fresh_new_analysis_fn').length).toBeGreaterThan(0);
+    });
+
+    // Even if old request unexpectedly resolves late, generation epoch fencing discards it!
+    await act(async () => {
+      pollResolve(staleOldState);
+    });
+    expect(screen.queryByText('stale_old_analysis_fn')).not.toBeInTheDocument();
+    expect(screen.getAllByText('fresh_new_analysis_fn').length).toBeGreaterThan(0);
+  });
+
+  it('Gate 0 (4-6): preserves last usable completed evidence when newer attempt fails, distinguishes attempts, and avoids sibling active misrepresentation', async () => {
+    const preserved = makeStaticResult({ status: 'COMPLETED' });
+    preserved.provenance.showing_preserved_usable_evidence = true;
+    preserved.provenance.usable_evidence = {
+      job_id: 'rec_good_1',
+      analysis_id: 'ana_static_demo_1',
+      status: 'COMPLETED',
+      completed_at: '2026-11-10T10:00:03Z',
+      is_usable: true,
+      same_analysis: true,
+    };
+    preserved.provenance.latest_attempt = {
+      job_id: 'rec_bad_2',
+      analysis_id: 'ana_static_demo_1',
+      status: 'FAILED',
+      error_message: 'retry JVM OOM',
+      is_usable: false,
+      same_analysis: true,
+    };
+
+    const getSpy = vi.spyOn(api, 'getStaticAnalysis').mockResolvedValueOnce(preserved);
+
+    render(<StaticAnalysisPage analysisId="ana_static_demo_1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Usable Evidence Preserved \(COMPLETED\)/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Latest Attempt: FAILED/i)).toBeInTheDocument();
+    expect(screen.getByText(/retry JVM OOM/i)).toBeInTheDocument();
+    expect(screen.getByText(/Function Explorer \(3 \/ 3\)/i)).toBeInTheDocument();
+    expect(screen.getByText('GHIDRA PSEUDOCODE — NOT ORIGINAL SOURCE CODE')).toBeInTheDocument();
+
+    // Sibling analysis running job under another analysis MUST NOT start polling or claim active job here
+    cleanup();
+    const siblingActive = makeStaticResult({
+      status: 'UNAVAILABLE',
+      program_metadata: null,
+      functions: [],
+      decompiled_functions: [],
+      ranked_findings: [],
+    });
+    siblingActive.provenance.provenance_scope = 'unexecuted';
+    siblingActive.provenance.latest_attempt = {
+      job_id: 'rec_other',
+      analysis_id: 'ana_other_9',
+      status: 'RUNNING',
+      is_usable: false,
+      same_analysis: false,
+    };
+    getSpy.mockResolvedValueOnce(siblingActive);
+
+    render(<StaticAnalysisPage analysisId="ana_static_demo_1" />);
+    await waitFor(() => {
+      expect(screen.getByText(/Sibling Analysis Active \(RUNNING\)/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: /Pause Polling/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Run Static Analysis/i })).not.toBeDisabled();
+  });
 });

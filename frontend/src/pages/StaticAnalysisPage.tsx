@@ -54,33 +54,127 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
 
   const mountedRef = useRef(true);
   const pollTicksRef = useRef(0);
+  const analysisEpochRef = useRef(0);
+  const requestSeqRef = useRef(0);
+  const latestAppliedSeqRef = useRef(0);
+  const inFlightGetRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const pollingPausedByUserRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      analysisEpochRef.current += 1;
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      inFlightGetRef.current = false;
     };
   }, []);
 
   const fetchStaticAnalysis = useCallback(
-    async (silent = false) => {
+    async (silent = false, forceInterrupt = false) => {
+      // Prevent overlapping background poll requests while an earlier poll is still in flight
+      if (silent && !forceInterrupt && inFlightGetRef.current) {
+        return;
+      }
+
+      if (forceInterrupt || !silent) {
+        abortControllerRef.current?.abort();
+        inFlightGetRef.current = false;
+      }
+
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      const myEpoch = analysisEpochRef.current;
+      const mySeq = ++requestSeqRef.current;
+      inFlightGetRef.current = true;
+
       if (!silent) {
         setLoading(true);
         setLoadError(null);
       }
+
       try {
-        const res = await api.getStaticAnalysis(analysisId);
-        if (!mountedRef.current) return;
-        setStaticData(res);
+        const res = await api.getStaticAnalysis(analysisId, controller.signal);
+        if (
+          !mountedRef.current ||
+          controller.signal.aborted ||
+          myEpoch !== analysisEpochRef.current ||
+          mySeq < latestAppliedSeqRef.current
+        ) {
+          return;
+        }
+        latestAppliedSeqRef.current = mySeq;
+
+        setStaticData((prev) => {
+          if (
+            prev &&
+            prev.provenance?.requested_analysis_id === res.provenance?.requested_analysis_id &&
+            ['COMPLETED', 'PARTIAL'].includes(prev.status) &&
+            ['FAILED', 'TIMED_OUT'].includes(res.status) &&
+            res.functions.length === 0 &&
+            !res.provenance?.showing_preserved_usable_evidence
+          ) {
+            return {
+              ...prev,
+              warnings: [
+                ...prev.warnings.filter((w) => !w.includes('Latest static attempt')),
+                `Latest static attempt (${res.status}) failed${res.errors[0] ? `: ${res.errors[0]}` : ''}; preserved last usable verified result.`,
+              ],
+              provenance: {
+                ...prev.provenance,
+                showing_preserved_usable_evidence: true,
+                latest_attempt: {
+                  analysis_id: res.provenance?.analysis_id ?? analysisId,
+                  status: res.status,
+                  started_at: res.provenance?.started_at,
+                  completed_at: res.provenance?.completed_at,
+                  error_message: res.errors[0] ?? 'Static analysis failed.',
+                  is_usable: false,
+                  same_analysis: true,
+                },
+                usable_evidence: prev.provenance?.usable_evidence ?? {
+                  analysis_id: prev.provenance?.analysis_id ?? analysisId,
+                  status: prev.status,
+                  completed_at: prev.provenance?.completed_at,
+                  is_usable: true,
+                  same_analysis: true,
+                },
+              },
+            };
+          }
+          return res;
+        });
+
         setLoadError(null);
-        if (TERMINAL_STATIC_STATUSES.includes(res.status)) {
+        const latestOwnActive = Boolean(
+          ACTIVE_STATIC_STATUSES.includes(res.status) ||
+            (res.provenance?.latest_attempt &&
+              res.provenance.latest_attempt.same_analysis !== false &&
+              ACTIVE_STATIC_STATUSES.includes(res.provenance.latest_attempt.status))
+        );
+
+        if (TERMINAL_STATIC_STATUSES.includes(res.status) && !latestOwnActive) {
           setIsPolling(false);
           pollTicksRef.current = 0;
-        } else if (ACTIVE_STATIC_STATUSES.includes(res.status)) {
-          setIsPolling(true);
+          pollingPausedByUserRef.current = false;
+        } else if (latestOwnActive) {
+          // Pause Polling must NEVER be overridden by an in-flight response
+          if (!pollingPausedByUserRef.current) {
+            setIsPolling(true);
+          }
         }
       } catch (err) {
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          controller.signal.aborted ||
+          myEpoch !== analysisEpochRef.current ||
+          mySeq < latestAppliedSeqRef.current
+        ) {
+          return;
+        }
+        latestAppliedSeqRef.current = mySeq;
         if (!silent) {
           setLoadError(
             err instanceof Error ? err.message : 'Unable to fetch static disassembly status.'
@@ -88,7 +182,11 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
         }
         setIsPolling(false);
       } finally {
-        if (mountedRef.current && !silent) {
+        if (abortControllerRef.current === controller) {
+          inFlightGetRef.current = false;
+          abortControllerRef.current = null;
+        }
+        if (mountedRef.current && !silent && myEpoch === analysisEpochRef.current) {
           setLoading(false);
         }
       }
@@ -98,13 +196,29 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
 
   // Strict read-only GET on mount or analysisId change; NEVER triggers POST automatically.
   useEffect(() => {
+    analysisEpochRef.current += 1;
+    latestAppliedSeqRef.current = requestSeqRef.current;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    inFlightGetRef.current = false;
+    pollingPausedByUserRef.current = false;
+    pollTicksRef.current = 0;
+
+    setStaticData(null);
     setSelectedFunctionId(null);
     setNavWarning(null);
     setTriggerError(null);
     setTriggerSuccessMsg(null);
+    setLoadError(null);
     setIsPolling(false);
-    pollTicksRef.current = 0;
-    void fetchStaticAnalysis(false);
+    void fetchStaticAnalysis(false, true);
+
+    return () => {
+      analysisEpochRef.current += 1;
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      inFlightGetRef.current = false;
+    };
   }, [fetchStaticAnalysis]);
 
   // Bounded polling while queued/running; clears cleanly on terminal status or unmount.
@@ -164,20 +278,22 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
   );
 
   const handleTriggerRun = async (reportingToken: string) => {
+    const triggerEpoch = analysisEpochRef.current;
     setTriggering(true);
     setTriggerError(null);
     setTriggerSuccessMsg(null);
     try {
       const accepted = await api.triggerStaticAnalysis(analysisId, reportingToken);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || triggerEpoch !== analysisEpochRef.current) return;
       setTriggerSuccessMsg(
         `Static job queued cleanly (${accepted.job_id || accepted.status}). Polling read-only status...`
       );
+      pollingPausedByUserRef.current = false;
       pollTicksRef.current = 0;
       setIsPolling(true);
-      await fetchStaticAnalysis(true);
+      await fetchStaticAnalysis(true, true);
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || triggerEpoch !== analysisEpochRef.current) return;
       if (err instanceof StaticAnalysisApiError) {
         setTriggerError(mapStaticTriggerError(err.status, err.message));
       } else {
@@ -189,11 +305,23 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
         );
       }
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && triggerEpoch === analysisEpochRef.current) {
         setTriggering(false);
       }
     }
   };
+
+  const handleStopPolling = useCallback(() => {
+    pollingPausedByUserRef.current = true;
+    setIsPolling(false);
+  }, []);
+
+  const handleResumePolling = useCallback(() => {
+    pollingPausedByUserRef.current = false;
+    pollTicksRef.current = 0;
+    setIsPolling(true);
+    void fetchStaticAnalysis(true, true);
+  }, [fetchStaticAnalysis]);
 
   const selectedFunction = useMemo(() => {
     if (!staticData || !selectedFunctionId) return null;
@@ -298,8 +426,9 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
         triggerError={triggerError}
         triggerSuccessMsg={triggerSuccessMsg}
         onTriggerRun={handleTriggerRun}
-        onRefresh={() => void fetchStaticAnalysis(false)}
-        onStopPolling={() => setIsPolling(false)}
+        onRefresh={() => void fetchStaticAnalysis(false, true)}
+        onStopPolling={handleStopPolling}
+        onResumePolling={handleResumePolling}
       />
 
       {loading && !staticData && (

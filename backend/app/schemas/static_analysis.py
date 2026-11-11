@@ -40,6 +40,19 @@ def make_static_string_id(sample_sha256: str, address: str) -> str:
     return f"str:{sha_prefix}:{norm_addr}"
 
 
+class StaticAttemptMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: Optional[str] = None
+    analysis_id: Optional[str] = None
+    status: StaticAnalysisStatus
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error_message: Optional[str] = None
+    is_usable: bool = False
+    same_analysis: bool = True
+
+
 class StaticAnalysisProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -69,6 +82,9 @@ class StaticAnalysisProvenance(BaseModel):
     ] = "analysis_specific"
     provenance_note: Optional[str] = None
     ghidra_enabled: Optional[bool] = None
+    latest_attempt: Optional[StaticAttemptMetadata] = None
+    usable_evidence: Optional[StaticAttemptMetadata] = None
+    showing_preserved_usable_evidence: bool = False
 
 
 class ProgramMetadata(BaseModel):

@@ -480,6 +480,17 @@ export type StaticProvenanceScope =
 
 export type DecompileStatus = 'OK' | 'TIMED_OUT' | 'ERROR' | 'SKIPPED_CAP';
 
+export interface StaticAttemptMetadata {
+  job_id?: string | null;
+  analysis_id?: string | null;
+  status: StaticAnalysisStatus;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+  is_usable: boolean;
+  same_analysis: boolean;
+}
+
 export interface StaticAnalysisProvenance {
   schema_version: string;
   analysis_id?: string | null;
@@ -502,6 +513,9 @@ export interface StaticAnalysisProvenance {
   provenance_scope?: StaticProvenanceScope;
   provenance_note?: string | null;
   ghidra_enabled?: boolean | null;
+  latest_attempt?: StaticAttemptMetadata | null;
+  usable_evidence?: StaticAttemptMetadata | null;
+  showing_preserved_usable_evidence?: boolean;
 }
 
 export interface ProgramMetadata {

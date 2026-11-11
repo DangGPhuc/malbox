@@ -1992,3 +1992,191 @@ def test_gate0_analysis_vs_sample_static_provenance_and_default_disabled(client,
     r_smp = client.get(f"/api/v1/samples/{sample.id}/static-analysis")
     assert r_smp.status_code == 200
     assert r_smp.json()["provenance"]["provenance_scope"] == "sample_level"
+
+
+# ---------------------------------------------------------------------------
+# 27. Phase 4A Gate 0: Preserved usable result & safe sample fallback isolation
+# ---------------------------------------------------------------------------
+def test_phase4a_gate0_preserves_usable_result_on_newer_failure_and_blocks_cross_analysis_active_fallback(
+    client, db_session, tmp_path
+):
+    from datetime import timedelta
+    from app.services.intelligence.bundle_builder import EvidenceBundleBuilder
+
+    pe_path, sha, _ = _write_pe_sample(tmp_path)
+    sample = Sample(
+        sha256=sha,
+        sha1="c" * 40,
+        md5="d" * 32,
+        file_name="gate0_preserve.exe",
+        file_size=len(_build_minimal_pe32()),
+        is_pe=True,
+        quarantine_path=str(pe_path),
+    )
+    db_session.add(sample)
+    db_session.flush()
+
+    a1 = Analysis(
+        sample_id=sample.id,
+        status=AnalysisStatus.COMPLETED.value,
+        backend_type="replay",
+        replay_scenario_id="ransomware_wannacry_mock",
+    )
+    a2 = Analysis(
+        sample_id=sample.id,
+        status=AnalysisStatus.COMPLETED.value,
+        backend_type="replay",
+        replay_scenario_id="infostealer_redline_mock",
+    )
+    db_session.add_all([a1, a2])
+    db_session.flush()
+
+    t0 = datetime.now(timezone.utc)
+    fn_id = make_static_function_id(sha, "0x401000")
+    usable_res = StaticAnalysisResult(
+        status="COMPLETED",
+        provenance=StaticAnalysisProvenance(
+            analysis_id=a1.id,
+            sample_id=sample.id,
+            sample_sha256=sha,
+            ghidra_version="12.1.4",
+            os_sandbox="bwrap",
+            completed_at=(t0 + timedelta(seconds=1)).isoformat(),
+        ),
+        functions=[
+            FunctionMetadata(
+                function_id=fn_id,
+                entry_address="0x401000",
+                name="preserved_entry",
+                imported_api_calls=["CreateFileW"],
+            )
+        ],
+        decompiled_functions=[
+            DecompiledFunction(
+                function_id=fn_id,
+                entry_address="0x401000",
+                name="preserved_entry",
+                pseudocode="int preserved_entry(void) { return 42; }",
+            )
+        ],
+        truncation=StaticAnalysisTruncation(functions_discovered=1, functions_included=1),
+    )
+    db_session.add(
+        StaticAnalysisRecord(
+            id="rec_usable_1",
+            sample_id=sample.id,
+            analysis_id=a1.id,
+            sample_sha256=sha,
+            status="COMPLETED",
+            ghidra_version="12.1.4",
+            result_json=usable_res.model_dump(mode="json"),
+            created_at=t0,
+            completed_at=t0 + timedelta(seconds=1),
+        )
+    )
+    # Newer attempt under a1 fails
+    failed_res = StaticAnalysisResult(
+        status="FAILED",
+        provenance=StaticAnalysisProvenance(
+            analysis_id=a1.id,
+            sample_id=sample.id,
+            sample_sha256=sha,
+            os_sandbox="bwrap",
+        ),
+        truncation=StaticAnalysisTruncation(),
+        errors=["Ghidra retry timed out / crashed cleanly"],
+    )
+    db_session.add(
+        StaticAnalysisRecord(
+            id="rec_failed_2",
+            sample_id=sample.id,
+            analysis_id=a1.id,
+            sample_sha256=sha,
+            status="FAILED",
+            error_message="Ghidra retry timed out / crashed cleanly",
+            result_json=failed_res.model_dump(mode="json"),
+            created_at=t0 + timedelta(seconds=10),
+            completed_at=t0 + timedelta(seconds=12),
+        )
+    )
+    db_session.commit()
+
+    # 1. Analysis endpoint preserves usable COMPLETED functions + pseudocode and distinguishes attempts
+    resp_a1 = client.get(f"/api/v1/analyses/{a1.id}/static-analysis")
+    assert resp_a1.status_code == 200
+    body = resp_a1.json()
+    assert body["status"] == "COMPLETED"
+    assert len(body["functions"]) == 1
+    assert body["functions"][0]["name"] == "preserved_entry"
+    assert len(body["decompiled_functions"]) == 1
+    prov = body["provenance"]
+    assert prov["showing_preserved_usable_evidence"] is True
+    assert prov["usable_evidence"]["job_id"] == "rec_usable_1"
+    assert prov["usable_evidence"]["status"] == "COMPLETED"
+    assert prov["usable_evidence"]["is_usable"] is True
+    assert prov["latest_attempt"]["job_id"] == "rec_failed_2"
+    assert prov["latest_attempt"]["status"] == "FAILED"
+    assert prov["latest_attempt"]["is_usable"] is False
+    assert any("preserved last usable verified evidence" in w for w in body["warnings"])
+
+    # 2. Sample endpoint ALSO preserves last usable COMPLETED evidence over newer FAILED attempt
+    resp_smp = client.get(f"/api/v1/samples/{sample.id}/static-analysis")
+    assert resp_smp.status_code == 200
+    assert resp_smp.json()["status"] == "COMPLETED"
+    assert resp_smp.json()["provenance"]["showing_preserved_usable_evidence"] is True
+    assert resp_smp.json()["provenance"]["latest_attempt"]["status"] == "FAILED"
+
+    # 3. Intelligence EvidenceBundleBuilder preserves usable COMPLETED evidence despite newer failed attempt
+    bundle = EvidenceBundleBuilder(db_session).build(
+        a1.id, risk_assessment=RiskAssessment(score=45, level="Suspicious")
+    )
+    assert bundle.static_analysis.status == "available"
+    assert fn_id in bundle.valid_evidence_ids
+
+    # 4. Separate sample where a sibling analysis has an in-progress RUNNING job:
+    # fallback MUST NOT claim RUNNING or QUEUED under a second analysis!
+    pe_path2 = tmp_path / "active_isolation.exe"
+    raw2 = _build_minimal_pe32() + b"Z"
+    pe_path2.write_bytes(raw2)
+    sha2 = hashlib.sha256(raw2).hexdigest()
+    sample2 = Sample(
+        sha256=sha2,
+        sha1="e" * 40,
+        md5="f" * 32,
+        file_name="active_isolation.exe",
+        file_size=len(raw2),
+        is_pe=True,
+        quarantine_path=str(pe_path2),
+    )
+    db_session.add(sample2)
+    db_session.flush()
+    b1 = Analysis(sample_id=sample2.id, status=AnalysisStatus.COMPLETED.value, backend_type="replay", replay_scenario_id="ransomware_wannacry_mock")
+    b2 = Analysis(sample_id=sample2.id, status=AnalysisStatus.COMPLETED.value, backend_type="replay", replay_scenario_id="infostealer_redline_mock")
+    db_session.add_all([b1, b2])
+    db_session.flush()
+    db_session.add(
+        StaticAnalysisRecord(
+            id="rec_b1_running",
+            sample_id=sample2.id,
+            analysis_id=b1.id,
+            sample_sha256=sha2,
+            status="RUNNING",
+            created_at=t0 + timedelta(seconds=20),
+        )
+    )
+    db_session.commit()
+
+    # Sibling b1 rightly sees RUNNING:
+    resp_b1 = client.get(f"/api/v1/analyses/{b1.id}/static-analysis")
+    assert resp_b1.status_code == 200
+    assert resp_b1.json()["status"] == "RUNNING"
+
+    # Analysis b2 MUST NOT misrepresent b1's RUNNING job as b2's active job:
+    resp_b2 = client.get(f"/api/v1/analyses/{b2.id}/static-analysis")
+    assert resp_b2.status_code == 200
+    b2_body = resp_b2.json()
+    assert b2_body["status"] == "UNAVAILABLE"
+    assert b2_body["provenance"]["provenance_scope"] == "unexecuted"
+    assert b2_body["provenance"]["latest_attempt"]["same_analysis"] is False
+    assert b2_body["provenance"]["latest_attempt"]["status"] == "RUNNING"
+

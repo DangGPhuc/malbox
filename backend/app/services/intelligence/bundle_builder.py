@@ -10,9 +10,9 @@ from app.models.analysis import Analysis
 from app.models.event import AnalysisEvent
 from app.models.finding import BehavioralFinding
 from app.models.sample import Sample
-from app.models.static_analysis import StaticAnalysisRecord
 from app.schemas.static_analysis import StaticAnalysisResult
 from app.services.static_analysis.intelligence_bridge import build_static_bundle_contract
+from app.services.static_analysis.selector import build_static_result_response
 from app.schemas.intelligence import (
     ArtifactEvidence,
     BundleProvenance,
@@ -305,31 +305,18 @@ class EvidenceBundleBuilder:
                     if isinstance(fn, dict) and fn.get("function_id")
                 ]
         else:
-            static_rec = (
-                self.db.query(StaticAnalysisRecord)
-                .filter(
-                    StaticAnalysisRecord.sample_sha256 == sample_sha256,
-                    StaticAnalysisRecord.analysis_id == analysis.id,
+            parsed_static = (
+                build_static_result_response(
+                    db=self.db,
+                    sample=sample,
+                    requested_analysis_id=analysis.id,
+                    prefer_usable_over_active=True,
                 )
-                .order_by(StaticAnalysisRecord.created_at.desc())
-                .first()
+                if sample is not None
+                else None
             )
-            if static_rec is None:
-                static_rec = (
-                    self.db.query(StaticAnalysisRecord)
-                    .filter(
-                        StaticAnalysisRecord.sample_sha256 == sample_sha256,
-                        StaticAnalysisRecord.sample_id == analysis.sample_id,
-                    )
-                    .order_by(StaticAnalysisRecord.created_at.desc())
-                    .first()
-                )
-            parsed_static: Optional[StaticAnalysisResult] = None
-            if static_rec and isinstance(static_rec.result_json, dict):
-                try:
-                    parsed_static = StaticAnalysisResult.model_validate(static_rec.result_json)
-                except Exception:
-                    parsed_static = None
+            if parsed_static is not None and parsed_static.status == "UNAVAILABLE":
+                parsed_static = None
             static_info, static_ids, static_limits = build_static_bundle_contract(parsed_static)
 
         known_limitations = self._build_known_limitations(

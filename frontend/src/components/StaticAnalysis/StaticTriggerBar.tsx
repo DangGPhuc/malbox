@@ -10,7 +10,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { StaticAnalysisResult } from '../../types';
-import { classifyStaticStatus } from './utils';
+import { ACTIVE_STATIC_STATUSES, classifyStaticStatus } from './utils';
 
 interface TriggerErrorState {
   status?: number;
@@ -28,6 +28,7 @@ interface StaticTriggerBarProps {
   onTriggerRun: (reportingToken: string) => Promise<void>;
   onRefresh: () => void;
   onStopPolling?: () => void;
+  onResumePolling?: () => void;
 }
 
 export function mapStaticTriggerError(errStatus: number | undefined, message: string): TriggerErrorState {
@@ -82,6 +83,7 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
   onTriggerRun,
   onRefresh,
   onStopPolling,
+  onResumePolling,
 }) => {
   const [panelOpen, setPanelOpen] = useState(false);
   // Stored strictly in transient component state — never written to localStorage, URLs, or logs.
@@ -91,10 +93,24 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
   const prov = staticData?.provenance;
   const isDisabled = meta.isDisabledByConfig;
   const missingToken = reportingToken.trim().length === 0;
+  const latestAttempt = prov?.latest_attempt;
+  const usableEvidence = prov?.usable_evidence;
+  const showingPreserved = Boolean(prov?.showing_preserved_usable_evidence);
+  const hasActiveOwnAttempt = Boolean(
+    meta.isActiveJob ||
+      (latestAttempt &&
+        latestAttempt.same_analysis !== false &&
+        ACTIVE_STATIC_STATUSES.includes(latestAttempt.status))
+  );
+  const hasDistinctAttemptWarning = Boolean(
+    latestAttempt &&
+      latestAttempt.same_analysis !== false &&
+      (showingPreserved || (usableEvidence && latestAttempt.status !== usableEvidence.status))
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (missingToken || triggering || meta.isActiveJob || isDisabled) return;
+    if (missingToken || triggering || hasActiveOwnAttempt || isDisabled) return;
     void onTriggerRun(reportingToken);
   };
 
@@ -116,6 +132,25 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
               Ghidra Static Provenance & Containment
             </h2>
             <span className={`badge ${meta.badgeClass}`}>{meta.label}</span>
+            {showingPreserved && usableEvidence && (
+              <span className="badge badge-clean">
+                Usable Evidence Preserved ({usableEvidence.status})
+              </span>
+            )}
+            {latestAttempt && latestAttempt.same_analysis !== false && !latestAttempt.is_usable && (
+              <span
+                className={`badge ${
+                  ACTIVE_STATIC_STATUSES.includes(latestAttempt.status) ? 'badge-info' : 'badge-malicious'
+                }`}
+              >
+                Latest Attempt: {latestAttempt.status}
+              </span>
+            )}
+            {latestAttempt && latestAttempt.same_analysis === false && ACTIVE_STATIC_STATUSES.includes(latestAttempt.status) && (
+              <span className="badge badge-neutral">
+                Sibling Analysis Active ({latestAttempt.status})
+              </span>
+            )}
             <span className="badge badge-clean">
               <ShieldCheck size={12} aria-hidden="true" />
               STATIC — BINARY NOT EXECUTED
@@ -191,12 +226,22 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
             </button>
           )}
 
+          {!isPolling && hasActiveOwnAttempt && onResumePolling && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={onResumePolling}
+            >
+              Resume Polling
+            </button>
+          )}
+
           <button
             type="button"
             className="btn btn-primary btn-sm"
             onClick={() => setPanelOpen((prev) => !prev)}
             aria-expanded={panelOpen}
-            disabled={isDisabled || meta.isActiveJob}
+            disabled={isDisabled || hasActiveOwnAttempt}
             title={
               isDisabled
                 ? 'Disabled on server (MALBOX_GHIDRA_ENABLED=false)'
@@ -204,7 +249,7 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
             }
           >
             <Play size={14} aria-hidden="true" />
-            {meta.isActiveJob ? `Static Job ${staticData?.status}...` : 'Run Static Analysis'}
+            {hasActiveOwnAttempt ? `Static Job ${latestAttempt?.status ?? staticData?.status}...` : 'Run Static Analysis'}
           </button>
         </div>
       </div>
@@ -239,6 +284,26 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
           }}
         >
           Static analysis status: <strong>{staticData?.status}</strong> — polling bounded single-worker queue until terminal state...
+        </div>
+      )}
+
+      {hasDistinctAttemptWarning && latestAttempt && (
+        <div
+          role="status"
+          style={{
+            marginTop: '0.75rem',
+            padding: '0.6rem 0.85rem',
+            borderRadius: '6px',
+            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            fontSize: '0.8rem',
+            color: '#fde68a',
+          }}
+        >
+          <strong>Latest Attempt ({latestAttempt.status}) vs. Usable Evidence ({usableEvidence?.status ?? staticData?.status}):</strong>{' '}
+          {ACTIVE_STATIC_STATUSES.includes(latestAttempt.status)
+            ? `A newer static job (${latestAttempt.job_id || 'active'}) is in progress; displaying last usable verified evidence until it finishes.`
+            : `Newer attempt (${latestAttempt.job_id || 'retry'}) ended with ${latestAttempt.status}${latestAttempt.error_message ? ` (${latestAttempt.error_message})` : ''}; displaying preserved last usable verified evidence.`}
         </div>
       )}
 
@@ -283,7 +348,7 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
             <button
               type="submit"
               className="btn btn-primary btn-sm"
-              disabled={missingToken || triggering || meta.isActiveJob}
+              disabled={missingToken || triggering || hasActiveOwnAttempt}
             >
               {triggering ? 'Queuing...' : 'Queue Ghidra Run'}
             </button>

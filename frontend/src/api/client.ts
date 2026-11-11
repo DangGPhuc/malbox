@@ -209,8 +209,11 @@ export const api = {
     return res.json();
   },
 
-  async getStaticAnalysis(analysisId: string): Promise<StaticAnalysisResult> {
-    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/static-analysis`);
+  async getStaticAnalysis(analysisId: string, signal?: AbortSignal): Promise<StaticAnalysisResult> {
+    const res = await fetch(
+      `${BASE_URL}/analyses/${analysisId}/static-analysis`,
+      signal ? { signal } : undefined
+    );
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({ detail: `Failed to retrieve static analysis (${res.status})` }));
       const detail = typeof errBody?.detail === 'string' ? errBody.detail : 'Failed to retrieve static analysis';
