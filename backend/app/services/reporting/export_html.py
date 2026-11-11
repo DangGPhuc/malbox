@@ -8,84 +8,149 @@ def _esc(value: Any, default: str = "") -> str:
     return html.escape(str(value))
 
 
+def _is_valid_live_correlation(live_correlation: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(live_correlation, dict):
+        return False
+    prov = live_correlation.get("provenance")
+    fp = str((prov or {}).get("source_fingerprint") or "") if isinstance(prov, dict) else ""
+    status_val = str(live_correlation.get("status") or "")
+    return bool(fp and fp not in ("uncomputed", "failed") and status_val != "FAILED")
+
+
+def _adapt_live_correlation_source(
+    live_correlation: Dict[str, Any],
+    fallback_is_replay: bool,
+) -> Dict[str, Any]:
+    live_prov = live_correlation.get("provenance") if isinstance(live_correlation.get("provenance"), dict) else {}
+    live_lim = live_correlation.get("limitations") if isinstance(live_correlation.get("limitations"), dict) else {}
+    live_trunc = live_correlation.get("truncation") if isinstance(live_correlation.get("truncation"), dict) else {}
+
+    all_raw_findings = [f for f in (live_correlation.get("findings") or []) if isinstance(f, dict)]
+    max_rendered = 30
+    rendered_findings: List[Dict[str, Any]] = []
+    for f in all_raw_findings[:max_rendered]:
+        conf = f.get("confidence") if isinstance(f.get("confidence"), dict) else {}
+        rendered_findings.append(
+            {
+                "correlation_id": f.get("correlation_id"),
+                "rule_id": f.get("rule_id"),
+                "relationship": f.get("relationship"),
+                "relationship_summary": f.get("relationship_summary"),
+                "explanation": f.get("explanation"),
+                "confidence_score": conf.get("score"),
+                "confidence_level": conf.get("level"),
+                "behavioral_execution_directly_observed": f.get("behavioral_execution_directly_observed"),
+                "static_ref_ids": [r.get("ref_id") for r in (f.get("static_references") or []) if isinstance(r, dict)],
+                "dynamic_ref_ids": [r.get("ref_id") for r in (f.get("dynamic_references") or []) if isinstance(r, dict)],
+                "known_limitations": f.get("known_limitations") or [],
+            }
+        )
+
+    return {
+        "status": live_correlation.get("status", "INSUFFICIENT_EVIDENCE"),
+        "source_fingerprint": live_prov.get("source_fingerprint"),
+        "is_replay": bool(live_prov.get("is_replay", fallback_is_replay)),
+        "is_stale": bool(live_prov.get("is_stale", False)),
+        "trace_verification_mode": live_prov.get("trace_verification_mode", "no_authenticated_runtime_trace"),
+        "has_runtime_function_trace": bool(live_lim.get("has_runtime_function_trace", False)),
+        "summary": live_correlation.get("summary") if isinstance(live_correlation.get("summary"), dict) else {},
+        "findings": rendered_findings,
+        "limitations": live_lim.get("items") or [],
+        "warnings": live_correlation.get("warnings") or [],
+        "errors": live_correlation.get("errors") or [],
+        "truncated": bool(live_trunc.get("truncated", False) or len(all_raw_findings) > max_rendered),
+        "disclaimer": live_correlation.get("disclaimer"),
+    }
+
+
 def _render_correlation_html_section(
     corr_summary: Optional[Dict[str, Any]],
     live_correlation: Optional[Dict[str, Any]],
     fallback_is_replay: bool,
+    current_correlation_fingerprint: Optional[str] = None,
 ) -> str:
     """
-    Renders a sanitized, CSP-safe Static/Dynamic Correlation Assessment HTML block.
+    Renders a sanitized, CSP-safe Static/Dynamic Correlation Assessment HTML block
+    using ONE coherent correlation source (never mixing fields across fingerprints).
     Returns empty string cleanly for legacy reports lacking correlation metadata.
     """
-    src: Optional[Dict[str, Any]] = corr_summary if isinstance(corr_summary, dict) else None
-    live_prov = (live_correlation or {}).get("provenance") if isinstance(live_correlation, dict) else None
-    live_lim = (live_correlation or {}).get("limitations") if isinstance(live_correlation, dict) else None
+    has_snapshot = isinstance(corr_summary, dict)
+    is_valid_live = _is_valid_live_correlation(live_correlation)
+    is_failed_live = isinstance(live_correlation, dict) and str(live_correlation.get("status") or "") == "FAILED"
 
-    if src is None and isinstance(live_correlation, dict):
-        # Adapt live CorrelationResult safely when intel section was legacy/absent
-        raw_findings = []
-        for f in (live_correlation.get("findings") or [])[:12]:
-            if not isinstance(f, dict):
-                continue
-            conf = f.get("confidence") or {}
-            raw_findings.append(
-                {
-                    "correlation_id": f.get("correlation_id"),
-                    "rule_id": f.get("rule_id"),
-                    "relationship": f.get("relationship"),
-                    "relationship_summary": f.get("relationship_summary"),
-                    "explanation": f.get("explanation"),
-                    "confidence_score": conf.get("score"),
-                    "confidence_level": conf.get("level"),
-                    "behavioral_execution_directly_observed": f.get("behavioral_execution_directly_observed"),
-                    "static_ref_ids": [r.get("ref_id") for r in (f.get("static_references") or []) if isinstance(r, dict)],
-                    "dynamic_ref_ids": [r.get("ref_id") for r in (f.get("dynamic_references") or []) if isinstance(r, dict)],
-                    "known_limitations": f.get("known_limitations") or [],
-                }
+    src: Optional[Dict[str, Any]] = None
+    coherence_notes: List[str] = []
+    force_stale = False
+
+    if is_valid_live and live_correlation is not None:
+        # Coherent live correlation always supersedes older report snapshot — even when findings=[]
+        src = _adapt_live_correlation_source(live_correlation, fallback_is_replay)
+        if has_snapshot and isinstance(corr_summary, dict):
+            snap_fp = corr_summary.get("source_fingerprint")
+            snap_cnt = len(corr_summary.get("findings") or [])
+            live_fp = src.get("source_fingerprint")
+            if (snap_fp and snap_fp != live_fp) or (snap_cnt > 0 and len(src["findings"]) == 0):
+                coherence_notes.append(
+                    f"Coherent persisted correlation ({live_fp or 'n/a'}) supersedes prior report snapshot "
+                    f"({snap_fp or 'legacy'}; {snap_cnt} snapshot finding(s))."
+                )
+    elif has_snapshot and isinstance(corr_summary, dict):
+        # Strictly self-contained stored snapshot (never overwrite fields with uncomputed/failed live values)
+        src = dict(corr_summary)
+        snap_fp = str(src.get("source_fingerprint") or "")
+        if (
+            current_correlation_fingerprint
+            and current_correlation_fingerprint not in ("", "uncomputed", "failed")
+            and snap_fp
+            and snap_fp != current_correlation_fingerprint
+        ):
+            force_stale = True
+            coherence_notes.append(
+                f"Stored report snapshot (fingerprint {snap_fp or 'n/a'}) no longer matches current evidence "
+                f"(fingerprint {current_correlation_fingerprint or 'n/a'}); marked STALE."
             )
-        src = {
-            "status": live_correlation.get("status", "INSUFFICIENT_EVIDENCE"),
-            "source_fingerprint": (live_prov or {}).get("source_fingerprint"),
-            "is_replay": bool((live_prov or {}).get("is_replay", fallback_is_replay)),
-            "is_stale": bool((live_prov or {}).get("is_stale", False)),
-            "trace_verification_mode": (live_prov or {}).get("trace_verification_mode", "no_authenticated_runtime_trace"),
-            "has_runtime_function_trace": bool((live_lim or {}).get("has_runtime_function_trace", False)),
-            "summary": live_correlation.get("summary") or {},
-            "findings": raw_findings,
-            "limitations": (live_lim or {}).get("items") or [],
-            "warnings": live_correlation.get("warnings") or [],
-            "truncated": bool(((live_correlation.get("truncation") or {}).get("truncated", False))),
-            "disclaimer": live_correlation.get("disclaimer"),
-        }
+        if is_failed_live and live_correlation is not None:
+            force_stale = True
+            errs = "; ".join(str(e) for e in (live_correlation.get("errors") or [])[:2])
+            coherence_notes.append(
+                "Latest correlation recomputation failed; displaying coherent stored report snapshot as STALE"
+                + (f" ({errs})." if errs else ".")
+            )
+    elif is_failed_live and live_correlation is not None:
+        src = _adapt_live_correlation_source(live_correlation, fallback_is_replay)
+        force_stale = True
 
     if not isinstance(src, dict):
         return ""
 
     status_val = _esc(src.get("status"), "INSUFFICIENT_EVIDENCE")
     is_replay_corr = bool(src.get("is_replay", fallback_is_replay))
-    is_stale = bool((live_prov or {}).get("is_stale", src.get("is_stale", False)))
-    trace_mode = _esc(
-        (live_prov or {}).get("trace_verification_mode") or src.get("trace_verification_mode"),
-        "no_authenticated_runtime_trace",
-    )
-    has_trace = bool((live_lim or {}).get("has_runtime_function_trace", src.get("has_runtime_function_trace", False)))
-    src_fp = _esc((live_prov or {}).get("source_fingerprint") or src.get("source_fingerprint"), "n/a")
+    is_stale = bool(src.get("is_stale", False)) or force_stale
+    trace_mode = _esc(src.get("trace_verification_mode"), "no_authenticated_runtime_trace")
+    has_trace = bool(src.get("has_runtime_function_trace", False))
+    src_fp = _esc(src.get("source_fingerprint"), "n/a")
     truncated = bool(src.get("truncated", False))
-    summary = src.get("summary") or {}
+    summary = src.get("summary") if isinstance(src.get("summary"), dict) else {}
     findings = src.get("findings") or []
-    limitations = src.get("limitations") or []
-    warnings = src.get("warnings") or []
+    limitations = list(src.get("limitations") or [])
+    warnings = list(src.get("warnings") or []) + [
+        f"Latest correlation error: {e}" for e in (src.get("errors") or [])[:3]
+    ]
     disclaimer = _esc(
         src.get("disclaimer"),
         "Static code capabilities remain distinct from proven runtime execution.",
     )
 
-    total_c = int(summary.get("total_findings") or len(findings))
-    direct_c = int(summary.get("directly_observed_count") or 0)
-    cons_c = int(summary.get("consistent_with_count") or 0)
-    contra_c = int(summary.get("contradictory_count") or 0)
-    insuf_c = int(summary.get("insufficient_evidence_count") or 0)
-    syn_c = int(summary.get("synthetic_scenario_only_count") or 0)
+    def _cnt(key: str, default: int = 0) -> int:
+        val = summary.get(key)
+        return int(val) if isinstance(val, (int, float)) else default
+
+    total_c = _cnt("total_findings", len(findings))
+    direct_c = _cnt("directly_observed_count", 0)
+    cons_c = _cnt("consistent_with_count", 0)
+    contra_c = _cnt("contradictory_count", 0)
+    insuf_c = _cnt("insufficient_evidence_count", 0)
+    syn_c = _cnt("synthetic_scenario_only_count", 0)
 
     prov_pill = (
         "<span class='pill pill-warn'>SYNTHETIC SCENARIO ONLY — UPLOADED BINARY NOT EXECUTED</span>"
@@ -141,6 +206,7 @@ def _render_correlation_html_section(
 
     lims_html = "".join(f"<li>{_esc(item)}</li>" for item in limitations)
     warns_html = "".join(f"<li>{_esc(w)}</li>" for w in warnings)
+    coherence_html = "".join(f"<div class='muted'>{_esc(n)}</div>" for n in coherence_notes)
 
     return f"""
     <section class="card">
@@ -149,6 +215,7 @@ def _render_correlation_html_section(
             {prov_pill} {stale_pill} {trace_pill} {trunc_pill}<br>
             <span>Status: <strong>{status_val}</strong> | Trace Verification: <code class="mono-wrap">{trace_mode}</code> | Fingerprint: <code class="mono-wrap">{src_fp}</code></span><br>
             <span>Counts — Total: <strong>{total_c}</strong> | Directly Observed: <strong>{direct_c}</strong> | Consistent: <strong>{cons_c}</strong> | Contradictory: <strong>{contra_c}</strong> | Insufficient: <strong>{insuf_c}</strong> | Synthetic Only: <strong>{syn_c}</strong></span><br>
+            {coherence_html}
             <span class="muted">{disclaimer}</span>
         </div>
         <ul class="claims-list">{finding_rows or '<li class="muted">No correlated static/dynamic relationships recorded.</li>'}</ul>
@@ -160,6 +227,7 @@ def _render_correlation_html_section(
 def generate_html_report(
     report_data: Dict[str, Any],
     live_correlation: Optional[Dict[str, Any]] = None,
+    current_correlation_fingerprint: Optional[str] = None,
 ) -> str:
     """
     Renders and exports a secure, standalone, print-friendly HTML intelligence report with
@@ -410,6 +478,7 @@ def generate_html_report(
         (intel or {}).get("correlation_summary") if isinstance(intel, dict) else None,
         live_correlation=live_correlation,
         fallback_is_replay=is_replay,
+        current_correlation_fingerprint=current_correlation_fingerprint,
     )
 
     findings_rows = ""

@@ -10,6 +10,7 @@ import {
   LucideIcon,
 } from 'lucide-react';
 import { api } from '../api/client';
+import { runBoundedEventLookup } from '../utils/eventLookup';
 import {
   AnalysisEvent,
   ArtifactItem,
@@ -64,11 +65,29 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const mountedRef = useRef(true);
+  const analysisEpochRef = useRef(0);
+  const reportReqSeqRef = useRef(0);
+  const latestReportReqSeqRef = useRef(0);
+  const evidenceClickSeqRef = useRef(0);
+  const reportAbortRef = useRef<AbortController | null>(null);
+
   const eventsCacheRef = useRef<AnalysisEvent[]>([]);
   const eventsNextPageRef = useRef<number>(1);
   const eventsExhaustedRef = useRef<boolean>(false);
   const activeSectionRef = useRef<ReportViewTab>('all');
   const beforePrintSectionRef = useRef<ReportViewTab | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      analysisEpochRef.current += 1;
+      evidenceClickSeqRef.current += 1;
+      reportAbortRef.current?.abort();
+      reportAbortRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     activeSectionRef.current = activeSection;
@@ -110,6 +129,12 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   }, []);
 
   const fetchReport = useCallback(async () => {
+    reportAbortRef.current?.abort();
+    const controller = new AbortController();
+    reportAbortRef.current = controller;
+    const myEpoch = analysisEpochRef.current;
+    const mySeq = ++reportReqSeqRef.current;
+
     try {
       setLoading(true);
       setLoadError(null);
@@ -117,11 +142,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
       setCorrelationLoading(true);
       const staticPromise =
         typeof api.getStaticAnalysis === 'function'
-          ? api.getStaticAnalysis(analysisId).catch(() => null)
+          ? api.getStaticAnalysis(analysisId, controller.signal).catch(() => null)
           : Promise.resolve(null);
       const corrPromise =
         typeof api.getCorrelation === 'function'
-          ? api.getCorrelation(analysisId).catch(() => null)
+          ? api.getCorrelation(analysisId, controller.signal).catch(() => null)
           : Promise.resolve(null);
       const [rep, arts, staticRes, corrRes] = await Promise.all([
         api.getReport(analysisId),
@@ -129,35 +154,64 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         staticPromise,
         corrPromise,
       ]);
+
+      if (
+        !mountedRef.current ||
+        controller.signal.aborted ||
+        myEpoch !== analysisEpochRef.current ||
+        mySeq < latestReportReqSeqRef.current
+      ) {
+        return;
+      }
+      latestReportReqSeqRef.current = mySeq;
       setReportData(rep);
       setArtifacts(arts);
       setStaticData(staticRes);
       setCorrelationData(corrRes);
     } catch (err) {
+      if (
+        !mountedRef.current ||
+        controller.signal.aborted ||
+        myEpoch !== analysisEpochRef.current
+      ) {
+        return;
+      }
       setLoadError(err instanceof Error ? err.message : 'Unable to load analysis report.');
     } finally {
-      setLoading(false);
-      setStaticLoading(false);
-      setCorrelationLoading(false);
+      if (reportAbortRef.current === controller) {
+        reportAbortRef.current = null;
+      }
+      if (mountedRef.current && myEpoch === analysisEpochRef.current) {
+        setLoading(false);
+        setStaticLoading(false);
+        setCorrelationLoading(false);
+      }
     }
   }, [analysisId]);
 
   useEffect(() => {
+    analysisEpochRef.current += 1;
+    evidenceClickSeqRef.current += 1;
+    latestReportReqSeqRef.current = reportReqSeqRef.current;
     eventsCacheRef.current = [];
     eventsNextPageRef.current = 1;
     eventsExhaustedRef.current = false;
+
+    setReportData(null);
+    setArtifacts([]);
+    setStaticData(null);
+    setCorrelationData(null);
     setEventsCache([]);
     setSelectedEvidenceId(null);
+    setLoadingEvents(false);
     setEventsFetchError(null);
     void fetchReport();
   }, [fetchReport]);
 
   const ensureEventsLoaded = useCallback(
     async (targetEvidenceId: string) => {
-      if (eventsExhaustedRef.current || loadingEvents) return;
-      if (eventsCacheRef.current.some((e) => e.id === targetEvidenceId)) return;
-      // Sample/artifact/finding references resolve cleanly without fetching /events unless needed
-      if (
+      // Sample/artifact/finding/correlation references resolve locally without fetching /events
+      const isStaticLocalRef =
         targetEvidenceId.startsWith('sample:') ||
         targetEvidenceId.startsWith('artifact:') ||
         targetEvidenceId.startsWith('finding:') ||
@@ -165,52 +219,43 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         targetEvidenceId.startsWith('corr:') ||
         reportData?.full_report.findings.some(
           (f) => f.id === targetEvidenceId || f.rule_id === targetEvidenceId
-        )
-      ) {
+        );
+
+      if (isStaticLocalRef) {
+        evidenceClickSeqRef.current += 1;
+        setLoadingEvents(false);
+        setEventsFetchError(null);
         return;
       }
 
-      setLoadingEvents(true);
-      setEventsFetchError(null);
-      try {
-        const seen = new Set(eventsCacheRef.current.map((e) => e.id));
-        const merged = [...eventsCacheRef.current];
-        const maxPagesPerClick = 5;
-        let fetched = 0;
-
-        while (!eventsExhaustedRef.current && fetched < maxPagesPerClick) {
-          const page = eventsNextPageRef.current;
-          const res = await api.getEvents(analysisId, { page, page_size: 200 });
-          eventsNextPageRef.current = page + 1;
-          fetched += 1;
-
-          for (const item of res.items) {
-            if (!seen.has(item.id)) {
-              seen.add(item.id);
-              merged.push(item);
-            }
-          }
-
-          if (res.items.length === 0 || merged.length >= res.total) {
-            eventsExhaustedRef.current = true;
-          }
-
-          if (res.items.some((e) => e.id === targetEvidenceId)) {
-            break;
-          }
-        }
-
-        eventsCacheRef.current = merged;
-        setEventsCache(merged);
-      } catch (err) {
-        setEventsFetchError(
-          err instanceof Error ? err.message : 'Failed to fetch telemetry events from backend.'
-        );
-      } finally {
-        setLoadingEvents(false);
-      }
+      await runBoundedEventLookup({
+        analysisId,
+        targetEventId: targetEvidenceId,
+        mountedRef,
+        epochRef: analysisEpochRef,
+        clickSeqRef: evidenceClickSeqRef,
+        cacheRef: eventsCacheRef,
+        nextPageRef: eventsNextPageRef,
+        exhaustedRef: eventsExhaustedRef,
+        onStart: () => {
+          setLoadingEvents(true);
+          setEventsFetchError(null);
+        },
+        onEventsMerged: (items) => {
+          setEventsCache(items);
+        },
+        onComplete: () => {
+          setEventsFetchError(null);
+        },
+        onError: (msg) => {
+          setEventsFetchError(msg);
+        },
+        onFinally: () => {
+          setLoadingEvents(false);
+        },
+      });
     },
-    [analysisId, loadingEvents, reportData]
+    [analysisId, reportData]
   );
 
   const handleInspectEvidence = useCallback(
@@ -324,9 +369,15 @@ export const ReportPage: React.FC<ReportPageProps> = ({
           fullReport={full_report}
           events={eventsCache}
           artifacts={artifacts}
+          liveCorrelation={correlationData}
           loadingEvents={loadingEvents}
           eventsFetchError={eventsFetchError}
-          onClose={() => setSelectedEvidenceId(null)}
+          onClose={() => {
+            evidenceClickSeqRef.current += 1;
+            setSelectedEvidenceId(null);
+            setLoadingEvents(false);
+            setEventsFetchError(null);
+          }}
           onSelectEvidence={handleInspectEvidence}
         />
       )}

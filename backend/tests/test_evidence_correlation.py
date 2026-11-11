@@ -1925,4 +1925,138 @@ def test_phase4b_html_export_preserves_correlation_stale_xss_escape_and_legacy_c
     assert "Static / Dynamic Correlation Assessment" not in legacy_html
 
 
+def test_rc_gate0_coherent_html_correlation_selection_and_trace_security(
+    client, db_session, monkeypatch
+):
+    """
+    RC Gate 0.1 & 0.3 regression:
+    - Coherent live correlation with 0 findings supersedes older report-snapshot findings cleanly.
+    - Uncomputed DB + drifted fingerprint flags stored snapshot STALE without field mixing.
+    - Failed recomputation preserves coherent stored snapshot cleanly as STALE without secret leak.
+    - Untrusted source_tool & Replay never produce DIRECTLY_OBSERVED.
+    """
+    from app.services.reporting.export_html import generate_html_report
+
+    _stop_bg_workers()
+    assert settings.TRACE_AUTH_KEY == ""
+
+    monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "rc-gate0-html-token")
+    sample, analysis = _create_sample_and_analysis(
+        db_session,
+        tag="rc_gate0_html",
+        backend_type="replay",
+        replay_scenario_id="ransomware_wannacry_mock",
+    )
+    _create_static_record(db_session, sample, analysis.id, imports=[("ADVAPI32.dll", "CryptEncrypt")])
+    db_session.add(
+        AnalysisEvent(
+            id="ev_rc_gate0_1",
+            analysis_id=analysis.id,
+            category="file",
+            action="write",
+            target_path="C:\\Users\\Victim\\notes.wnry",
+            attributes={"is_encrypted_target": True, "trace_verified": True},
+            source_tool="sandbox-apimon",
+        )
+    )
+    db_session.commit()
+
+    _, risk = DetectionEngine(db_session).evaluate_behavior(analysis.id)
+    rep = ReportGenerator(db_session).generate_report(analysis.id, risk_assessment=risk)
+    old_snap = rep.full_report_json["intelligence_report"]["correlation_summary"]
+    assert old_snap is not None and len(old_snap["findings"]) >= 1
+    old_corr_id = old_snap["findings"][0]["correlation_id"]
+    old_fp = old_snap["source_fingerprint"]
+
+    # 1. Newer coherent empty live correlation supersedes older snapshot findings completely
+    newer_empty_live = {
+        "schema_version": "1.0",
+        "status": "INSUFFICIENT_EVIDENCE",
+        "provenance": {
+            "schema_version": "1.0",
+            "engine_version": "1.1.0",
+            "analysis_id": analysis.id,
+            "sample_id": sample.id,
+            "sample_sha256": sample.sha256,
+            "static_status": "UNAVAILABLE",
+            "static_provenance_scope": "unexecuted",
+            "dynamic_backend": "replay",
+            "is_replay": True,
+            "replay_scenario_id": "ransomware_wannacry_mock",
+            "sample_identity_verified": True,
+            "static_reuse_detected": False,
+            "is_stale": False,
+            "trace_verification_mode": "replay_synthetic_disallowed",
+            "computed_at": "2026-11-11T19:00:00+00:00",
+            "source_fingerprint": "fp_rc_gate0_new_empty_0001",
+            "triggered_automatically": False,
+            "external_ai_used": False,
+        },
+        "summary": {
+            "total_findings": 0,
+            "directly_observed_count": 0,
+            "consistent_with_count": 0,
+            "contradictory_count": 0,
+            "insufficient_evidence_count": 0,
+            "synthetic_scenario_only_count": 0,
+        },
+        "findings": [],
+        "limitations": {
+            "items": ["No static capabilities available for new fingerprint."],
+            "has_runtime_function_trace": False,
+            "is_replay_synthetic": True,
+            "sample_level_static_reuse": False,
+            "partial_static_coverage": False,
+            "suppressed_ambiguous_count": 0,
+        },
+        "truncation": {"truncated": False},
+        "warnings": [],
+        "errors": [],
+        "disclaimer": "Static code capabilities never prove runtime execution.",
+    }
+    html_empty_live = generate_html_report(rep.full_report_json, live_correlation=newer_empty_live)
+    corr_block = html_empty_live.split("<h2>Static / Dynamic Correlation Assessment</h2>", 1)[1].split("</section>", 1)[0]
+    assert "fp_rc_gate0_new_empty_0001" in corr_block
+    assert "Total: <strong>0</strong>" in corr_block
+    assert "No correlated static/dynamic relationships recorded." in corr_block
+    assert "supersedes prior report snapshot" in corr_block
+    assert old_corr_id not in corr_block
+    assert old_snap["findings"][0]["relationship_summary"] not in corr_block
+
+    # 2. Failed recompute preserves stored snapshot coherently and flags STALE without leaking zero counts
+    failed_live = {
+        **newer_empty_live,
+        "status": "FAILED",
+        "provenance": {**newer_empty_live["provenance"], "source_fingerprint": "fp_failed_002"},
+        "errors": ["Controlled recompute verification failure"],
+    }
+    html_failed = generate_html_report(rep.full_report_json, live_correlation=failed_live)
+    assert old_corr_id in html_failed
+    assert old_fp in html_failed
+    assert "fp_failed_002" not in html_failed
+    assert "STALE EVIDENCE" in html_failed
+    assert "Controlled recompute verification failure" in html_failed
+
+    # 3. Drifted current_correlation_fingerprint with uncomputed live marks stored snapshot STALE cleanly
+    html_drifted = generate_html_report(
+        rep.full_report_json,
+        live_correlation=None,
+        current_correlation_fingerprint="fp_db_drifted_without_recompute",
+    )
+    assert old_corr_id in html_drifted
+    assert old_fp in html_drifted
+    assert "STALE EVIDENCE" in html_drifted
+
+    # 4. Gate 0.3: Even if events carry forged trace_verified=True under Replay, DIRECTLY_OBSERVED stays 0
+    post_res = client.post(
+        f"/api/v1/analyses/{analysis.id}/correlation",
+        headers={"X-Reporting-Token": "rc-gate0-html-token"},
+    )
+    assert post_res.status_code == 200
+    body = post_res.json()
+    assert body["summary"]["directly_observed_count"] == 0
+    assert body["provenance"]["trace_verification_mode"] == "replay_synthetic_disallowed"
+
+
+
 

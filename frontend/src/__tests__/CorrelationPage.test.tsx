@@ -16,7 +16,7 @@ import {
 import { CorrelationPage } from '../pages/CorrelationPage';
 import { ReportPage } from '../pages/ReportPage';
 import { StaticAnalysisPage } from '../pages/StaticAnalysisPage';
-import { CorrelationResult } from '../types';
+import { AnalysisEvent, CorrelationResult } from '../types';
 import {
   createCorrelationBundleSectionFixture,
   createCorrelationFinding,
@@ -610,5 +610,375 @@ describe('Phase 4B — Correlation Explorer & Intelligence Report Integration', 
       expect(appView.container.querySelector('.corr-main-grid')).toBeInTheDocument();
       expect(appView.container.querySelector('.corr-kpi-grid')).toBeInTheDocument();
     });
+  });
+});
+
+describe('Release Candidate Gate 0 — Coherence & Async Lookup Fencing', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('0.1: supersedes old report snapshot completely when newer coherent live correlation has 0 findings, handles FAILED/uncomputed safely, and exports coherently', async () => {
+    const rep = createWannaCryReplayReport();
+    rep.full_report.intelligence_report = {
+      ...rep.full_report.intelligence_report!,
+      correlation_summary: createCorrelationBundleSectionFixture({
+        source_fingerprint: 'fp-old-snapshot-111',
+        trace_verification_mode: 'replay_synthetic_disallowed',
+        findings: [
+          {
+            correlation_id: 'corr:old-snapshot-finding',
+            rule_id: 'CORR_FILE_CAPABILITY_VS_EVENTS',
+            relationship: 'SYNTHETIC_SCENARIO_ONLY',
+            relationship_summary: 'Legacy snapshot finding summary that must NOT render.',
+            explanation: 'Old explanation.',
+            confidence_score: 0.45,
+            confidence_level: 'low',
+            behavioral_execution_directly_observed: false,
+            static_ref_ids: ['imp:kernel32.dll:writefile'],
+            dynamic_ref_ids: ['ev-wc-1'],
+            known_limitations: [],
+          },
+        ],
+        summary: {
+          total_findings: 1,
+          directly_observed_count: 0,
+          consistent_with_count: 0,
+          contradictory_count: 0,
+          insufficient_evidence_count: 0,
+          synthetic_scenario_only_count: 1,
+        },
+      }),
+    };
+
+    const emptyLiveCorr = createCorrelationResult({
+      status: 'INSUFFICIENT_EVIDENCE',
+      findings: [],
+      summary: {
+        total_findings: 0,
+        directly_observed_count: 0,
+        consistent_with_count: 0,
+        contradictory_count: 0,
+        insufficient_evidence_count: 0,
+        synthetic_scenario_only_count: 0,
+      },
+      provenance: {
+        ...createCorrelationResult().provenance,
+        source_fingerprint: 'fp-new-empty-live-222',
+        is_stale: false,
+        trace_verification_mode: 'replay_synthetic_disallowed',
+      },
+    });
+
+    vi.spyOn(api, 'getReport').mockResolvedValue(rep);
+    vi.spyOn(api, 'getArtifacts').mockResolvedValue(wannacryArtifactsFixture);
+    vi.spyOn(api, 'getStaticAnalysis').mockRejectedValue(new Error('none'));
+    const corrSpy = vi.spyOn(api, 'getCorrelation').mockResolvedValue(emptyLiveCorr);
+
+    let capturedBlob: Blob | undefined;
+    const origCreateObjectURL = URL.createObjectURL;
+    URL.createObjectURL = vi.fn((blob: Blob) => {
+      capturedBlob = blob;
+      return 'blob:mock-rc-coherent';
+    });
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined);
+
+    try {
+      const view1 = render(<ReportPage analysisId="ana-wc-001" />);
+      expect((await screen.findAllByText(/fp-new-empty-live-222/)).length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/supersedes older report snapshot/i)).toBeInTheDocument();
+      expect(screen.getByText(/No correlated static\/dynamic relationships recorded/i)).toBeInTheDocument();
+      expect(screen.queryByText('corr:old-snapshot-finding')).not.toBeInTheDocument();
+      expect(screen.queryByText(/Legacy snapshot finding summary/i)).not.toBeInTheDocument();
+      expect(screen.getByText('Total: 0')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /Export JSON/i }));
+      expect(capturedBlob).toBeDefined();
+      const exported = JSON.parse(
+        await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.readAsText(capturedBlob!);
+        })
+      );
+      expect(exported.correlation_assessment.assessment_source).toBe('live');
+      expect(exported.correlation_assessment.findings).toEqual([]);
+      expect(exported.correlation_assessment.summary.total_findings).toBe(0);
+      expect(exported.correlation_assessment.provenance.source_fingerprint).toBe(
+        'fp-new-empty-live-222'
+      );
+      expect(
+        exported.correlation_assessment.provenance.superseded_snapshot.fingerprint
+      ).toBe('fp-old-snapshot-111');
+      view1.unmount();
+
+      // Recompute FAILED must preserve snapshot findings cohesively and mark STALE
+      const failedLiveCorr = createCorrelationResult({
+        status: 'FAILED',
+        findings: [],
+        provenance: {
+          ...createCorrelationResult().provenance,
+          source_fingerprint: 'fp-failed-333',
+        },
+        errors: ['Controlled recompute timeout in test'],
+      });
+      corrSpy.mockResolvedValueOnce(failedLiveCorr);
+      const view2 = render(<ReportPage analysisId="ana-wc-fail" />);
+      expect(await screen.findByText('corr:old-snapshot-finding')).toBeInTheDocument();
+      expect(screen.getByText(/Stale Snapshot — Recompute Failed/i)).toBeInTheDocument();
+      expect(screen.getByText(/STALE \(is_stale=true\)/i)).toBeInTheDocument();
+      expect(screen.queryByText('fp-failed-333')).not.toBeInTheDocument();
+      view2.unmount();
+
+      // Uncomputed live must NEVER overwrite stored snapshot fingerprint/trace mode
+      const repVerifiedSnap = createWannaCryReplayReport();
+      repVerifiedSnap.full_report.intelligence_report = {
+        ...repVerifiedSnap.full_report.intelligence_report!,
+        correlation_summary: createCorrelationBundleSectionFixture({
+          source_fingerprint: 'fp-stored-verified-444',
+          is_replay: false,
+          is_stale: true,
+          trace_verification_mode: 'hmac_sha256_verified',
+          has_runtime_function_trace: true,
+        }),
+      };
+      vi.spyOn(api, 'getReport').mockResolvedValueOnce(repVerifiedSnap);
+      corrSpy.mockResolvedValueOnce(
+        createCorrelationResult({
+          status: 'INSUFFICIENT_EVIDENCE',
+          provenance: {
+            ...createCorrelationResult().provenance,
+            source_fingerprint: 'uncomputed',
+            trace_verification_mode: 'no_authenticated_runtime_trace',
+          },
+        })
+      );
+      render(<ReportPage analysisId="ana-snap-uncomp" />);
+      expect(await screen.findByText(/fp-stored-verified-444/)).toBeInTheDocument();
+      expect(screen.getAllByText(/hmac_sha256_verified/).length).toBeGreaterThanOrEqual(1);
+      expect(screen.queryByText(/Source: uncomputed/i)).not.toBeInTheDocument();
+    } finally {
+      clickSpy.mockRestore();
+      URL.createObjectURL = origCreateObjectURL;
+    }
+  });
+
+  it('0.2: fences delayed /events and /report responses across analysisId switches, concurrent clicks, and unmount', async () => {
+    let resolveOldEvents!: (val: { total: number; page: number; page_size: number; items: AnalysisEvent[] }) => void;
+    let rejectSlowClick!: (err: Error) => void;
+    let resolveFastClick!: (val: { total: number; page: number; page_size: number; items: AnalysisEvent[] }) => void;
+
+    const corrOld = createCorrelationResult({
+      findings: [
+        createCorrelationFinding({
+          correlation_id: 'corr:old-ana',
+          dynamic_references: [
+            {
+              ref_id: 'ev-old-delayed',
+              evidence_kind: 'dynamic_event',
+              source_tool: 'sandbox-monitor',
+              timestamp: '2026-11-08T12:00:05Z',
+              summary: 'Old delayed ref',
+              is_synthetic: true,
+              trace_verified: false,
+              provenance_scope: null,
+            },
+          ],
+        }),
+      ],
+    });
+    const corrNew = createCorrelationResult({
+      findings: [
+        createCorrelationFinding({
+          correlation_id: 'corr:new-ana',
+          dynamic_references: [
+            {
+              ref_id: 'ev-slow-err',
+              evidence_kind: 'dynamic_event',
+              source_tool: 'sandbox-monitor',
+              timestamp: '2026-11-08T12:00:06Z',
+              summary: 'Slow failing ref',
+              is_synthetic: true,
+              trace_verified: false,
+              provenance_scope: null,
+            },
+            {
+              ref_id: 'ev-fast-ok',
+              evidence_kind: 'dynamic_event',
+              source_tool: 'sandbox-monitor',
+              timestamp: '2026-11-08T12:00:07Z',
+              summary: 'Fast succeeding ref',
+              is_synthetic: true,
+              trace_verified: false,
+              provenance_scope: null,
+            },
+          ],
+        }),
+      ],
+    });
+
+    vi.spyOn(api, 'getCorrelation').mockImplementation(async (aid) =>
+      aid === 'ana-old-race' ? corrOld : corrNew
+    );
+    vi.spyOn(api, 'getStaticAnalysis').mockRejectedValue(new Error('none'));
+
+    const eventsSpy = vi.spyOn(api, 'getEvents').mockImplementation((aid) => {
+      if (aid === 'ana-old-race') {
+        return new Promise((resolve) => {
+          resolveOldEvents = resolve;
+        });
+      }
+      if (eventsSpy.mock.calls.length === 2) {
+        return new Promise((_, reject) => {
+          rejectSlowClick = reject;
+        });
+      }
+      return new Promise((resolve) => {
+        resolveFastClick = resolve;
+      });
+    });
+
+    const { rerender, unmount } = render(<CorrelationPage analysisId="ana-old-race" />);
+    const oldRefBtn = (await screen.findAllByRole('button', { name: 'ev-old-delayed' }))[0];
+    fireEvent.click(oldRefBtn);
+
+    // Switch analysis BEFORE ana-old-race /events resolves
+    rerender(<CorrelationPage analysisId="ana-new-race" />);
+    const slowBtn = (await screen.findAllByRole('button', { name: 'ev-slow-err' }))[0];
+
+    // Resolve old analysis's delayed /events AFTER switching to ana-new-race -> must be ignored
+    resolveOldEvents({
+      total: 1,
+      page: 1,
+      page_size: 200,
+      items: [
+        {
+          id: 'ev-old-delayed',
+          analysis_id: 'ana-old-race',
+          category: 'file',
+          action: 'write',
+          timestamp: '2026-11-08T12:00:05Z',
+          process_id: 99,
+          process_name: 'old_malware.exe',
+          target_path: 'C:\\OLD_LEAKED_PATH.txt',
+          attributes: {},
+          source_tool: 'sandbox-fsmon',
+          confidence: 0.9,
+          created_at: '2026-11-08T12:00:05Z',
+        },
+      ],
+    });
+    await Promise.resolve();
+    expect(screen.queryByText(/OLD_LEAKED_PATH/)).not.toBeInTheDocument();
+
+    // Concurrent evidence clicks on ana-new-race: click slow failing ref, then immediately click fast OK ref
+    fireEvent.click(slowBtn);
+    const fastBtn = screen.getAllByRole('button', { name: 'ev-fast-ok' })[0];
+    fireEvent.click(fastBtn);
+
+    resolveFastClick({
+      total: 1,
+      page: 1,
+      page_size: 200,
+      items: [
+        {
+          id: 'ev-fast-ok',
+          analysis_id: 'ana-new-race',
+          category: 'network',
+          action: 'connect',
+          timestamp: '2026-11-08T12:00:07Z',
+          process_id: 222,
+          process_name: 'new_agent.exe',
+          target_path: '198.51.100.42:443',
+          attributes: {},
+          source_tool: 'sandbox-netmon',
+          confidence: 0.9,
+          created_at: '2026-11-08T12:00:07Z',
+        },
+      ],
+    });
+
+    expect(await screen.findByText(/198\.51\.100\.42:443/)).toBeInTheDocument();
+
+    // Late rejection from superseded first click MUST NOT overwrite ev-fast-ok or flash error
+    rejectSlowClick(new Error('Superseded delayed failure'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.getByText(/198\.51\.100\.42:443/)).toBeInTheDocument();
+    expect(screen.queryByText(/Superseded delayed failure/)).not.toBeInTheDocument();
+
+    // ReportPage concurrent evidence click race + unmount race safety
+    unmount();
+    vi.spyOn(api, 'getReport').mockResolvedValue(createWannaCryReplayReport());
+    vi.spyOn(api, 'getArtifacts').mockResolvedValue(wannacryArtifactsFixture);
+    vi.spyOn(api, 'getCorrelation').mockRejectedValue(new Error('none'));
+
+    let rejectRepSlow!: (e: Error) => void;
+    let resolveRepFast!: (v: { total: number; page: number; page_size: number; items: AnalysisEvent[] }) => void;
+    let repEvCall = 0;
+    vi.spyOn(api, 'getEvents').mockImplementation(() => {
+      repEvCall += 1;
+      if (repEvCall === 1) {
+        return new Promise((_, reject) => {
+          rejectRepSlow = reject;
+        });
+      }
+      return new Promise((resolve) => {
+        resolveRepFast = resolve;
+      });
+    });
+
+    const repRaceView = render(<ReportPage analysisId="ana-rep-race" />);
+    const wcEv1Btn = (await screen.findAllByRole('button', { name: /ev-wc-1/ }))[0];
+    const wcEv2Btn = screen.getAllByRole('button', { name: /ev-wc-2/ })[0];
+    fireEvent.click(wcEv1Btn);
+    fireEvent.click(wcEv2Btn);
+    resolveRepFast({
+      total: 1,
+      page: 1,
+      page_size: 200,
+      items: [
+        {
+          id: 'ev-wc-2',
+          analysis_id: 'ana-rep-race',
+          category: 'process',
+          action: 'spawn',
+          timestamp: '2026-11-08T12:00:05Z',
+          process_id: 777,
+          process_name: 'vssadmin.exe',
+          target_path: 'vssadmin delete shadows /safe_race',
+          attributes: {},
+          source_tool: 'sandbox-procmon',
+          confidence: 0.9,
+          created_at: '2026-11-08T12:00:05Z',
+        },
+      ],
+    });
+    expect(await screen.findByText(/vssadmin delete shadows \/safe_race/)).toBeInTheDocument();
+    rejectRepSlow(new Error('Report delayed ev-1 failure'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.queryByText(/Report delayed ev-1 failure/)).not.toBeInTheDocument();
+    repRaceView.unmount();
+
+    let resolveDelayedReport!: (r: ReturnType<typeof createWannaCryReplayReport>) => void;
+    vi.spyOn(api, 'getReport').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDelayedReport = resolve;
+        })
+    );
+    const repView = render(<ReportPage analysisId="ana-unmount-race" />);
+    repView.unmount();
+    resolveDelayedReport(createWannaCryReplayReport());
+    await Promise.resolve();
   });
 });

@@ -10,6 +10,7 @@ import {
   Shield,
 } from 'lucide-react';
 import { api, CorrelationApiError } from '../api/client';
+import { runBoundedEventLookup } from '../utils/eventLookup';
 import {
   CorrelationConfidencePanel,
   CorrelationEvidenceInspector,
@@ -82,6 +83,7 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
   const analysisEpochRef = useRef(0);
   const reqSeqRef = useRef(0);
   const latestAppliedSeqRef = useRef(0);
+  const evidenceClickSeqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const triggerLockRef = useRef(false);
 
@@ -94,6 +96,7 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
     return () => {
       mountedRef.current = false;
       analysisEpochRef.current += 1;
+      evidenceClickSeqRef.current += 1;
       abortRef.current?.abort();
       abortRef.current = null;
     };
@@ -156,6 +159,7 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
   // Strict read-only GET on mount or analysisId switch — NEVER auto-POSTs.
   useEffect(() => {
     analysisEpochRef.current += 1;
+    evidenceClickSeqRef.current += 1;
     latestAppliedSeqRef.current = reqSeqRef.current;
     triggerLockRef.current = false;
     eventsCacheRef.current = [];
@@ -166,6 +170,7 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
     setStaticData(null);
     setEventsCache([]);
     setInspectedDynamicRef(null);
+    setLoadingEvent(false);
     setEventLookupDone(false);
     setEventError(null);
     setTriggerError(null);
@@ -242,7 +247,9 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
       const msg = err instanceof Error ? err.message : 'Correlation recompute failed.';
       setTriggerError(mapCorrelationTriggerError(errStatus, msg, retrySec));
     } finally {
-      triggerLockRef.current = false;
+      if (myEpoch === analysisEpochRef.current) {
+        triggerLockRef.current = false;
+      }
       if (mountedRef.current && myEpoch === analysisEpochRef.current) {
         setTriggering(false);
       }
@@ -266,55 +273,36 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
       setSelectedCorrelationId(finding.correlation_id);
       setInspectedDynamicRef(ref);
       setEventError(null);
-
-      if (eventsCacheRef.current.some((e) => e.id === ref.ref_id)) {
-        setEventLookupDone(true);
-        return;
-      }
-
-      if (eventsExhaustedRef.current) {
-        setEventLookupDone(true);
-        return;
-      }
-
-      setLoadingEvent(true);
       setEventLookupDone(false);
-      try {
-        const seen = new Set(eventsCacheRef.current.map((e) => e.id));
-        const merged = [...eventsCacheRef.current];
-        const maxPagesPerClick = 5;
-        let fetched = 0;
 
-        while (!eventsExhaustedRef.current && fetched < maxPagesPerClick) {
-          const page = eventsNextPageRef.current;
-          const res = await api.getEvents(analysisId, { page, page_size: 200 });
-          eventsNextPageRef.current = page + 1;
-          fetched += 1;
-
-          for (const item of res.items) {
-            if (!seen.has(item.id)) {
-              seen.add(item.id);
-              merged.push(item);
-            }
-          }
-          if (res.items.length === 0 || merged.length >= res.total) {
-            eventsExhaustedRef.current = true;
-          }
-          if (res.items.some((e) => e.id === ref.ref_id)) {
-            break;
-          }
-        }
-
-        eventsCacheRef.current = merged;
-        setEventsCache(merged);
-        setEventLookupDone(true);
-      } catch (err) {
-        setEventError(
-          err instanceof Error ? err.message : 'Unable to fetch telemetry events from backend.'
-        );
-      } finally {
-        setLoadingEvent(false);
-      }
+      await runBoundedEventLookup({
+        analysisId,
+        targetEventId: ref.ref_id,
+        mountedRef,
+        epochRef: analysisEpochRef,
+        clickSeqRef: evidenceClickSeqRef,
+        cacheRef: eventsCacheRef,
+        nextPageRef: eventsNextPageRef,
+        exhaustedRef: eventsExhaustedRef,
+        onStart: () => {
+          setLoadingEvent(true);
+          setEventLookupDone(false);
+          setEventError(null);
+        },
+        onEventsMerged: (items) => {
+          setEventsCache(items);
+        },
+        onComplete: () => {
+          setEventLookupDone(true);
+        },
+        onError: (msg) => {
+          setEventError(msg);
+          setEventLookupDone(true);
+        },
+        onFinally: () => {
+          setLoadingEvent(false);
+        },
+      });
     },
     [analysisId]
   );
@@ -519,7 +507,9 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
                 eventLookupDone={eventLookupDone}
                 eventError={eventError}
                 onCloseDynamicInspector={() => {
+                  evidenceClickSeqRef.current += 1;
                   setInspectedDynamicRef(null);
+                  setLoadingEvent(false);
                   setEventLookupDone(false);
                   setEventError(null);
                 }}

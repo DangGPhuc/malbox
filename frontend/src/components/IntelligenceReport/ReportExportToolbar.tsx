@@ -2,6 +2,7 @@ import React from 'react';
 import { Download, ExternalLink, Printer } from 'lucide-react';
 import { CorrelationResult, ReportResponse } from '../../types';
 import { api } from '../../api/client';
+import { isReplayReport, resolveCoherentCorrelationAssessment } from './utils';
 
 interface ReportExportToolbarProps {
   analysisId: string;
@@ -17,6 +18,12 @@ export const ReportExportToolbar: React.FC<ReportExportToolbarProps> = ({
   onPrintFullReport,
 }) => {
   const handleDownloadJSON = () => {
+    const coherent = resolveCoherentCorrelationAssessment(
+      reportData.full_report.intelligence_report?.correlation_summary ?? null,
+      correlationData,
+      isReplayReport(reportData)
+    );
+
     const exportPayload = {
       analysis_id: reportData.analysis_id,
       report_id: reportData.id,
@@ -28,8 +35,29 @@ export const ReportExportToolbar: React.FC<ReportExportToolbarProps> = ({
       replay_scenario_id:
         reportData.full_report.replay_scenario_id ?? reportData.replay_scenario_id ?? null,
       full_report: reportData.full_report,
-      ...(correlationData && correlationData.provenance.source_fingerprint !== 'uncomputed'
-        ? { correlation_assessment: correlationData }
+      ...(coherent.sourceKind !== 'none'
+        ? {
+            correlation_assessment: {
+              assessment_source: coherent.sourceKind,
+              status: coherent.status,
+              provenance: {
+                is_replay: coherent.isReplay,
+                is_stale: coherent.isStale,
+                source_fingerprint: coherent.sourceFingerprint,
+                trace_verification_mode: coherent.traceVerificationMode,
+                has_runtime_function_trace: coherent.hasRuntimeFunctionTrace,
+                superseded_snapshot: coherent.supersededSnapshot,
+                recompute_failed_error: coherent.recomputeFailedError,
+              },
+              summary: coherent.summary,
+              findings: coherent.findings,
+              limitations: coherent.limitations,
+              warnings: coherent.warnings,
+              errors: coherent.errors,
+              truncated: coherent.truncated,
+              disclaimer: coherent.disclaimer,
+            },
+          }
         : {}),
     };
 

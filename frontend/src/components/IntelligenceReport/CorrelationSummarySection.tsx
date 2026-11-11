@@ -18,6 +18,7 @@ import {
   getRelationshipMeta,
   getTraceVerificationMeta,
 } from '../Correlation/utils';
+import { resolveCoherentCorrelationAssessment } from './utils';
 
 interface CorrelationSummarySectionProps {
   analysisId: string;
@@ -48,92 +49,35 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
   onInspectEvidence,
   onOpenStaticFunction,
 }) => {
-  const effectiveIsReplay =
-    liveCorrelation?.provenance.is_replay ?? correlationSummary?.is_replay ?? isReplay;
-  const effectiveIsStale = Boolean(
-    liveCorrelation?.provenance.is_stale ?? correlationSummary?.is_stale ?? false
+  const coherent = resolveCoherentCorrelationAssessment(
+    correlationSummary,
+    liveCorrelation,
+    isReplay
   );
-  const effectiveTruncated = Boolean(
-    liveCorrelation?.truncation.truncated ?? correlationSummary?.truncated ?? false
-  );
-  const effectiveStatus =
-    liveCorrelation && liveCorrelation.provenance.source_fingerprint !== 'uncomputed'
-      ? liveCorrelation.status
-      : correlationSummary?.status;
-  const effectiveFp =
-    liveCorrelation?.provenance.source_fingerprint ??
-    correlationSummary?.source_fingerprint ??
-    null;
 
-  const traceMode =
-    liveCorrelation?.provenance.trace_verification_mode ??
-    correlationSummary?.trace_verification_mode ??
-    'no_authenticated_runtime_trace';
-  const hasTrace = Boolean(
-    liveCorrelation?.limitations.has_runtime_function_trace ??
-      correlationSummary?.has_runtime_function_trace ??
-      false
-  );
+  const effectiveIsReplay = coherent.isReplay;
+  const effectiveIsStale = coherent.isStale;
+  const effectiveTruncated = coherent.truncated;
+  const effectiveStatus = coherent.sourceKind === 'none' ? undefined : coherent.status;
+  const effectiveFp = coherent.sourceFingerprint;
+  const traceMode = coherent.traceVerificationMode;
+  const hasTrace = coherent.hasRuntimeFunctionTrace;
 
   const statusMeta = getCorrelationStatusMeta(effectiveStatus, effectiveFp);
   const traceMeta = getTraceVerificationMeta(traceMode, hasTrace, effectiveIsReplay);
 
-  // Merge compact summary counts cleanly from persisted report or live read-only status
-  const summaryCounts =
-    liveCorrelation && liveCorrelation.provenance.source_fingerprint !== 'uncomputed'
-      ? liveCorrelation.summary
-      : correlationSummary?.summary
-      ? {
-          total_findings: correlationSummary.summary.total_findings ?? correlationSummary.findings.length,
-          directly_observed_count: correlationSummary.summary.directly_observed_count ?? 0,
-          consistent_with_count: correlationSummary.summary.consistent_with_count ?? 0,
-          contradictory_count: correlationSummary.summary.contradictory_count ?? 0,
-          insufficient_evidence_count: correlationSummary.summary.insufficient_evidence_count ?? 0,
-          synthetic_scenario_only_count: correlationSummary.summary.synthetic_scenario_only_count ?? 0,
-        }
-      : null;
+  const hasSectionData = coherent.sourceKind !== 'none';
+  const summaryCounts = hasSectionData ? coherent.summary : null;
 
-  // Prefer live findings when freshly persisted, otherwise fall back cleanly to report correlation_summary
-  const priorityFindings = (() => {
-    if (
-      liveCorrelation &&
-      liveCorrelation.provenance.source_fingerprint !== 'uncomputed' &&
-      liveCorrelation.findings.length > 0
-    ) {
-      return [...liveCorrelation.findings]
-        .sort(
-          (a, b) =>
-            (PRIORITY_ORDER[a.relationship] ?? 9) - (PRIORITY_ORDER[b.relationship] ?? 9) ||
-            b.confidence.score - a.confidence.score
-        )
-        .slice(0, 5)
-        .map((f) => ({
-          correlation_id: f.correlation_id,
-          rule_id: f.rule_id,
-          relationship: f.relationship,
-          relationship_summary: f.relationship_summary,
-          confidence_score: f.confidence.score,
-          confidence_level: f.confidence.level,
-          behavioral_execution_directly_observed: f.behavioral_execution_directly_observed,
-          static_ref_ids: f.static_references.map((r) => r.ref_id).slice(0, 4),
-          dynamic_ref_ids: f.dynamic_references.map((r) => r.ref_id).slice(0, 4),
-        }));
-    }
-    if (correlationSummary && correlationSummary.findings.length > 0) {
-      return [...correlationSummary.findings]
+  const priorityFindings = hasSectionData
+    ? [...coherent.findings]
         .sort(
           (a, b) =>
             (PRIORITY_ORDER[a.relationship] ?? 9) - (PRIORITY_ORDER[b.relationship] ?? 9) ||
             b.confidence_score - a.confidence_score
         )
-        .slice(0, 5);
-    }
-    return [];
-  })();
-
-  const hasSectionData = Boolean(correlationSummary) || Boolean(
-    liveCorrelation && liveCorrelation.provenance.source_fingerprint !== 'uncomputed'
-  );
+        .slice(0, 5)
+    : [];
 
   return (
     <section
@@ -225,7 +169,40 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
         >
           <RefreshCw size={14} color="#f87171" aria-hidden="true" />
           <span>
-            <strong>Stale Correlation Warning:</strong> Underlying static/dynamic evidence changed since correlation was stored. Open Correlation Explorer to recompute cleanly.
+            {coherent.recomputeFailedError ? (
+              <>
+                <strong>Stale Snapshot — Recompute Failed:</strong> {coherent.recomputeFailedError}{' '}
+                Displaying coherent stored snapshot without mixing newer fields.
+              </>
+            ) : (
+              <>
+                <strong>Stale Correlation Warning:</strong> Underlying static/dynamic evidence changed since correlation was stored. Open Correlation Explorer to recompute cleanly.
+              </>
+            )}
+          </span>
+        </div>
+      )}
+
+      {coherent.supersededSnapshot && (
+        <div
+          role="status"
+          style={{
+            marginBottom: '0.65rem',
+            padding: '0.5rem 0.75rem',
+            borderRadius: '6px',
+            border: '1px solid rgba(56, 189, 248, 0.35)',
+            backgroundColor: 'rgba(14, 116, 144, 0.16)',
+            color: '#bae6fd',
+            fontSize: '0.8rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.45rem',
+          }}
+        >
+          <Info size={14} color="#38bdf8" aria-hidden="true" />
+          <span>
+            Coherent persisted correlation ({effectiveFp || 'live'}) supersedes older report snapshot (
+            {coherent.supersededSnapshot.fingerprint || 'legacy'}; {coherent.supersededSnapshot.priorFindingsCount} prior snapshot finding(s)).
           </span>
         </div>
       )}
@@ -261,11 +238,26 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
 
           {effectiveFp && (
             <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
-              Provenance Fingerprint: <code className="mono-wrap">{effectiveFp}</code> · Trace Status: <code className="mono">{traceMode}</code>
+              Provenance Fingerprint: <code className="mono-wrap">{effectiveFp}</code> · Source:{' '}
+              <code className="mono">{coherent.sourceKind}</code> · Trace Status:{' '}
+              <code className="mono">{traceMode}</code>
             </div>
           )}
 
-          {priorityFindings.length > 0 && (
+          {priorityFindings.length === 0 ? (
+            <div
+              style={{
+                padding: '0.65rem 0.75rem',
+                borderRadius: '7px',
+                border: '1px solid #1e293b',
+                backgroundColor: 'rgba(15, 23, 42, 0.45)',
+                fontSize: '0.82rem',
+                color: '#94a3b8',
+              }}
+            >
+              No correlated static/dynamic relationships recorded for this coherent assessment snapshot.
+            </div>
+          ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
               {priorityFindings.map((pf) => {
                 const relMeta = getRelationshipMeta(pf.relationship);
@@ -351,6 +343,14 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
             </div>
           )}
 
+          {coherent.limitations.length > 0 && (
+            <ul style={{ margin: '0.1rem 0 0 1.1rem', padding: 0, fontSize: '0.77rem', color: '#94a3b8', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+              {coherent.limitations.slice(0, 4).map((lim, idx) => (
+                <li key={idx}>{lim}</li>
+              ))}
+            </ul>
+          )}
+
           <div
             style={{
               padding: '0.5rem 0.7rem',
@@ -365,10 +365,7 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
             }}
           >
             <AlertTriangle size={14} color="#38bdf8" aria-hidden="true" />
-            <span>
-              {correlationSummary?.disclaimer ||
-                'Static code capabilities remain distinct from proven runtime execution; correlation confidence neither overrides deterministic risk scores nor AI analytical confidence.'}
-            </span>
+            <span>{coherent.disclaimer}</span>
           </div>
         </div>
       )}

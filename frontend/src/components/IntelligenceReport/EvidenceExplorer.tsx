@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { X, FileCode, AlertTriangle, CheckCircle2, Info } from 'lucide-react';
-import { AnalysisEvent, ArtifactItem, FullReport } from '../../types';
+import { AnalysisEvent, ArtifactItem, CorrelationResult, FullReport } from '../../types';
 import { formatDateTime, resolveEvidenceRecord } from './utils';
 
 interface EvidenceExplorerProps {
@@ -8,6 +8,7 @@ interface EvidenceExplorerProps {
   fullReport: FullReport;
   events: AnalysisEvent[];
   artifacts: ArtifactItem[];
+  liveCorrelation?: CorrelationResult | null;
   loadingEvents: boolean;
   eventsFetchError?: string | null;
   onClose: () => void;
@@ -19,6 +20,7 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
   fullReport,
   events,
   artifacts,
+  liveCorrelation = null,
   loadingEvents,
   eventsFetchError,
   onClose,
@@ -35,7 +37,13 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
 
   if (!selectedEvidenceId) return null;
 
-  const resolved = resolveEvidenceRecord(selectedEvidenceId, fullReport, events, artifacts);
+  const resolved = resolveEvidenceRecord(
+    selectedEvidenceId,
+    fullReport,
+    events,
+    artifacts,
+    liveCorrelation
+  );
 
   return (
     <aside

@@ -108,16 +108,20 @@ def get_analysis_report_html(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report has not been generated yet.")
 
     live_corr_dict = None
+    current_corr_fp = None
     try:
-        corr_ro = EvidenceCorrelationService(db).get_correlation_readonly(analysis_id)
+        corr_svc = EvidenceCorrelationService(db)
+        corr_ro = corr_svc.get_correlation_readonly(analysis_id)
         if corr_ro.provenance.source_fingerprint != "uncomputed":
             live_corr_dict = corr_ro.model_dump(mode="json")
+        current_corr_fp = corr_svc.engine.preview_source_fingerprint(analysis_id)
     except Exception:
         live_corr_dict = None
 
     html_content = generate_html_report(
         report_record.full_report_json,
         live_correlation=live_corr_dict,
+        current_correlation_fingerprint=current_corr_fp,
     )
     return HTMLResponse(content=html_content)
 
