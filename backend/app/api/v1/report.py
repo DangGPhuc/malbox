@@ -96,6 +96,7 @@ def get_analysis_report_html(
     db: Session = Depends(get_db),
 ):
     """Renders and exports a standalone HTML executive and forensic report."""
+    from app.services.evidence_correlation.service import EvidenceCorrelationService
     from app.services.reporting.export_html import generate_html_report
 
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
@@ -106,7 +107,18 @@ def get_analysis_report_html(
     if not report_record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report has not been generated yet.")
 
-    html_content = generate_html_report(report_record.full_report_json)
+    live_corr_dict = None
+    try:
+        corr_ro = EvidenceCorrelationService(db).get_correlation_readonly(analysis_id)
+        if corr_ro.provenance.source_fingerprint != "uncomputed":
+            live_corr_dict = corr_ro.model_dump(mode="json")
+    except Exception:
+        live_corr_dict = None
+
+    html_content = generate_html_report(
+        report_record.full_report_json,
+        live_correlation=live_corr_dict,
+    )
     return HTMLResponse(content=html_content)
 
 

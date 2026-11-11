@@ -60,11 +60,11 @@ EvidenceCorrelationEngine (engine.py)
 
 ---
 
-## 4. Proposed Phase 4B Correlation Explorer UI Contract (Planned Next Phase)
+## 4. Phase 4B Correlation Explorer UI & Report Integration
 
-Phase 4B frontend integration should remain strictly read-only on page load and reuse existing Phase 3B / Phase 2B.2 safety conventions:
+Implemented in [`CorrelationPage.tsx`](../../frontend/src/pages/CorrelationPage.tsx), [`components/Correlation/`](../../frontend/src/components/Correlation/index.ts), [`CorrelationSummarySection.tsx`](../../frontend/src/components/IntelligenceReport/CorrelationSummarySection.tsx), and [`export_html.py`](../../backend/app/services/reporting/export_html.py):
 
-1. **Data Contract**: Fetch `GET /api/v1/analyses/{analysis_id}/correlation` on mount (never auto-POSTing) and support optional manual refresh via `POST /api/v1/analyses/{analysis_id}/correlation` with transient in-memory `X-Reporting-Token` and `{ force }`.
-2. **Visual Distinction**: Render color-coded relationship badges (`DIRECTLY_OBSERVED`, `CONSISTENT_WITH`, `CONTRADICTORY`, `INSUFFICIENT_EVIDENCE`, `SYNTHETIC_SCENARIO_ONLY`), explicit `behavioral_execution_directly_observed` indicators, `sample_level_static_reuse` warnings, and Replay synthetic banners (`SYNTHETIC SCENARIO CONTEXT ONLY`).
-3. **Cross-Navigation Links**: Allow clicking static `func:<sha16>:<0xaddr>` references inside a correlation finding to jump directly to the Phase 3B `StaticAnalysisPage` inspector and clicking dynamic event UUIDs to open `EvidenceExplorer`.
+1. **Read-Only First & Ephemeral Authorization**: Mount calls `GET /api/v1/analyses/{analysis_id}/correlation` strictly read-only. Recomputation runs only on explicit operator click with in-memory `X-Reporting-Token` and explicit `force` option, keeping prior usable results intact on failure.
+2. **Classification & Provenance Clarity**: Distinct UI badges separate `DIRECTLY_OBSERVED` (strictly gated on backend-signed `MALBOX_TRACE_AUTH_KEY` proof + producer/session ownership), `CONSISTENT_WITH`, `CONTRADICTORY`, `INSUFFICIENT_EVIDENCE`, and Replay `SYNTHETIC_SCENARIO_ONLY` (`SYNTHETIC SCENARIO ONLY — UPLOADED BINARY NOT EXECUTED`), alongside explicit `is_stale` drift alerts and confidence-vs-risk separation banners.
+3. **Cross-Evidence Navigation, Bounded Graph & Exports**: Clicking `func:<sha16>:<0xaddr>` deep-links into [`StaticAnalysisPage.tsx`](../../frontend/src/pages/StaticAnalysisPage.tsx), clicking dynamic event IDs fetches raw telemetry records via bounded `/events` pagination, clicking `corr:...` IDs from Intelligence Report jumps into `CorrelationPage`, bounded lazy Cytoscape graph (`<= 36` nodes / `<= 48` edges) displays grounded links plus accessible textual equivalents, and JSON / HTML / Print exports preserve correlation metadata including `is_stale`, `trace_verification_mode`, Replay status, and legacy compatibility. See [`CORRELATION_EXPLORER_UI.md`](../ai/CORRELATION_EXPLORER_UI.md).
 

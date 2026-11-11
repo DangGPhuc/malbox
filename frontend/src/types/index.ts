@@ -336,6 +336,7 @@ export interface IntelligenceReport {
   limitations: string[];
   recommended_follow_up_actions: FollowUpAction[];
   evidence_truncation: TruncationMetadata;
+  correlation_summary?: CorrelationBundleSection | null;
   provider_metadata: AIProviderMetadata;
   validation_summary: ValidationSummary;
 }
@@ -654,4 +655,164 @@ export interface StaticAnalysisJobAcceptedResponse {
   analysis_id?: string | null;
   status: StaticAnalysisStatus | string;
   message: string;
+}
+
+// =========================================================================
+// Phase 4A / 4B Static-Dynamic Evidence Correlation Strictly Typed Contracts
+// =========================================================================
+
+export type CorrelationRelationship =
+  | 'DIRECTLY_OBSERVED'
+  | 'CONSISTENT_WITH'
+  | 'CONTRADICTORY'
+  | 'INSUFFICIENT_EVIDENCE'
+  | 'SYNTHETIC_SCENARIO_ONLY';
+
+export type CorrelationStatus =
+  | 'COMPLETED'
+  | 'PARTIAL'
+  | 'INSUFFICIENT_EVIDENCE'
+  | 'UNSUPPORTED'
+  | 'FAILED';
+
+export type CorrelationEvidenceKind =
+  | 'static_function'
+  | 'static_import'
+  | 'static_string'
+  | 'dynamic_event'
+  | 'behavioral_finding';
+
+export type CorrelationConfidenceLevel = 'high' | 'medium' | 'low';
+
+export interface CorrelationEvidenceReference {
+  ref_id: string;
+  evidence_kind: CorrelationEvidenceKind;
+  source_tool: string;
+  timestamp?: string | null;
+  summary: string;
+  is_synthetic: boolean;
+  trace_verified: boolean;
+  provenance_scope?: string | null;
+}
+
+export interface CorrelationConfidence {
+  score: number;
+  level: CorrelationConfidenceLevel;
+  rationale: string;
+}
+
+export interface CorrelationFinding {
+  correlation_id: string;
+  rule_id: string;
+  analysis_id: string;
+  sample_sha256: string;
+  static_references: CorrelationEvidenceReference[];
+  dynamic_references: CorrelationEvidenceReference[];
+  relationship: CorrelationRelationship;
+  relationship_summary: string;
+  explanation: string;
+  confidence: CorrelationConfidence;
+  known_limitations: string[];
+  behavioral_execution_directly_observed: boolean;
+}
+
+export interface CorrelationProvenance {
+  schema_version: string;
+  engine_version: string;
+  analysis_id: string;
+  sample_id: string;
+  sample_sha256: string;
+  static_record_id?: string | null;
+  static_analysis_id?: string | null;
+  static_status: string;
+  static_provenance_scope: string;
+  dynamic_backend: string;
+  is_replay: boolean;
+  replay_scenario_id?: string | null;
+  sample_identity_verified: boolean;
+  static_reuse_detected: boolean;
+  is_stale: boolean;
+  trace_verification_mode: string;
+  computed_at: string;
+  source_fingerprint: string;
+  triggered_automatically: boolean;
+  external_ai_used: false;
+}
+
+export interface CorrelationLimitations {
+  items: string[];
+  has_runtime_function_trace: boolean;
+  is_replay_synthetic: boolean;
+  sample_level_static_reuse: boolean;
+  partial_static_coverage: boolean;
+  suppressed_ambiguous_count: number;
+}
+
+export interface CorrelationTruncation {
+  truncated: boolean;
+  total_events_in_analysis: number;
+  events_scanned: number;
+  events_omitted: number;
+  functions_available: number;
+  functions_scanned: number;
+  candidate_relationships_evaluated: number;
+  findings_included: number;
+  findings_omitted: number;
+  max_events_limit: number;
+  max_functions_limit: number;
+  max_findings_limit: number;
+  max_serialized_bytes: number;
+  serialized_bytes: number;
+}
+
+export interface CorrelationSummary {
+  total_findings: number;
+  directly_observed_count: number;
+  consistent_with_count: number;
+  contradictory_count: number;
+  insufficient_evidence_count: number;
+  synthetic_scenario_only_count: number;
+}
+
+export interface CorrelationResult {
+  schema_version: string;
+  status: CorrelationStatus;
+  provenance: CorrelationProvenance;
+  summary: CorrelationSummary;
+  findings: CorrelationFinding[];
+  limitations: CorrelationLimitations;
+  truncation: CorrelationTruncation;
+  warnings: string[];
+  errors: string[];
+  disclaimer: string;
+}
+
+export interface CorrelationBundleFinding {
+  correlation_id: string;
+  rule_id: string;
+  relationship: CorrelationRelationship;
+  relationship_summary: string;
+  explanation: string;
+  confidence_score: number;
+  confidence_level: CorrelationConfidenceLevel;
+  behavioral_execution_directly_observed: boolean;
+  static_ref_ids: string[];
+  dynamic_ref_ids: string[];
+  known_limitations: string[];
+}
+
+export interface CorrelationBundleSection {
+  schema_version: string;
+  status: CorrelationStatus | string;
+  source_fingerprint?: string | null;
+  is_replay: boolean;
+  is_stale?: boolean;
+  trace_verification_mode?: string;
+  has_runtime_function_trace?: boolean;
+  summary: Partial<CorrelationSummary> & Record<string, number>;
+  findings: CorrelationBundleFinding[];
+  limitations: string[];
+  warnings: string[];
+  truncated: boolean;
+  disclaimer: string;
 }

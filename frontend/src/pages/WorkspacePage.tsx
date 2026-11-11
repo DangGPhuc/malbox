@@ -133,6 +133,9 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
           <button onClick={() => onNavigateTab('static')} className="btn btn-secondary">
             <Cpu size={14} /> Static Function Explorer
           </button>
+          <button onClick={() => onNavigateTab('correlation')} className="btn btn-secondary">
+            Correlation Explorer <ArrowRight size={14} />
+          </button>
           <button onClick={() => onNavigateTab('report')} className="btn btn-primary">
             Full Intelligence Report <ArrowRight size={14} />
           </button>

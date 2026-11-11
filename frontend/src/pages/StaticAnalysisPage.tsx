@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Cpu,
   FileText,
+  GitCompareArrows,
   Layers,
   Network,
   Shield,
@@ -25,7 +26,11 @@ import './StaticAnalysis.css';
 
 interface StaticAnalysisPageProps {
   analysisId: string;
-  onNavigateTab?: (tab: string) => void;
+  initialFunctionId?: string | null;
+  onNavigateTab?: (
+    tab: string,
+    opts?: { functionId?: string; correlationId?: string }
+  ) => void;
 }
 
 type StaticViewSection = 'all' | 'explorer' | 'callgraph' | 'artifacts';
@@ -35,6 +40,7 @@ const MAX_POLL_TICKS = 120;
 
 export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
   analysisId,
+  initialFunctionId = null,
   onNavigateTab,
 }) => {
   const [staticData, setStaticData] = useState<StaticAnalysisResult | null>(null);
@@ -238,12 +244,29 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
     };
   }, [isPolling, fetchStaticAnalysis]);
 
-  // Pick a reasonable default function when functions arrive.
+  // Pick requested initialFunctionId or a reasonable default function when functions arrive.
   useEffect(() => {
     if (!staticData || staticData.functions.length === 0) {
       setSelectedFunctionId(null);
+      if (staticData && initialFunctionId && TERMINAL_STATIC_STATUSES.includes(staticData.status)) {
+        setNavWarning(
+          `Deep-linked function "${initialFunctionId}" is unavailable (static analysis status: ${staticData.status}).`
+        );
+      }
       return;
     }
+
+    if (initialFunctionId) {
+      if (staticData.functions.some((f) => f.function_id === initialFunctionId)) {
+        setNavWarning(null);
+        setSelectedFunctionId(initialFunctionId);
+        return;
+      }
+      setNavWarning(
+        `Deep-linked function "${initialFunctionId}" is not present in the bounded static function list (omitted by static limits or external import).`
+      );
+    }
+
     if (
       selectedFunctionId &&
       staticData.functions.some((f) => f.function_id === selectedFunctionId)
@@ -256,7 +279,7 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
       : undefined;
     const fallback = matchDecompiled ?? staticData.functions[0];
     setSelectedFunctionId(fallback.function_id);
-  }, [staticData, selectedFunctionId]);
+  }, [staticData, initialFunctionId, selectedFunctionId]);
 
   const handleSelectFunction = useCallback(
     (functionId: string) => {
@@ -385,6 +408,13 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
                 onClick={() => onNavigateTab('graph')}
               >
                 <Network size={13} aria-hidden="true" /> Behavior Graph
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => onNavigateTab('correlation')}
+              >
+                <GitCompareArrows size={13} aria-hidden="true" /> Correlation Explorer
               </button>
               <button
                 type="button"

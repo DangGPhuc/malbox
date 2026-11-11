@@ -1,9 +1,9 @@
 # malbox-ai — Build Status & Verification Ledger
 
 **Project Codename:** `malbox-ai`  
-**Architecture Version:** 0.2.7-alpha (Phase 4A.1 Correlation Integrity Hardening)  
-**Active Branch:** `fix/phase4a-correlation-integrity`  
-**Status:** **OPERATIONAL — PHASE 4A.1 CORRELATION INTEGRITY HARDENING VERIFIED**
+**Architecture Version:** 0.2.8-alpha (Phase 4B Correlation Explorer UI & Report Integration)  
+**Active Branch:** `feat/phase4b-correlation-explorer`  
+**Status:** **OPERATIONAL — PHASE 4B CORRELATION EXPLORER & TRACE-KEY HARDENING VERIFIED**
 
 ---
 
@@ -25,19 +25,19 @@
 | **Intelligence Report Web UI** | **VERIFIED** | Vitest + React Testing Library (`15/15 PASSED`), `tsc --noEmit`, `vite build`, `npm audit` (`0 vulnerabilities`) | Modular evidence-grounded dark-mode report dashboard (`frontend/src/components/IntelligenceReport/`), strict TypeScript contracts, Replay & synthetic artifact badges, FACT/INFERENCE/HYPOTHESIS + EvidenceExplorer, explicit in-memory `X-Reporting-Token` & external consent enrichment UX, print-friendly PDF & CSP-safe HTML exports, lazy-loaded Cytoscape graph, `auto`-mode consent enforcement, multi-page event lookup pagination, and full-report print state restoration. |
 | **Live CAPE Sandbox Backend** | **PARTIAL** | `test_cape_adapter.py` | Fully implemented and unit-tested adapter with readiness checks, task polling, report transformation, and cancellation. Real hypervisor execution remains disabled by policy. |
 | **Static Decompilation (Ghidra Phase 3A.1 & 3B UI + Gate 0)** | **VERIFIED (FOUNDATION + FUNCTION EXPLORER UI)** | `test_static_analysis.py`, `StaticAnalysisPage.test.tsx`, [`static-analysis-v1.md`](architecture/static-analysis-v1.md), [`GHIDRA_FUNCTION_EXPLORER.md`](ai/GHIDRA_FUNCTION_EXPLORER.md), [`GHIDRA_SETUP_GUIDE.md`](GHIDRA_SETUP_GUIDE.md) | Optional, disabled-by-default (`MALBOX_GHIDRA_ENABLED=false`) non-executing Ghidra Headless PE analyzer (`binary_executed=False`) with mandatory Bubblewrap + `systemd-run --user` memory containment, Gate 0 generation/abort request fencing, sticky `Pause Polling`, preserved last-usable completed evidence over failed retries, sibling active-job fallback isolation, lazy-loaded `StaticAnalysisPage` UI (`FunctionExplorerPanel`, XSS-safe `DecompilerViewer`, bounded `<=60` nodes / `<=100` edges Cytoscape `StaticCallGraphPanel`, `StaticArtifactsPanel`, manual in-memory `X-Reporting-Token` trigger), and read-only `StaticAnalysisSummaryCard`. |
-| **Evidence Correlation Engine (Phase 4A & 4A.1 Hardening)** | **VERIFIED (PHASE 4A.1 HARDENED)** | `test_evidence_correlation.py`, [`evidence-correlation-v1.md`](architecture/evidence-correlation-v1.md), [`CORRELATION_ANALYST_RULES.md`](ai/CORRELATION_ANALYST_RULES.md) | Bounded deterministic `O(F+E)` correlation connecting verified Ghidra code observations (`func:`, `str:`, imports) with normalized dynamic events without equating API presence to runtime execution. Phase 4A.1 hardens execution claims behind backend-authenticated HMAC `trace_auth` + module/base/IP/API checks (`CONSISTENT_WITH`/`INSUFFICIENT_EVIDENCE` when unavailable), streaming content-sensitive fingerprinting (`yield_per`), frozen read-only `NormalizedDynamicEvent` DTOs with zero ORM mutation, multi-status serialized `max_bytes` caps, fixed `EvidenceBundleBuilder.build(static_analysis=...)`, and O(1) `.limit(1)` bounded history retrieval. Phase 4B frontend UI remains next. |
+| **Evidence Correlation Engine & Explorer (Phase 4A, 4A.1 & 4B)** | **VERIFIED (PHASE 4B COMPLETE)** | `test_evidence_correlation.py`, `CorrelationPage.test.tsx`, [`CORRELATION_EXPLORER_UI.md`](ai/CORRELATION_EXPLORER_UI.md), [`evidence-correlation-v1.md`](architecture/evidence-correlation-v1.md), [`CORRELATION_ANALYST_RULES.md`](ai/CORRELATION_ANALYST_RULES.md) | Bounded deterministic `O(F+E)` correlation connecting verified Ghidra code observations (`func:`, `str:`, imports) with normalized dynamic events without equating API presence to runtime execution. Phase 4A.1 hardens execution claims behind backend-authenticated HMAC `trace_auth`, streaming fingerprinting, frozen DTOs, byte caps, and `.limit(1)` history. Phase 4B Gate 0 isolates `MALBOX_TRACE_AUTH_KEY` from `SECRET_KEY` with producer/session ownership and Doctor policy checks; Phase 4B UI adds `CorrelationPage` (read-only mount, transient `X-Reporting-Token`, lazy Cytoscape graph, bounded `/events` lookup, Function Explorer cross-links) plus Intelligence Report / XSS-safe HTML export integration. |
 
 ---
 
 ## 2. Test Execution Outcomes
 
 ### Backend (`pytest` 9.2.0)
-- **Local Host Default Suite (Kali, `bwrap` + `opencode v2.1.4`):** **135 passed, 1 skipped** (`test_live_ghidra_bwrap_smoke_opt_in` skipped by default unless `MALBOX_RUN_LIVE_GHIDRA_TEST=1`)
+- **Local Host Default Suite (Kali, `bwrap` + `opencode v2.1.4`):** **138 passed, 1 skipped** (`test_live_ghidra_bwrap_smoke_opt_in` skipped by default unless `MALBOX_RUN_LIVE_GHIDRA_TEST=1`)
 - **Opt-In Live Ghidra + Bubblewrap + Cgroup v2 Smoke Test (`MALBOX_RUN_LIVE_GHIDRA_TEST=1`):** **Verified in Phase 3B Gate 0 (`843947c`)** (Ghidra `12.1.4` + OpenJDK `25.0.4.1` + `ExportProgramFacts.java` inside `systemd-run --user --scope` + `bwrap` on harmless constructed PE32 stub with decompiler `entry` output verified; `binary_executed=False`)
 - **Hosted `ubuntu-latest` CI Note:** Tests requiring host Linux `bwrap`/`opencode`/`ghidra` binaries (`test_real_bwrap_sandbox_and_real_opencode_cli_integration`, `test_live_ghidra_bwrap_smoke_opt_in`) skip cleanly when absent on hosted CI runners.
 
 ### Frontend (`tsc --noEmit` + `vitest` 4.1.12 + `vite` 6.4.6)
-- **Frontend Unit Tests:** **29/29 PASSED** across `frontend/src/__tests__/ReportPage.test.tsx` (11), `frontend/src/__tests__/EnrichmentFlow.test.tsx` (4), and `frontend/src/__tests__/StaticAnalysisPage.test.tsx` (14)
+- **Frontend Unit Tests:** **37/37 PASSED** across `frontend/src/__tests__/CorrelationPage.test.tsx` (8), `frontend/src/__tests__/ReportPage.test.tsx` (11), `frontend/src/__tests__/EnrichmentFlow.test.tsx` (4), and `frontend/src/__tests__/StaticAnalysisPage.test.tsx` (14)
 - **TypeScript Strict Check:** `npm run typecheck` PASSED (0 errors)
 - **Production Build:** `npm run build` PASSED (lazy-loaded `StaticAnalysisPage` & split `cytoscape.esm` chunks)
 - **Dependency Audit Baseline:** `npm audit` -> 0 vulnerabilities (`vite@^6.4.6`, `vitest@^4.1.12`)
@@ -46,8 +46,8 @@
 1. `backend/tests/test_ai_orchestration.py`: (5/5 PASSED)
 2. `backend/tests/test_cape_adapter.py`: (3/3 PASSED)
 3. `backend/tests/test_detection_rules.py`: (6/6 PASSED)
-4. `backend/tests/test_doctor_cli.py`: (11/11 PASSED)
-5. `backend/tests/test_evidence_correlation.py`: (16/16 PASSED, covering Phase 4A + Phase 4A.1 integrity regression scenarios)
+4. `backend/tests/test_doctor_cli.py`: (12/12 PASSED, including Phase 4B Gate 0 `MALBOX_TRACE_AUTH_KEY` policy & secret redaction)
+5. `backend/tests/test_evidence_correlation.py`: (18/18 PASSED, covering Phase 4A + Phase 4A.1 + Phase 4B Gate 0 trace-key isolation & HTML correlation export)
 6. `backend/tests/test_health.py`: (2/2 PASSED)
 7. `backend/tests/test_intelligence_engine.py`: (13/13 PASSED)
 8. `backend/tests/test_opencode_and_hardening.py`: (13/13 PASSED)

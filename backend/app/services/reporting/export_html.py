@@ -1,5 +1,5 @@
 import html
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def _esc(value: Any, default: str = "") -> str:
@@ -8,7 +8,159 @@ def _esc(value: Any, default: str = "") -> str:
     return html.escape(str(value))
 
 
-def generate_html_report(report_data: Dict[str, Any]) -> str:
+def _render_correlation_html_section(
+    corr_summary: Optional[Dict[str, Any]],
+    live_correlation: Optional[Dict[str, Any]],
+    fallback_is_replay: bool,
+) -> str:
+    """
+    Renders a sanitized, CSP-safe Static/Dynamic Correlation Assessment HTML block.
+    Returns empty string cleanly for legacy reports lacking correlation metadata.
+    """
+    src: Optional[Dict[str, Any]] = corr_summary if isinstance(corr_summary, dict) else None
+    live_prov = (live_correlation or {}).get("provenance") if isinstance(live_correlation, dict) else None
+    live_lim = (live_correlation or {}).get("limitations") if isinstance(live_correlation, dict) else None
+
+    if src is None and isinstance(live_correlation, dict):
+        # Adapt live CorrelationResult safely when intel section was legacy/absent
+        raw_findings = []
+        for f in (live_correlation.get("findings") or [])[:12]:
+            if not isinstance(f, dict):
+                continue
+            conf = f.get("confidence") or {}
+            raw_findings.append(
+                {
+                    "correlation_id": f.get("correlation_id"),
+                    "rule_id": f.get("rule_id"),
+                    "relationship": f.get("relationship"),
+                    "relationship_summary": f.get("relationship_summary"),
+                    "explanation": f.get("explanation"),
+                    "confidence_score": conf.get("score"),
+                    "confidence_level": conf.get("level"),
+                    "behavioral_execution_directly_observed": f.get("behavioral_execution_directly_observed"),
+                    "static_ref_ids": [r.get("ref_id") for r in (f.get("static_references") or []) if isinstance(r, dict)],
+                    "dynamic_ref_ids": [r.get("ref_id") for r in (f.get("dynamic_references") or []) if isinstance(r, dict)],
+                    "known_limitations": f.get("known_limitations") or [],
+                }
+            )
+        src = {
+            "status": live_correlation.get("status", "INSUFFICIENT_EVIDENCE"),
+            "source_fingerprint": (live_prov or {}).get("source_fingerprint"),
+            "is_replay": bool((live_prov or {}).get("is_replay", fallback_is_replay)),
+            "is_stale": bool((live_prov or {}).get("is_stale", False)),
+            "trace_verification_mode": (live_prov or {}).get("trace_verification_mode", "no_authenticated_runtime_trace"),
+            "has_runtime_function_trace": bool((live_lim or {}).get("has_runtime_function_trace", False)),
+            "summary": live_correlation.get("summary") or {},
+            "findings": raw_findings,
+            "limitations": (live_lim or {}).get("items") or [],
+            "warnings": live_correlation.get("warnings") or [],
+            "truncated": bool(((live_correlation.get("truncation") or {}).get("truncated", False))),
+            "disclaimer": live_correlation.get("disclaimer"),
+        }
+
+    if not isinstance(src, dict):
+        return ""
+
+    status_val = _esc(src.get("status"), "INSUFFICIENT_EVIDENCE")
+    is_replay_corr = bool(src.get("is_replay", fallback_is_replay))
+    is_stale = bool((live_prov or {}).get("is_stale", src.get("is_stale", False)))
+    trace_mode = _esc(
+        (live_prov or {}).get("trace_verification_mode") or src.get("trace_verification_mode"),
+        "no_authenticated_runtime_trace",
+    )
+    has_trace = bool((live_lim or {}).get("has_runtime_function_trace", src.get("has_runtime_function_trace", False)))
+    src_fp = _esc((live_prov or {}).get("source_fingerprint") or src.get("source_fingerprint"), "n/a")
+    truncated = bool(src.get("truncated", False))
+    summary = src.get("summary") or {}
+    findings = src.get("findings") or []
+    limitations = src.get("limitations") or []
+    warnings = src.get("warnings") or []
+    disclaimer = _esc(
+        src.get("disclaimer"),
+        "Static code capabilities remain distinct from proven runtime execution.",
+    )
+
+    total_c = int(summary.get("total_findings") or len(findings))
+    direct_c = int(summary.get("directly_observed_count") or 0)
+    cons_c = int(summary.get("consistent_with_count") or 0)
+    contra_c = int(summary.get("contradictory_count") or 0)
+    insuf_c = int(summary.get("insufficient_evidence_count") or 0)
+    syn_c = int(summary.get("synthetic_scenario_only_count") or 0)
+
+    prov_pill = (
+        "<span class='pill pill-warn'>SYNTHETIC SCENARIO ONLY — UPLOADED BINARY NOT EXECUTED</span>"
+        if is_replay_corr
+        else "<span class='pill pill-neutral'>LIVE SANDBOX TELEMETRY CORRELATION</span>"
+    )
+    stale_pill = "<span class='pill pill-warn'>STALE EVIDENCE — RECOMPUTE RECOMMENDED</span>" if is_stale else "<span class='pill pill-ok'>FRESH</span>"
+    trunc_pill = "<span class='pill pill-warn'>TRUNCATED</span>" if truncated else "<span class='pill pill-neutral'>BOUNDED WITHIN CAP</span>"
+    trace_pill = (
+        "<span class='pill pill-ok'>AUTHENTICATED TRACE VERIFIED</span>"
+        if has_trace
+        else "<span class='pill pill-neutral'>NO AUTHENTICATED RUNTIME TRACE</span>"
+    )
+
+    finding_rows = ""
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        cid = _esc(f.get("correlation_id"), "corr")
+        rid = _esc(f.get("rule_id"), "RULE")
+        rel = _esc(f.get("relationship"), "INSUFFICIENT_EVIDENCE")
+        rsum = _esc(f.get("relationship_summary"), "")
+        expl = _esc(f.get("explanation"), "")
+        cscore = f.get("confidence_score")
+        cscore_str = f"{round(float(cscore) * 100)}%" if isinstance(cscore, (int, float)) else "n/a"
+        clevel = _esc(f.get("confidence_level"), "low")
+        exec_obs = bool(f.get("behavioral_execution_directly_observed", False))
+        srefs = ", ".join(_esc(x) for x in (f.get("static_ref_ids") or [])) or "none"
+        drefs = ", ".join(_esc(x) for x in (f.get("dynamic_ref_ids") or [])) or "none"
+        flims = "; ".join(_esc(x) for x in (f.get("known_limitations") or []))
+        exec_badge = (
+            "<span class='pill pill-ok'>Execution Trace Verified</span>"
+            if exec_obs
+            else "<span class='pill pill-neutral'>Execution Not Proven</span>"
+        )
+        finding_rows += f"""
+        <li class="claim-item">
+            <div class="claim-head">
+                <strong class="mono-wrap">{cid}</strong>
+                <span class="pill pill-type">{rid}</span>
+                <span class="pill pill-warn">{rel}</span>
+                {exec_badge}
+                <span class="muted">Correlation Confidence: {cscore_str} ({clevel})</span>
+            </div>
+            <div class="claim-body">{rsum}</div>
+            {f"<div class='muted'>{expl}</div>" if expl else ""}
+            <div class="claim-meta">
+                <div>Static Evidence IDs: <code class="mono-wrap">{srefs}</code></div>
+                <div>Dynamic Evidence IDs: <code class="mono-wrap">{drefs}</code></div>
+                {f"<div>Limitations: {flims}</div>" if flims else ""}
+            </div>
+        </li>"""
+
+    lims_html = "".join(f"<li>{_esc(item)}</li>" for item in limitations)
+    warns_html = "".join(f"<li>{_esc(w)}</li>" for w in warnings)
+
+    return f"""
+    <section class="card">
+        <h2>Static / Dynamic Correlation Assessment</h2>
+        <div class="meta-bar">
+            {prov_pill} {stale_pill} {trace_pill} {trunc_pill}<br>
+            <span>Status: <strong>{status_val}</strong> | Trace Verification: <code class="mono-wrap">{trace_mode}</code> | Fingerprint: <code class="mono-wrap">{src_fp}</code></span><br>
+            <span>Counts — Total: <strong>{total_c}</strong> | Directly Observed: <strong>{direct_c}</strong> | Consistent: <strong>{cons_c}</strong> | Contradictory: <strong>{contra_c}</strong> | Insufficient: <strong>{insuf_c}</strong> | Synthetic Only: <strong>{syn_c}</strong></span><br>
+            <span class="muted">{disclaimer}</span>
+        </div>
+        <ul class="claims-list">{finding_rows or '<li class="muted">No correlated static/dynamic relationships recorded.</li>'}</ul>
+        {f"<h3>Correlation Limitations &amp; Provenance Notes</h3><ul>{lims_html}</ul>" if lims_html else ""}
+        {f"<h3>Correlation Warnings</h3><ul>{warns_html}</ul>" if warns_html else ""}
+    </section>"""
+
+
+def generate_html_report(
+    report_data: Dict[str, Any],
+    live_correlation: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Renders and exports a secure, standalone, print-friendly HTML intelligence report with
     strict CSP meta headers, complete HTML escaping of untrusted fields, Phase 2A/2B
@@ -254,6 +406,12 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
             </div>
         </section>"""
 
+    corr_section_html = _render_correlation_html_section(
+        (intel or {}).get("correlation_summary") if isinstance(intel, dict) else None,
+        live_correlation=live_correlation,
+        fallback_is_replay=is_replay,
+    )
+
     findings_rows = ""
     for f in findings:
         sev = _esc(f.get("severity"), "Low")
@@ -495,6 +653,7 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
         </section>
 
         {intel_section}
+        {corr_section_html}
 
         <div class="grid">
             <section class="card">

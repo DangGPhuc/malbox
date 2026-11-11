@@ -1,17 +1,19 @@
 import React from 'react';
 import { Download, ExternalLink, Printer } from 'lucide-react';
-import { ReportResponse } from '../../types';
+import { CorrelationResult, ReportResponse } from '../../types';
 import { api } from '../../api/client';
 
 interface ReportExportToolbarProps {
   analysisId: string;
   reportData: ReportResponse;
+  correlationData?: CorrelationResult | null;
   onPrintFullReport?: () => void;
 }
 
 export const ReportExportToolbar: React.FC<ReportExportToolbarProps> = ({
   analysisId,
   reportData,
+  correlationData = null,
   onPrintFullReport,
 }) => {
   const handleDownloadJSON = () => {
@@ -26,6 +28,9 @@ export const ReportExportToolbar: React.FC<ReportExportToolbarProps> = ({
       replay_scenario_id:
         reportData.full_report.replay_scenario_id ?? reportData.replay_scenario_id ?? null,
       full_report: reportData.full_report,
+      ...(correlationData && correlationData.provenance.source_fingerprint !== 'uncomputed'
+        ? { correlation_assessment: correlationData }
+        : {}),
     };
 
     const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {

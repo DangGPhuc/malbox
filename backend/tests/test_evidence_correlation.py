@@ -62,8 +62,15 @@ from app.services.evidence_correlation.verifier import (
 from app.services.intelligence.bundle_builder import EvidenceBundleBuilder
 from app.services.intelligence.validator import EvidenceValidator
 from app.services.reporting.generator import ReportGenerator
+from app.services.static_analysis.worker import static_worker_manager
 from app.services.telemetry.normalizer import TelemetryNormalizer
 from app.workers.job_queue import job_queue_manager
+
+
+def _stop_bg_workers() -> None:
+    """Stop lifespan polling workers before mutating SQLite StaticPool in tests."""
+    static_worker_manager.stop(wait_seconds=2.0)
+    job_queue_manager.stop()
 
 
 def _sample_sha(tag: str = "a") -> str:
@@ -412,7 +419,7 @@ def test_4_normalized_api_matching_and_execution_invariant(db_session):
 # ---------------------------------------------------------------------------
 def test_5_6_7_missing_ids_and_wrong_analysis_id(client, db_session):
     # Prevent FastAPI lifespan's background job polling thread from sharing SQLite StaticPool
-    job_queue_manager.stop()
+    _stop_bg_workers()
     sample, analysis = _create_sample_and_analysis(db_session, tag="missing_ids", backend_type="cape")
     other_sample, other_analysis = _create_sample_and_analysis(db_session, tag="other_ana", backend_type="cape")
 
@@ -673,7 +680,7 @@ def test_10_11_12_13_no_correlation_conflict_packed_partial_and_malformed_teleme
 def test_14_15_and_19_and_20_scale_caps_idempotency_api_auth_no_spawns_and_preserve_on_failure(
     client, db_session, monkeypatch
 ):
-    job_queue_manager.stop()
+    _stop_bg_workers()
     sample, analysis = _create_sample_and_analysis(db_session, tag="scale_test", backend_type="cape")
     _create_static_record(
         db_session,
@@ -1177,7 +1184,7 @@ def test_22_trace_provenance_mismatches_and_replay_override_blocked(db_session):
 
 def test_23_content_sensitive_streaming_fingerprint_invalidation_and_staleness(client, db_session, monkeypatch):
     """Tasks 2/R7/R8/R9: Middle-event & static result_json edits invalidate fingerprints; unchanged stays idempotent."""
-    job_queue_manager.stop()
+    _stop_bg_workers()
     monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "fp-test-token")
     sample, analysis = _create_sample_and_analysis(db_session, tag="fp_drift", backend_type="cape")
     static_rec, static_res = _create_static_record(
@@ -1280,7 +1287,7 @@ def test_23_content_sensitive_streaming_fingerprint_invalidation_and_staleness(c
 
 def test_24_raw_event_orm_immutability_and_malformed_attributes(client, db_session, monkeypatch):
     """Tasks 3/R10/R11: Malformed/normal raw AnalysisEvent rows are never mutated in DB; DTO is frozen."""
-    job_queue_manager.stop()
+    _stop_bg_workers()
     monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "immut-token")
     sample, analysis = _create_sample_and_analysis(db_session, tag="raw_immut", backend_type="cape")
     _create_static_record(db_session, sample, analysis.id, imports=[("KERNEL32.dll", "WriteFile")])
@@ -1598,7 +1605,7 @@ def test_gate0_trace_auth_key_isolation_producer_ownership_and_secret_protection
     - Enforces trace_producer & trace_session_id ownership + prevents session splicing/replays.
     - Never leaks signing keys in API responses, reports, warnings, or errors.
     """
-    job_queue_manager.stop()
+    _stop_bg_workers()
 
     # 1. Default settings.TRACE_AUTH_KEY is empty; validate_trace_auth_key rejects empty/default/dev/weak keys
     assert settings.TRACE_AUTH_KEY == ""
@@ -1827,5 +1834,95 @@ def test_gate0_trace_auth_key_isolation_producer_ownership_and_secret_protection
     assert fail_post.status_code == 200
     assert strong_key not in fail_post.text
     assert "[REDACTED]" in fail_post.text
+
+
+def test_phase4b_html_export_preserves_correlation_stale_xss_escape_and_legacy_compat(
+    client, db_session, monkeypatch
+):
+    """Phase 4B Task 9: /report/html and generate_html_report preserve correlation metadata safely and support legacy reports."""
+    from app.services.reporting.export_html import generate_html_report
+
+    _stop_bg_workers()
+    monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "html-export-token")
+    sample, analysis = _create_sample_and_analysis(
+        db_session,
+        tag="html_corr",
+        backend_type="replay",
+        replay_scenario_id="ransomware_wannacry_mock",
+    )
+    _create_static_record(db_session, sample, analysis.id, imports=[("ADVAPI32.dll", "CryptEncrypt")])
+    db_session.add(
+        AnalysisEvent(
+            id="ev_html_corr_1",
+            analysis_id=analysis.id,
+            category="file",
+            action="write",
+            target_path="C:\\Users\\Victim\\file.wnry",
+            attributes={"is_encrypted_target": True},
+            source_tool="sandbox-fsmon",
+        )
+    )
+    db_session.commit()
+
+    _, risk = DetectionEngine(db_session).evaluate_behavior(analysis.id)
+    rep = ReportGenerator(db_session).generate_report(analysis.id, risk_assessment=risk)
+    assert rep.full_report_json["intelligence_report"]["correlation_summary"] is not None
+
+    # Persist correlation, then mutate an event to force live is_stale=True detection in /report/html
+    post_corr = client.post(
+        f"/api/v1/analyses/{analysis.id}/correlation",
+        headers={"X-Reporting-Token": "html-export-token"},
+    )
+    assert post_corr.status_code == 200
+
+    db_session.add(
+        AnalysisEvent(
+            id="ev_html_corr_drift",
+            analysis_id=analysis.id,
+            category="network",
+            action="connect",
+            target_path="198.51.100.88:443",
+            attributes={"dest_ip": "198.51.100.88"},
+            source_tool="sandbox-netmon",
+        )
+    )
+    db_session.commit()
+
+    html_res = client.get(f"/api/v1/analyses/{analysis.id}/report/html")
+    assert html_res.status_code == 200
+    assert "Static / Dynamic Correlation Assessment" in html_res.text
+    assert "SYNTHETIC SCENARIO ONLY" in html_res.text
+    assert "SYNTHETIC_SCENARIO_ONLY" in html_res.text
+    assert "STALE EVIDENCE" in html_res.text
+    assert "Execution Not Proven" in html_res.text
+
+    # XSS escaping inside correlation findings/warnings
+    xss_report = dict(rep.full_report_json)
+    xss_intel = dict(xss_report["intelligence_report"])
+    xss_corr = dict(xss_intel["correlation_summary"])
+    xss_corr["findings"] = [
+        {
+            **xss_corr["findings"][0],
+            "relationship_summary": "Bad <script>alert('xss')</script> summary",
+            "explanation": "<img src=x onerror=alert(1)>",
+        }
+    ]
+    xss_intel["correlation_summary"] = xss_corr
+    xss_report["intelligence_report"] = xss_intel
+    safe_html = generate_html_report(xss_report)
+    assert "<script>alert('xss')</script>" not in safe_html
+    assert "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;" in safe_html
+    assert "<img src=x" not in safe_html
+    assert "&lt;img src=x" in safe_html
+
+    # Legacy report without correlation_summary renders cleanly without correlation crash
+    legacy = dict(rep.full_report_json)
+    legacy_intel = dict(legacy["intelligence_report"])
+    legacy_intel.pop("correlation_summary", None)
+    legacy["intelligence_report"] = legacy_intel
+    legacy_html = generate_html_report(legacy)
+    assert "AI Intelligence Assessment (v2.0)" in legacy_html
+    assert "Static / Dynamic Correlation Assessment" not in legacy_html
+
 
 

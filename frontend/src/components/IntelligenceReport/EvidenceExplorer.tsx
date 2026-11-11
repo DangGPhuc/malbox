@@ -189,6 +189,24 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
         </div>
       )}
 
+      {resolved.kind === 'correlation' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', fontSize: '0.84rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <CheckCircle2 size={15} color="#22c55e" aria-hidden="true" />
+            <strong style={{ color: '#86efac' }}>Resolved: Static / Dynamic Correlation</strong>
+            <span className="badge badge-info">{resolved.correlation.relationship}</span>
+            <span className="badge badge-neutral mono">{resolved.correlation.rule_id}</span>
+          </div>
+          <div style={{ fontWeight: 600, color: '#f8fafc' }}>{resolved.correlation.relationship_summary}</div>
+          <div style={{ color: '#cbd5e1' }}>{resolved.correlation.explanation}</div>
+          <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+            Execution directly observed: <strong>{resolved.correlation.behavioral_execution_directly_observed ? 'Yes' : 'No'}</strong> ·
+            Static Refs: <code className="mono">{resolved.correlation.static_ref_ids.join(', ') || 'none'}</code> ·
+            Dynamic Refs: <code className="mono">{resolved.correlation.dynamic_ref_ids.join(', ') || 'none'}</code>
+          </div>
+        </div>
+      )}
+
       {resolved.kind === 'unavailable' && !loadingEvents && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', fontSize: '0.84rem', color: '#fde68a' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>

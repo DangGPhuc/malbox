@@ -6,8 +6,9 @@ import {
   Cpu,
   Bot,
   Gauge,
+  GitCompareArrows,
 } from 'lucide-react';
-import { ReportResponse } from '../../types';
+import { CorrelationResult, ReportResponse } from '../../types';
 import {
   classifyProviderDisplay,
   formatConfidencePct,
@@ -21,13 +22,18 @@ import { ReportExportToolbar } from './ReportExportToolbar';
 interface IntelligenceReportHeaderProps {
   analysisId: string;
   reportData: ReportResponse;
-  onNavigateTab?: (tab: string) => void;
+  correlationData?: CorrelationResult | null;
+  onNavigateTab?: (
+    tab: string,
+    opts?: { functionId?: string; correlationId?: string }
+  ) => void;
   onPrintFullReport?: () => void;
 }
 
 export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> = ({
   analysisId,
   reportData,
+  correlationData = null,
   onNavigateTab,
   onPrintFullReport,
 }) => {
@@ -110,6 +116,13 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
               >
                 <Cpu size={14} aria-hidden="true" /> Static Function Explorer
               </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => onNavigateTab('correlation')}
+              >
+                <GitCompareArrows size={14} aria-hidden="true" /> Correlation Explorer
+              </button>
             </div>
           )}
         </div>
@@ -117,6 +130,7 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
         <ReportExportToolbar
           analysisId={analysisId}
           reportData={reportData}
+          correlationData={correlationData}
           onPrintFullReport={onPrintFullReport}
         />
       </div>

@@ -12,6 +12,7 @@ import {
   IntelligenceEnrichRequest,
   StaticAnalysisResult,
   StaticAnalysisJobAcceptedResponse,
+  CorrelationResult,
 } from '../types';
 
 const BASE_URL = '/api/v1';
@@ -35,6 +36,18 @@ export class StaticAnalysisApiError extends Error {
     super(message);
     this.name = 'StaticAnalysisApiError';
     this.status = status;
+  }
+}
+
+export class CorrelationApiError extends Error {
+  readonly status: number;
+  readonly retryAfterSeconds?: number;
+
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
+    super(message);
+    this.name = 'CorrelationApiError';
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -259,5 +272,49 @@ export const api = {
 
   getReportHtmlUrl(analysisId: string): string {
     return `${BASE_URL}/analyses/${analysisId}/report/html`;
+  },
+
+  async getCorrelation(analysisId: string, signal?: AbortSignal): Promise<CorrelationResult> {
+    const res = await fetch(
+      `${BASE_URL}/analyses/${analysisId}/correlation`,
+      signal ? { signal } : undefined
+    );
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Failed to retrieve correlation (${res.status})` }));
+      const detail = typeof errBody?.detail === 'string' ? errBody.detail : 'Failed to retrieve correlation';
+      throw new CorrelationApiError(detail, res.status);
+    }
+    return res.json();
+  },
+
+  async triggerCorrelation(
+    analysisId: string,
+    reportingToken: string,
+    force: boolean = false
+  ): Promise<CorrelationResult> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const trimmed = reportingToken.trim();
+    if (trimmed) {
+      headers['X-Reporting-Token'] = trimmed;
+    }
+
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/correlation`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ force }),
+    });
+    if (!res.ok) {
+      const retryRaw = res.headers?.get?.('Retry-After');
+      const retrySec = retryRaw && /^\d+$/.test(retryRaw.trim()) ? Number(retryRaw.trim()) : undefined;
+      const errBody = await res.json().catch(() => ({ detail: `Correlation recompute failed (${res.status})` }));
+      const detail =
+        typeof errBody?.detail === 'string'
+          ? errBody.detail
+          : `Correlation trigger failed with status ${res.status}.`;
+      throw new CorrelationApiError(detail, res.status, retrySec);
+    }
+    return res.json();
   },
 };

@@ -13,6 +13,7 @@ import { api } from '../api/client';
 import {
   AnalysisEvent,
   ArtifactItem,
+  CorrelationResult,
   ReportResponse,
   StaticAnalysisResult,
 } from '../types';
@@ -21,6 +22,7 @@ import {
   AnalystNarrative,
   AttackStoryTimeline,
   ConfidencePanel,
+  CorrelationSummarySection,
   EvidenceExplorer,
   EvidenceLinkedClaim,
   ExecutiveAssessment,
@@ -36,7 +38,10 @@ import {
 
 interface ReportPageProps {
   analysisId: string;
-  onNavigateTab?: (tab: string) => void;
+  onNavigateTab?: (
+    tab: string,
+    opts?: { functionId?: string; correlationId?: string }
+  ) => void;
 }
 
 type ReportViewTab = 'all' | 'claims' | 'timeline' | 'iocs' | 'review';
@@ -49,6 +54,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [staticData, setStaticData] = useState<StaticAnalysisResult | null>(null);
   const [staticLoading, setStaticLoading] = useState<boolean>(false);
+  const [correlationData, setCorrelationData] = useState<CorrelationResult | null>(null);
+  const [correlationLoading, setCorrelationLoading] = useState<boolean>(false);
   const [eventsCache, setEventsCache] = useState<AnalysisEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [eventsFetchError, setEventsFetchError] = useState<string | null>(null);
@@ -107,23 +114,31 @@ export const ReportPage: React.FC<ReportPageProps> = ({
       setLoading(true);
       setLoadError(null);
       setStaticLoading(true);
+      setCorrelationLoading(true);
       const staticPromise =
         typeof api.getStaticAnalysis === 'function'
           ? api.getStaticAnalysis(analysisId).catch(() => null)
           : Promise.resolve(null);
-      const [rep, arts, staticRes] = await Promise.all([
+      const corrPromise =
+        typeof api.getCorrelation === 'function'
+          ? api.getCorrelation(analysisId).catch(() => null)
+          : Promise.resolve(null);
+      const [rep, arts, staticRes, corrRes] = await Promise.all([
         api.getReport(analysisId),
         api.getArtifacts(analysisId).catch(() => [] as ArtifactItem[]),
         staticPromise,
+        corrPromise,
       ]);
       setReportData(rep);
       setArtifacts(arts);
       setStaticData(staticRes);
+      setCorrelationData(corrRes);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Unable to load analysis report.');
     } finally {
       setLoading(false);
       setStaticLoading(false);
+      setCorrelationLoading(false);
     }
   }, [analysisId]);
 
@@ -147,6 +162,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         targetEvidenceId.startsWith('artifact:') ||
         targetEvidenceId.startsWith('finding:') ||
         targetEvidenceId.startsWith('rule:') ||
+        targetEvidenceId.startsWith('corr:') ||
         reportData?.full_report.findings.some(
           (f) => f.id === targetEvidenceId || f.rule_id === targetEvidenceId
         )
@@ -261,6 +277,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
       <IntelligenceReportHeader
         analysisId={analysisId}
         reportData={reportData}
+        correlationData={correlationData}
         onNavigateTab={onNavigateTab}
         onPrintFullReport={handlePrintFullReport}
       />
@@ -284,6 +301,21 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         staticData={staticData}
         loading={staticLoading}
         onOpenStaticExplorer={onNavigateTab ? () => onNavigateTab('static') : undefined}
+      />
+
+      <CorrelationSummarySection
+        analysisId={analysisId}
+        correlationSummary={intel?.correlation_summary ?? null}
+        liveCorrelation={correlationData}
+        loading={correlationLoading}
+        isReplay={isReplay}
+        onOpenCorrelationExplorer={
+          onNavigateTab ? (opts) => onNavigateTab('correlation', opts) : undefined
+        }
+        onInspectEvidence={handleInspectEvidence}
+        onOpenStaticFunction={
+          onNavigateTab ? (functionId) => onNavigateTab('static', { functionId }) : undefined
+        }
       />
 
       {selectedEvidenceId && (

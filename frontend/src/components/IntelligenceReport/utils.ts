@@ -5,6 +5,7 @@ import {
   BehavioralFinding,
   ClaimClassification,
   ClaimValidationStatus,
+  CorrelationBundleFinding,
   FullReport,
   ReportArtifactSummary,
   ReportExecutionTimelineEntry,
@@ -190,6 +191,11 @@ export type ResolvedEvidenceRecord =
       timelineEntry?: ReportExecutionTimelineEntry;
     }
   | {
+      kind: 'correlation';
+      evidenceId: string;
+      correlation: CorrelationBundleFinding;
+    }
+  | {
       kind: 'unavailable';
       evidenceId: string;
       removedByValidator: boolean;
@@ -228,6 +234,18 @@ export function resolveEvidenceRecord(
       kind: 'finding',
       evidenceId,
       finding: findingMatch,
+    };
+  }
+
+  // Correlation references (corr:...)
+  const corrMatch = fullReport.intelligence_report?.correlation_summary?.findings?.find(
+    (cf) => cf.correlation_id === evidenceId
+  );
+  if (corrMatch) {
+    return {
+      kind: 'correlation',
+      evidenceId,
+      correlation: corrMatch,
     };
   }
 

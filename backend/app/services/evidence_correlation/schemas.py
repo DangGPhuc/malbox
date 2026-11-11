@@ -185,6 +185,9 @@ class CorrelationBundleSection(BaseModel):
     status: str
     source_fingerprint: Optional[str] = None
     is_replay: bool
+    is_stale: bool = False
+    trace_verification_mode: str = "no_authenticated_runtime_trace"
+    has_runtime_function_trace: bool = False
     summary: Dict[str, int] = Field(default_factory=dict)
     findings: List[Dict[str, Any]] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
