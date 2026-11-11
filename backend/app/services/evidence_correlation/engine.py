@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.analysis import Analysis
@@ -22,7 +21,7 @@ from app.services.evidence_correlation.schemas import (
     CorrelationTruncation,
 )
 from app.services.evidence_correlation.verifier import (
-    compute_evidence_fingerprint,
+    compute_streaming_evidence_fingerprint,
     validate_runtime_events,
     verify_correlation_inputs,
 )
@@ -53,17 +52,11 @@ class EvidenceCorrelationEngine:
         self.max_events = max(10, int(max_events))
         self.max_functions = max(10, int(max_functions))
         self.max_findings = max(1, int(max_findings))
-        self.max_bytes = max(8192, int(max_bytes))
+        self.max_bytes = max(4096, int(max_bytes))
 
-    def _fetch_bounded_events(self, analysis_id: str) -> Tuple[int, List[AnalysisEvent]]:
-        total_count = int(
-            self.db.query(func.count(AnalysisEvent.id))
-            .filter(AnalysisEvent.analysis_id == analysis_id)
-            .scalar()
-            or 0
-        )
-        if total_count == 0:
-            return 0, []
+    def _fetch_bounded_events(self, analysis_id: str, total_count: int) -> List[AnalysisEvent]:
+        if total_count <= 0:
+            return []
 
         # Prioritized SQL bounded fetch so high-signal API/network/process/registry/mutation events
         # aren't drowned out when 10,000+ file/noise events exist.
@@ -93,30 +86,7 @@ class EvidenceCorrelationEngine:
             )
         combined = [*high_signal, *others]
         combined.sort(key=lambda e: (e.timestamp.isoformat() if e.timestamp else "", e.id))
-        return total_count, combined[: self.max_events]
-
-    def _get_event_window_bounds(self, analysis_id: str) -> Tuple[int, Optional[str], Optional[str]]:
-        total_events = int(
-            self.db.query(func.count(AnalysisEvent.id))
-            .filter(AnalysisEvent.analysis_id == analysis_id)
-            .scalar()
-            or 0
-        )
-        if total_events == 0:
-            return 0, None, None
-        first_ev = (
-            self.db.query(AnalysisEvent.id)
-            .filter(AnalysisEvent.analysis_id == analysis_id)
-            .order_by(AnalysisEvent.timestamp.asc().nulls_last(), AnalysisEvent.id.asc())
-            .first()
-        )
-        last_ev = (
-            self.db.query(AnalysisEvent.id)
-            .filter(AnalysisEvent.analysis_id == analysis_id)
-            .order_by(AnalysisEvent.timestamp.desc().nulls_last(), AnalysisEvent.id.desc())
-            .first()
-        )
-        return total_events, (first_ev[0] if first_ev else None), (last_ev[0] if last_ev else None)
+        return combined[: self.max_events]
 
     def preview_source_fingerprint(
         self,
@@ -129,19 +99,19 @@ class EvidenceCorrelationEngine:
         ctx = verify_correlation_inputs(self.db, analysis, static_override=static_override)
         if not ctx.ok:
             return None
-        total_events, first_id, last_id = self._get_event_window_bounds(analysis_id)
-        static_status = ctx.static_result.status if ctx.static_result else "UNAVAILABLE"
-        return compute_evidence_fingerprint(
+        pe_meta = ctx.sample.pe_metadata if ctx.sample and isinstance(ctx.sample.pe_metadata, dict) else {}
+        fp, _ = compute_streaming_evidence_fingerprint(
+            self.db,
             analysis_id=analysis.id,
             sample_sha256=ctx.sample_sha256,
             is_replay=ctx.is_replay,
             scenario_id=ctx.replay_scenario_id,
             static_record_id=ctx.static_record_id,
-            static_status=static_status,
-            event_count=total_events,
-            first_event_id=first_id,
-            last_event_id=last_id,
+            static_result=ctx.static_result,
+            sample_file_name=ctx.sample.file_name if ctx.sample else None,
+            sample_pe_image_base=pe_meta.get("image_base"),
         )
+        return fp
 
     def correlate(
         self,
@@ -155,31 +125,48 @@ class EvidenceCorrelationEngine:
 
         computed_at = datetime.now(timezone.utc).isoformat()
         ctx = verify_correlation_inputs(self.db, analysis, static_override=static_override)
-        _, first_id, last_id = self._get_event_window_bounds(analysis.id)
-        total_events_db, bounded_raw_events = self._fetch_bounded_events(analysis.id)
-        events, _valid_ev_ids, ev_warnings, has_trusted_trace = validate_runtime_events(
-            bounded_raw_events, analysis_id=analysis.id, is_replay=ctx.is_replay
-        )
+        pe_meta = ctx.sample.pe_metadata if ctx.sample and isinstance(ctx.sample.pe_metadata, dict) else {}
 
-        static_res = ctx.static_result
-        static_status = static_res.status if static_res else "UNAVAILABLE"
-        fingerprint = compute_evidence_fingerprint(
+        fingerprint, total_events_db = compute_streaming_evidence_fingerprint(
+            self.db,
             analysis_id=analysis.id,
             sample_sha256=ctx.sample_sha256,
             is_replay=ctx.is_replay,
             scenario_id=ctx.replay_scenario_id,
             static_record_id=ctx.static_record_id,
-            static_status=static_status,
-            event_count=total_events_db,
-            first_event_id=first_id,
-            last_event_id=last_id,
+            static_result=ctx.static_result,
+            sample_file_name=ctx.sample.file_name if ctx.sample else None,
+            sample_pe_image_base=pe_meta.get("image_base"),
         )
+
+        bounded_raw_events = self._fetch_bounded_events(analysis.id, total_events_db)
+        events, _valid_ev_ids, ev_warnings, has_trusted_trace = validate_runtime_events(
+            bounded_raw_events,
+            analysis_id=analysis.id,
+            is_replay=ctx.is_replay,
+            sample_sha256=ctx.sample_sha256 if ctx.ok else None,
+            static_result=ctx.static_result,
+            sample_file_name=ctx.sample.file_name if ctx.sample else None,
+            pe_metadata=pe_meta,
+        )
+
+        static_res = ctx.static_result
+        static_status = static_res.status if static_res else "UNAVAILABLE"
 
         all_warnings = [*ctx.warnings, *ev_warnings]
         if total_events_db > len(events):
             all_warnings.append(
                 f"Dynamic telemetry bounded cleanly: scanned {len(events)} of {total_events_db} events."
             )
+
+        if ctx.is_replay:
+            trace_mode = "replay_synthetic_disallowed"
+        elif has_trusted_trace:
+            trace_mode = "authenticated_runtime_trace_verified"
+        elif any("trace" in w.lower() for w in ev_warnings):
+            trace_mode = "unauthenticated_or_mismatched_trace_rejected"
+        else:
+            trace_mode = "no_authenticated_runtime_trace"
 
         provenance = CorrelationProvenance(
             analysis_id=analysis.id,
@@ -194,60 +181,66 @@ class EvidenceCorrelationEngine:
             replay_scenario_id=ctx.replay_scenario_id,
             sample_identity_verified=ctx.ok,
             static_reuse_detected=ctx.static_reuse_detected,
+            is_stale=False,
+            trace_verification_mode=trace_mode,
             computed_at=computed_at,
             source_fingerprint=fingerprint,
             triggered_automatically=triggered_automatically,
             external_ai_used=False,
         )
 
-        # Verification failed -> fail closed cleanly without fabricating correlations
+        # Verification failed -> fail closed cleanly within serialized byte cap
         if not ctx.ok:
-            return CorrelationResult(
-                status="FAILED",
-                provenance=provenance,
-                limitations=CorrelationLimitations(
-                    items=[*ctx.limitations, "Identity/provenance verification failed."],
-                    has_runtime_function_trace=has_trusted_trace,
-                    is_replay_synthetic=ctx.is_replay,
-                    sample_level_static_reuse=ctx.static_reuse_detected,
-                ),
-                truncation=CorrelationTruncation(
-                    total_events_in_analysis=total_events_db,
-                    events_scanned=len(events),
-                    events_omitted=max(0, total_events_db - len(events)),
-                    max_events_limit=self.max_events,
-                    max_functions_limit=self.max_functions,
-                    max_findings_limit=self.max_findings,
-                    max_serialized_bytes=self.max_bytes,
-                ),
-                warnings=all_warnings,
-                errors=ctx.errors,
+            return self.enforce_serialized_limit(
+                CorrelationResult(
+                    status="FAILED",
+                    provenance=provenance,
+                    limitations=CorrelationLimitations(
+                        items=[*ctx.limitations, "Identity/provenance verification failed."],
+                        has_runtime_function_trace=has_trusted_trace,
+                        is_replay_synthetic=ctx.is_replay,
+                        sample_level_static_reuse=ctx.static_reuse_detected,
+                    ),
+                    truncation=CorrelationTruncation(
+                        total_events_in_analysis=total_events_db,
+                        events_scanned=len(events),
+                        events_omitted=max(0, total_events_db - len(events)),
+                        max_events_limit=self.max_events,
+                        max_functions_limit=self.max_functions,
+                        max_findings_limit=self.max_findings,
+                        max_serialized_bytes=self.max_bytes,
+                    ),
+                    warnings=all_warnings,
+                    errors=ctx.errors,
+                )
             )
 
-        # Static analysis absent or failed/queued -> UNSUPPORTED / INSUFFICIENT_EVIDENCE
+        # Static analysis absent or failed/queued -> UNSUPPORTED within serialized byte cap
         if static_res is None or static_res.status not in ("COMPLETED", "PARTIAL"):
-            return CorrelationResult(
-                status="UNSUPPORTED",
-                provenance=provenance,
-                limitations=CorrelationLimitations(
-                    items=[
-                        *ctx.limitations,
-                        "Static Ghidra disassembly is unavailable; cross-layer correlation cannot establish code-to-behavior links.",
-                    ],
-                    has_runtime_function_trace=has_trusted_trace,
-                    is_replay_synthetic=ctx.is_replay,
-                    sample_level_static_reuse=ctx.static_reuse_detected,
-                ),
-                truncation=CorrelationTruncation(
-                    total_events_in_analysis=total_events_db,
-                    events_scanned=len(events),
-                    events_omitted=max(0, total_events_db - len(events)),
-                    max_events_limit=self.max_events,
-                    max_functions_limit=self.max_functions,
-                    max_findings_limit=self.max_findings,
-                    max_serialized_bytes=self.max_bytes,
-                ),
-                warnings=all_warnings,
+            return self.enforce_serialized_limit(
+                CorrelationResult(
+                    status="UNSUPPORTED",
+                    provenance=provenance,
+                    limitations=CorrelationLimitations(
+                        items=[
+                            *ctx.limitations,
+                            "Static Ghidra disassembly is unavailable; cross-layer correlation cannot establish code-to-behavior links.",
+                        ],
+                        has_runtime_function_trace=has_trusted_trace,
+                        is_replay_synthetic=ctx.is_replay,
+                        sample_level_static_reuse=ctx.static_reuse_detected,
+                    ),
+                    truncation=CorrelationTruncation(
+                        total_events_in_analysis=total_events_db,
+                        events_scanned=len(events),
+                        events_omitted=max(0, total_events_db - len(events)),
+                        max_events_limit=self.max_events,
+                        max_functions_limit=self.max_functions,
+                        max_findings_limit=self.max_findings,
+                        max_serialized_bytes=self.max_bytes,
+                    ),
+                    warnings=all_warnings,
+                )
             )
 
         static_idx = build_static_index(
@@ -264,7 +257,7 @@ class EvidenceCorrelationEngine:
             max_findings=self.max_findings,
         )
 
-        # Deterministic finding ordering: DIRECTLY_OBSERVED -> CONTRADICTORY -> CONSISTENT_WITH -> SYNTHETIC_SCENARIO_ONLY -> INSUFFICIENT_EVIDENCE
+        # Deterministic ordering retains DIRECTLY_OBSERVED / CONTRADICTORY / highest-confidence findings first
         rel_priority = {
             "DIRECTLY_OBSERVED": 0,
             "CONTRADICTORY": 1,
@@ -284,11 +277,18 @@ class EvidenceCorrelationEngine:
         limitations_items = list(ctx.limitations)
         if not has_trusted_trace:
             limitations_items.append(
-                "No runtime instruction-pointer/module-offset trace was captured; function-to-event execution cannot be directly proven."
+                "No backend-authenticated runtime instruction-pointer/module-offset trace was captured; "
+                "function-to-event execution cannot be directly proven."
             )
 
-        partial_static = bool(static_res.status == "PARTIAL" or static_res.is_partial or static_res.truncation.truncated)
-        status = "PARTIAL" if (partial_static or total_events_db > len(events)) else ("COMPLETED" if findings else "INSUFFICIENT_EVIDENCE")
+        partial_static = bool(
+            static_res.status == "PARTIAL" or static_res.is_partial or static_res.truncation.truncated
+        )
+        status = (
+            "PARTIAL"
+            if (partial_static or total_events_db > len(events))
+            else ("COMPLETED" if findings else "INSUFFICIENT_EVIDENCE")
+        )
 
         res = CorrelationResult(
             status=status,
@@ -322,25 +322,162 @@ class EvidenceCorrelationEngine:
         )
         return self.enforce_serialized_limit(res)
 
+    @staticmethod
+    def _serialized_size(res: CorrelationResult) -> int:
+        return len(json.dumps(res.model_dump(mode="json")).encode("utf-8"))
+
+    def _sync_truncation_metadata(
+        self,
+        current: CorrelationResult,
+        omitted_findings: int,
+        extra_truncated: bool,
+    ) -> int:
+        current.truncation.max_serialized_bytes = self.max_bytes
+        current.truncation.findings_included = len(current.findings)
+        current.truncation.findings_omitted = omitted_findings
+        current.summary = _summarize_findings(current.findings)
+        if omitted_findings > 0 or extra_truncated:
+            current.truncation.truncated = True
+            if omitted_findings > 0 and current.status == "COMPLETED":
+                current.status = "PARTIAL"
+        # Two-pass convergence ensures serialized_bytes matches actual final JSON size.
+        for _ in range(2):
+            current.truncation.serialized_bytes = self._serialized_size(current)
+        return current.truncation.serialized_bytes
+
+    def _trim_string_list_to_budget(
+        self,
+        current: CorrelationResult,
+        field_owner: object,
+        attr_name: str,
+        omitted_findings: int,
+        max_item_chars: int = 180,
+    ) -> Tuple[bool, int]:
+        """Truncates oversized strings and pops tail items from a message list until within byte cap."""
+        lst: List[str] = list(getattr(field_owner, attr_name) or [])
+        if not lst:
+            return False, self._sync_truncation_metadata(current, omitted_findings, False)
+
+        changed = False
+        shortened = [
+            (item[: max_item_chars - 3] + "..." if len(item) > max_item_chars else item)
+            for item in lst
+        ]
+        if shortened != lst:
+            lst = shortened
+            setattr(field_owner, attr_name, lst)
+            changed = True
+
+        size = self._sync_truncation_metadata(current, omitted_findings, changed)
+        while size > self.max_bytes and lst:
+            lst.pop()
+            setattr(field_owner, attr_name, lst)
+            changed = True
+            size = self._sync_truncation_metadata(current, omitted_findings, True)
+
+        return changed, size
+
     def enforce_serialized_limit(self, result: CorrelationResult) -> CorrelationResult:
+        """
+        Enforces hard UTF-8 serialized byte limit across ALL five correlation statuses
+        and even when findings == [], converging truncation.serialized_bytes accurately
+        on the final payload or falling back to a minimal bounded FAILED result.
+        """
         current = result.model_copy(deep=True)
         omitted = current.truncation.findings_omitted
+        extra_truncated = False
 
-        while True:
-            serialized = json.dumps(current.model_dump(mode="json")).encode("utf-8")
-            size = len(serialized)
-            if size <= self.max_bytes or not current.findings:
-                current.truncation.serialized_bytes = size
-                current.truncation.findings_included = len(current.findings)
-                current.truncation.findings_omitted = omitted
-                current.summary = _summarize_findings(current.findings)
-                if omitted > 0:
-                    current.truncation.truncated = True
-                    if current.status == "COMPLETED":
-                        current.status = "PARTIAL"
-                return CorrelationResult.model_validate(current.model_dump(mode="json"))
+        # Stage 1: Pop lowest-priority findings from tail until within budget or findings == []
+        size = self._sync_truncation_metadata(current, omitted, extra_truncated)
+        while size > self.max_bytes and current.findings:
             current.findings.pop()
             omitted += 1
+            size = self._sync_truncation_metadata(current, omitted, True)
+
+        if size <= self.max_bytes:
+            return CorrelationResult.model_validate(current.model_dump(mode="json"))
+
+        # Stage 2: Trim warnings, limitations, and errors cleanly when findings == [] still exceeds cap
+        for owner, attr in (
+            (current, "warnings"),
+            (current.limitations, "items"),
+            (current, "errors"),
+        ):
+            did_trim, size = self._trim_string_list_to_budget(
+                current, owner, attr, omitted, max_item_chars=180
+            )
+            if did_trim:
+                extra_truncated = True
+            if size <= self.max_bytes:
+                return CorrelationResult.model_validate(current.model_dump(mode="json"))
+
+        # Stage 3: Compact residual strings (disclaimer, provenance optional text) if still oversized
+        extra_truncated = True
+        current.disclaimer = "Bounded correlation output limit enforced."
+        if current.provenance.replay_scenario_id and len(current.provenance.replay_scenario_id) > 64:
+            current.provenance.replay_scenario_id = current.provenance.replay_scenario_id[:64]
+        size = self._sync_truncation_metadata(current, omitted, True)
+        if size <= self.max_bytes:
+            return CorrelationResult.model_validate(current.model_dump(mode="json"))
+
+        # Stage 4: Controlled minimal bounded FAILED fallback guaranteed within max_bytes
+        minimal_prov = CorrelationProvenance(
+            schema_version=current.provenance.schema_version,
+            engine_version=current.provenance.engine_version,
+            analysis_id=current.provenance.analysis_id[:64],
+            sample_id=current.provenance.sample_id[:64],
+            sample_sha256=current.provenance.sample_sha256[:64],
+            static_status=current.provenance.static_status[:32],
+            static_provenance_scope=current.provenance.static_provenance_scope[:32],
+            dynamic_backend=current.provenance.dynamic_backend[:32],
+            is_replay=current.provenance.is_replay,
+            replay_scenario_id=(
+                current.provenance.replay_scenario_id[:32]
+                if current.provenance.replay_scenario_id
+                else None
+            ),
+            sample_identity_verified=current.provenance.sample_identity_verified,
+            static_reuse_detected=current.provenance.static_reuse_detected,
+            is_stale=current.provenance.is_stale,
+            trace_verification_mode=current.provenance.trace_verification_mode[:48],
+            computed_at=current.provenance.computed_at[:40],
+            source_fingerprint=current.provenance.source_fingerprint[:64],
+            triggered_automatically=current.provenance.triggered_automatically,
+            external_ai_used=False,
+        )
+        fallback = CorrelationResult(
+            status="FAILED",
+            provenance=minimal_prov,
+            summary=CorrelationSummary(),
+            findings=[],
+            limitations=CorrelationLimitations(
+                is_replay_synthetic=minimal_prov.is_replay,
+                sample_level_static_reuse=minimal_prov.static_reuse_detected,
+            ),
+            truncation=CorrelationTruncation(
+                truncated=True,
+                total_events_in_analysis=current.truncation.total_events_in_analysis,
+                events_scanned=current.truncation.events_scanned,
+                events_omitted=current.truncation.events_omitted,
+                functions_available=current.truncation.functions_available,
+                functions_scanned=current.truncation.functions_scanned,
+                candidate_relationships_evaluated=current.truncation.candidate_relationships_evaluated,
+                findings_included=0,
+                findings_omitted=omitted,
+                max_events_limit=self.max_events,
+                max_functions_limit=self.max_functions,
+                max_findings_limit=self.max_findings,
+                max_serialized_bytes=self.max_bytes,
+            ),
+            warnings=[],
+            errors=[f"Correlation output reduced to minimal FAILED response to enforce {self.max_bytes}-byte cap."],
+            disclaimer="Bounded output limit enforced.",
+        )
+        size = self._sync_truncation_metadata(fallback, omitted, True)
+        if size > self.max_bytes:
+            fallback.errors = ["Output byte cap exceeded."]
+            self._sync_truncation_metadata(fallback, omitted, True)
+        return CorrelationResult.model_validate(fallback.model_dump(mode="json"))
 
 
 def _summarize_findings(findings: List) -> CorrelationSummary:

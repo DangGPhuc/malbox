@@ -38,6 +38,7 @@ class CorrelationEvidenceReference(BaseModel):
     timestamp: Optional[str] = None
     summary: str
     is_synthetic: bool = False
+    trace_verified: bool = False
     provenance_scope: Optional[str] = None
 
 
@@ -72,9 +73,13 @@ class CorrelationFinding(BaseModel):
                 raise ValueError(
                     f"behavioral_execution_directly_observed=True is invalid for relationship '{self.relationship}'."
                 )
-            if not self.dynamic_references or all(d.is_synthetic for d in self.dynamic_references):
+            if not self.static_references:
                 raise ValueError(
-                    "DIRECTLY_OBSERVED requires at least one non-synthetic dynamic runtime trace reference."
+                    "DIRECTLY_OBSERVED requires at least one verified static code reference."
+                )
+            if not any((not d.is_synthetic) and d.trace_verified for d in self.dynamic_references):
+                raise ValueError(
+                    "DIRECTLY_OBSERVED requires at least one non-synthetic authenticated runtime trace reference (trace_verified=True)."
                 )
         elif self.relationship == "DIRECTLY_OBSERVED":
             raise ValueError(
@@ -87,7 +92,7 @@ class CorrelationProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: str = "1.0"
-    engine_version: str = "1.0.0"
+    engine_version: str = "1.1.0"
     analysis_id: str
     sample_id: str
     sample_sha256: str
@@ -100,6 +105,8 @@ class CorrelationProvenance(BaseModel):
     replay_scenario_id: Optional[str] = None
     sample_identity_verified: bool
     static_reuse_detected: bool = False
+    is_stale: bool = False
+    trace_verification_mode: str = "no_authenticated_runtime_trace"
     computed_at: str
     source_fingerprint: str
     triggered_automatically: bool = False

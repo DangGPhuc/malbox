@@ -69,7 +69,7 @@ IntelligenceReport (schema_version="2.0") ──▶ FullReportSchema.intelligenc
 
 ---
 
-## 5. Phase 4A Static/Dynamic Evidence Correlation Integration
+## 5. Phase 4A & 4A.1 Static/Dynamic Evidence Correlation Integration
 
-- **Optional Bounded Bundle & Report Section**: [`VerifiedEvidenceBundle`](../../backend/app/schemas/intelligence.py) and [`IntelligenceReport`](../../backend/app/schemas/intelligence.py) expose optional `correlation_summary: Optional[CorrelationBundleSection] = None` (full backward compatibility when omitted). When verified `COMPLETED` or `PARTIAL` static analysis results exist, `EvidenceBundleBuilder` populates `correlation_summary` from bounded local deterministic rules without transmitting raw pseudocode externally.
+- **Optional Bounded Bundle & Report Section**: [`VerifiedEvidenceBundle`](../../backend/app/schemas/intelligence.py) and [`IntelligenceReport`](../../backend/app/schemas/intelligence.py) expose optional `correlation_summary: Optional[CorrelationBundleSection] = None` (full backward compatibility when omitted). Both default DB-loaded static resolution and explicit `EvidenceBundleBuilder.build(static_analysis=...)` injection safely validate `sample_sha256` + `func:<sha16>:` provenance without `UnboundLocalError`, never fabricate identifiers on unverified placeholders, enforce `max_bundle_bytes` across all correlation fields, and avoid transmitting raw pseudocode externally.
 - **Correlation Validation Guarantees**: [`EvidenceValidator`](../../backend/app/services/intelligence/validator.py) resolves every correlation's `func:` / `str:` / `imp:` and dynamic event references against the verified bundle, rejects hallucinated `corr:` IDs, refuses to upgrade `CONSISTENT_WITH` or `SYNTHETIC_SCENARIO_ONLY` associations into proven execution claims, preserves Replay provenance, and keeps deterministic risk scores invariant (see [`evidence-correlation-v1.md`](evidence-correlation-v1.md)).

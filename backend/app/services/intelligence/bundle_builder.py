@@ -10,7 +10,13 @@ from app.models.analysis import Analysis
 from app.models.event import AnalysisEvent
 from app.models.finding import BehavioralFinding
 from app.models.sample import Sample
-from app.schemas.static_analysis import StaticAnalysisResult
+from app.schemas.static_analysis import (
+    FunctionMetadata,
+    ProgramMetadata,
+    StaticAnalysisProvenance,
+    StaticAnalysisResult,
+    StaticAnalysisTruncation,
+)
 from app.services.evidence_correlation.engine import (
     EvidenceCorrelationEngine,
     build_correlation_bundle_section,
@@ -300,14 +306,15 @@ class EvidenceBundleBuilder:
 
         static_limits: List[str] = []
         static_ids: List[str] = []
+        parsed_static: Optional[StaticAnalysisResult] = None
         if static_analysis is not None:
             static_info = static_analysis
-            if static_info.status in ("available", "partial"):
-                static_ids = [
-                    str(fn.get("function_id"))
-                    for fn in static_info.functions
-                    if isinstance(fn, dict) and fn.get("function_id")
-                ]
+            parsed_static, static_ids, static_limits = self._coerce_verified_injected_static(
+                static_info=static_info,
+                sample=sample,
+                analysis=analysis,
+                tracker=tracker,
+            )
         else:
             parsed_static = (
                 build_static_result_response(
@@ -1094,6 +1101,22 @@ class EvidenceBundleBuilder:
             bundle.truncation.truncated = True
             cur = self._current_bytes(bundle)
 
+        if cur > self.max_bundle_bytes and bundle.correlation_summary is not None:
+            if bundle.correlation_summary.warnings:
+                bundle.correlation_summary.warnings = []
+                bundle.correlation_summary.truncated = True
+                bundle.truncation.truncated = True
+                cur = self._current_bytes(bundle)
+            if cur > self.max_bundle_bytes and bundle.correlation_summary.limitations:
+                bundle.correlation_summary.limitations = []
+                bundle.correlation_summary.truncated = True
+                bundle.truncation.truncated = True
+                cur = self._current_bytes(bundle)
+            if cur > self.max_bundle_bytes:
+                bundle.correlation_summary = None
+                bundle.truncation.truncated = True
+                cur = self._current_bytes(bundle)
+
         # Stage 6: Compact oversized finding fields, then tail findings if still over cap
         if cur > self.max_bundle_bytes:
             for f in bundle.findings:
@@ -1162,3 +1185,124 @@ class EvidenceBundleBuilder:
                 if score == 0:
                     break
         return best_idx
+
+    @staticmethod
+    def _coerce_verified_injected_static(
+        static_info: StaticAnalysisPlaceholder,
+        sample: Optional[Sample],
+        analysis: Analysis,
+        tracker: Any,
+    ) -> Tuple[Optional[StaticAnalysisResult], List[str], List[str]]:
+        """
+        Safely converts an externally injected StaticAnalysisPlaceholder into a verified
+        StaticAnalysisResult ONLY when matching sample SHA-256 provenance and valid function IDs
+        are already present; never fabricates IDs or correlates unverified static stubs.
+        """
+        if static_info.status not in ("available", "partial"):
+            return None, [], []
+
+        if sample is None or not sample.sha256:
+            return (
+                None,
+                [],
+                ["Injected static analysis could not be correlated because parent sample SHA-256 is missing."],
+            )
+
+        expected_sha = sample.sha256.strip().lower()
+        injected_sha = (static_info.sample_sha256 or "").strip().lower()
+        if not injected_sha or injected_sha != expected_sha:
+            return (
+                None,
+                [],
+                [
+                    "Injected static analysis lacked matching sample_sha256 provenance; "
+                    "excluded from correlation without fabricating identifiers."
+                ],
+            )
+
+        if static_info.tool != "ghidra_headless":
+            return (
+                None,
+                [],
+                [f"Unsupported injected static tool '{static_info.tool}'; correlation requires verified Ghidra metadata."],
+            )
+
+        expected_fn_prefix = f"func:{expected_sha[:16]}:"
+        verified_funcs: List[FunctionMetadata] = []
+        valid_ids: List[str] = []
+        for fn in static_info.functions[:80]:
+            if not isinstance(fn, dict):
+                continue
+            fn_id = str(fn.get("function_id") or "").strip()
+            entry = str(fn.get("entry_address") or "").strip()
+            name = str(fn.get("name") or "").strip()
+            if not fn_id or not fn_id.startswith(expected_fn_prefix) or not entry or not name:
+                continue
+            apis = [
+                tracker.clean_str(str(api), 64)
+                for api in (fn.get("imported_api_calls") or [])[:15]
+                if isinstance(api, str) and api.strip()
+            ]
+            verified_funcs.append(
+                FunctionMetadata(
+                    function_id=fn_id,
+                    entry_address=entry,
+                    name=tracker.clean_str(name, 96),
+                    size_bytes=max(0, int(fn.get("size_bytes") or 0)),
+                    basic_block_count=(
+                        max(0, int(fn["basic_block_count"]))
+                        if fn.get("basic_block_count") is not None
+                        else None
+                    ),
+                    is_thunk=bool(fn.get("is_thunk", False)),
+                    is_external=bool(fn.get("is_external", False)),
+                    is_executed=False,
+                    imported_api_calls=apis,
+                    rank_score=max(0.0, float(fn.get("rank_score") or 0.0)),
+                )
+            )
+            valid_ids.append(fn_id)
+
+        if not verified_funcs:
+            return None, [], []
+
+        pm_raw = static_info.program_metadata if isinstance(static_info.program_metadata, dict) else {}
+        prog_meta = ProgramMetadata(
+            program_name=sample.file_name or "sample.bin",
+            executable_format=pm_raw.get("executable_format"),
+            architecture=pm_raw.get("architecture"),
+            address_size=pm_raw.get("address_size"),
+            image_base=pm_raw.get("image_base")
+            or (sample.pe_metadata.get("image_base") if isinstance(sample.pe_metadata, dict) else None),
+            total_functions_discovered=int(pm_raw.get("total_functions_discovered") or len(verified_funcs)),
+            total_imports=int(pm_raw.get("total_imports") or 0),
+            total_exports=int(pm_raw.get("total_exports") or 0),
+        )
+        is_partial = bool(static_info.status == "partial")
+        prov_scope = (
+            "analysis_specific"
+            if static_info.analysis_id in (None, analysis.id)
+            else "sample_fallback"
+        )
+        parsed = StaticAnalysisResult(
+            status="PARTIAL" if is_partial else "COMPLETED",
+            provenance=StaticAnalysisProvenance(
+                analysis_id=static_info.analysis_id,
+                sample_id=sample.id,
+                sample_sha256=injected_sha,
+                ghidra_version=static_info.ghidra_version,
+                provenance_scope=prov_scope,  # type: ignore[arg-type]
+            ),
+            program_metadata=prog_meta,
+            functions=verified_funcs,
+            truncation=StaticAnalysisTruncation(
+                truncated=is_partial,
+                functions_discovered=prog_meta.total_functions_discovered,
+                functions_included=len(verified_funcs),
+            ),
+            is_partial=is_partial,
+        )
+        limits: List[str] = []
+        if is_partial:
+            limits.append("Injected static analysis indicates PARTIAL coverage.")
+        return parsed, valid_ids, limits

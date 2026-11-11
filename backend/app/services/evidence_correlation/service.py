@@ -31,17 +31,30 @@ class EvidenceCorrelationService:
         self.engine = EvidenceCorrelationEngine(db)
 
     def _select_records(self, analysis_id: str, sample_sha256: Optional[str] = None):
-        q = self.db.query(StaticDynamicCorrelationRecord).filter(
+        """
+        Bounded O(1)-row history lookup: fetches at most the single newest attempt and
+        the single newest usable record without loading unbounded historical JSON payloads.
+        """
+        base = self.db.query(StaticDynamicCorrelationRecord).filter(
             StaticDynamicCorrelationRecord.analysis_id == analysis_id
         )
         if sample_sha256:
-            q = q.filter(StaticDynamicCorrelationRecord.sample_sha256 == sample_sha256.lower())
-        rows = q.order_by(
+            base = base.filter(StaticDynamicCorrelationRecord.sample_sha256 == sample_sha256.lower())
+
+        order_cols = (
             StaticDynamicCorrelationRecord.created_at.desc(),
             StaticDynamicCorrelationRecord.id.desc(),
-        ).all()
-        latest = rows[0] if rows else None
-        usable = next((r for r in rows if r.status in USABLE_CORRELATION_STATUSES), None)
+        )
+        latest = base.order_by(*order_cols).limit(1).first()
+        if latest is not None and latest.status in USABLE_CORRELATION_STATUSES:
+            return latest, latest
+
+        usable = (
+            base.filter(StaticDynamicCorrelationRecord.status.in_(USABLE_CORRELATION_STATUSES))
+            .order_by(*order_cols)
+            .limit(1)
+            .first()
+        )
         return latest, usable
 
     def get_correlation_readonly(self, analysis_id: str) -> CorrelationResult:
@@ -79,7 +92,9 @@ class EvidenceCorrelationService:
                         warnings.append(msg)
 
                 current_fp = self.engine.preview_source_fingerprint(analysis_id)
+                is_stale = False
                 if current_fp and current_fp != parsed.provenance.source_fingerprint:
+                    is_stale = True
                     stale_msg = (
                         "Underlying static/dynamic evidence changed since correlation was stored; "
                         "recompute via POST /api/v1/analyses/{analysis_id}/correlation."
@@ -87,7 +102,14 @@ class EvidenceCorrelationService:
                     if stale_msg not in warnings:
                         warnings.append(stale_msg)
 
-                return parsed.model_copy(update={"warnings": warnings})
+                updated_prov = (
+                    parsed.provenance.model_copy(update={"is_stale": True})
+                    if is_stale
+                    else parsed.provenance
+                )
+                return self.engine.enforce_serialized_limit(
+                    parsed.model_copy(update={"provenance": updated_prov, "warnings": warnings})
+                )
             except Exception:
                 pass
 
@@ -117,6 +139,31 @@ class EvidenceCorrelationService:
             warnings=["Correlation not yet persisted for this analysis."],
         )
 
+    def _preserve_previous_usable(
+        self,
+        prev_usable: Optional[StaticDynamicCorrelationRecord],
+        message: str,
+        current_fp: Optional[str] = None,
+    ) -> Optional[CorrelationResult]:
+        if prev_usable is None or not isinstance(prev_usable.result_json, dict):
+            return None
+        try:
+            preserved = CorrelationResult.model_validate(prev_usable.result_json)
+            drifted = bool(
+                current_fp
+                and current_fp != "failed"
+                and preserved.provenance.source_fingerprint != current_fp
+            )
+            prov_upd = preserved.provenance.model_copy(update={"is_stale": drifted})
+            warnings = list(preserved.warnings)
+            if message not in warnings:
+                warnings.append(message)
+            return self.engine.enforce_serialized_limit(
+                preserved.model_copy(update={"provenance": prov_upd, "warnings": warnings})
+            )
+        except Exception:
+            return None
+
     def compute_and_persist(
         self,
         analysis_id: str,
@@ -143,7 +190,12 @@ class EvidenceCorrelationService:
             )
             if current_fp and prev_usable.source_fingerprint == current_fp and isinstance(prev_usable.result_json, dict):
                 try:
-                    return CorrelationResult.model_validate(prev_usable.result_json)
+                    cached = CorrelationResult.model_validate(prev_usable.result_json)
+                    if cached.provenance.is_stale:
+                        cached = cached.model_copy(
+                            update={"provenance": cached.provenance.model_copy(update={"is_stale": False})}
+                        )
+                    return self.engine.enforce_serialized_limit(cached)
                 except Exception:
                     pass
 
@@ -159,37 +211,33 @@ class EvidenceCorrelationService:
                 f"Correlation engine failed ({type(exc).__name__}): {exc}", max_chars=240
             )
             fail_fp = self.engine.preview_source_fingerprint(analysis_id) or "failed"
-            fail_result = CorrelationResult(
-                status="FAILED",
-                provenance=CorrelationProvenance(
-                    analysis_id=analysis.id,
-                    sample_id=analysis.sample_id,
-                    sample_sha256=sample_sha,
-                    dynamic_backend=analysis.backend_type,
-                    is_replay=(analysis.backend_type == "replay"),
-                    replay_scenario_id=analysis.replay_scenario_id if analysis.backend_type == "replay" else None,
-                    sample_identity_verified=bool(sample is not None),
-                    computed_at=datetime.now(timezone.utc).isoformat(),
-                    source_fingerprint=fail_fp,
-                    triggered_automatically=triggered_automatically,
-                    external_ai_used=False,
-                ),
-                errors=[safe_err],
+            fail_result = self.engine.enforce_serialized_limit(
+                CorrelationResult(
+                    status="FAILED",
+                    provenance=CorrelationProvenance(
+                        analysis_id=analysis.id,
+                        sample_id=analysis.sample_id,
+                        sample_sha256=sample_sha,
+                        dynamic_backend=analysis.backend_type,
+                        is_replay=(analysis.backend_type == "replay"),
+                        replay_scenario_id=analysis.replay_scenario_id if analysis.backend_type == "replay" else None,
+                        sample_identity_verified=bool(sample is not None),
+                        computed_at=datetime.now(timezone.utc).isoformat(),
+                        source_fingerprint=fail_fp,
+                        triggered_automatically=triggered_automatically,
+                        external_ai_used=False,
+                    ),
+                    errors=[safe_err],
+                )
             )
             self._persist_record(analysis, sample_sha, fail_result, error_message=safe_err)
-            if prev_usable is not None and isinstance(prev_usable.result_json, dict):
-                try:
-                    preserved = CorrelationResult.model_validate(prev_usable.result_json)
-                    return preserved.model_copy(
-                        update={
-                            "warnings": [
-                                *preserved.warnings,
-                                f"Latest correlation recompute failed ({safe_err}); preserved previous usable result.",
-                            ]
-                        }
-                    )
-                except Exception:
-                    pass
+            preserved = self._preserve_previous_usable(
+                prev_usable,
+                f"Latest correlation recompute failed ({safe_err}); preserved previous usable result.",
+                current_fp=fail_fp,
+            )
+            if preserved is not None:
+                return preserved
             return fail_result
 
         self._persist_record(
@@ -200,19 +248,14 @@ class EvidenceCorrelationService:
         )
 
         # If verification produced FAILED cleanly while a prior usable result existed, return preserved usable
-        if computed.status == "FAILED" and prev_usable is not None and isinstance(prev_usable.result_json, dict):
-            try:
-                preserved = CorrelationResult.model_validate(prev_usable.result_json)
-                return preserved.model_copy(
-                    update={
-                        "warnings": [
-                            *preserved.warnings,
-                            "Latest correlation attempt failed verification; preserved previous usable result.",
-                        ]
-                    }
-                )
-            except Exception:
-                pass
+        if computed.status == "FAILED":
+            preserved = self._preserve_previous_usable(
+                prev_usable,
+                "Latest correlation attempt failed verification; preserved previous usable result.",
+                current_fp=computed.provenance.source_fingerprint,
+            )
+            if preserved is not None:
+                return preserved
 
         return computed
 

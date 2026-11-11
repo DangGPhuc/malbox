@@ -21,12 +21,12 @@ Audited evidence contracts across raw telemetry, static disassembly, and intelli
 Strict Pydantic contracts (`ConfigDict(extra="forbid")`) live in [`schemas.py`](../../backend/app/services/evidence_correlation/schemas.py):
 
 - **`CorrelationRelationship`**:
-  - `DIRECTLY_OBSERVED`: Permitted **only** when a non-synthetic runtime event from a trusted trace sensor (`cape-tracer`, `frida-tracer`, `etw-callstack`, `pin-tracer`) sets `trace_verified=True` and matches an indexed `function_id` / `entry_address` on the verified sample SHA-256. Model validation rejects `behavioral_execution_directly_observed=True` under any other classification.
-  - `CONSISTENT_WITH`: Non-replay runtime telemetry matches statically discovered API capability, behavioral category, or curated literal string without a verified call-stack trace (`behavioral_execution_directly_observed=False`).
-  - `SYNTHETIC_SCENARIO_ONLY`: Replay Mode telemetry aligns with static capabilities/strings strictly as synthetic fixture context; never claims uploaded sample detonation.
+  - `DIRECTLY_OBSERVED`: Permitted **only** when a non-replay runtime event carries valid backend-authenticated `trace_auth` provenance (`version="malbox-trace-v1"` HMAC-SHA256 verified against `settings.SECRET_KEY`), confirming `analysis_id` + `sample_sha256` ownership, analyzed binary module identity (`program_name` / `sample.file_name`), loaded `module_base` & relocated `instruction_pointer` inside static function bounds `[entry_address, entry_address + size_bytes)`, matching `function_id` & `entry_address`, and normalized API membership in that function's `imported_api_calls`. Plain `source_tool` names (e.g., `frida-tracer`, `cape-tracer`, `etw-callstack`, `pin-tracer`) and raw database `trace_verified=True` flags never unlock `DIRECTLY_OBSERVED` and fail conservatively to `CONSISTENT_WITH` or `INSUFFICIENT_EVIDENCE`. Model validation enforces `behavioral_execution_directly_observed=True` + non-empty `static_references` + `trace_verified=True` on a non-synthetic dynamic reference.
+  - `CONSISTENT_WITH`: Non-replay runtime telemetry matches statically discovered API capability, behavioral category, or curated literal string without backend-authenticated instruction-pointer/call-stack binding (`behavioral_execution_directly_observed=False`).
+  - `SYNTHETIC_SCENARIO_ONLY`: Replay Mode telemetry aligns with static capabilities/strings strictly as synthetic fixture context; never emits `DIRECTLY_OBSERVED` or claims uploaded sample detonation even with crafted trace payloads.
   - `CONTRADICTORY`: Verifiable discrepancy between static surface (e.g., high-entropy packed PE / absent capability imports) and rich dynamic activity or Replay expectations.
   - `INSUFFICIENT_EVIDENCE`: Statically discovered capability lacks corresponding dynamic events, or verified static disassembly is absent (`UNSUPPORTED`).
-- **Provenance & Bounds**: `CorrelationProvenance` captures `sample_sha256`, `static_record_id`, `static_provenance_scope`, `static_reuse_detected`, `is_replay`, `replay_scenario_id`, and `source_fingerprint`. `CorrelationTruncation` tracks exact `total_events_in_analysis`, `events_scanned`, `events_omitted`, `functions_scanned`, `findings_omitted`, and serialized payload bytes.
+- **Provenance, Staleness & Bounds**: `CorrelationProvenance` captures `sample_sha256`, `static_record_id`, `static_provenance_scope`, `static_reuse_detected`, `is_replay`, `replay_scenario_id`, `is_stale`, `trace_verification_mode`, and `source_fingerprint`. `CorrelationTruncation` tracks exact `total_events_in_analysis`, `events_scanned`, `events_omitted`, `functions_scanned`, `findings_omitted`, and converged UTF-8 `serialized_bytes`.
 
 ---
 
@@ -37,7 +37,8 @@ GET/POST /api/v1/analyses/{analysis_id}/correlation
    │  (POST requires valid X-Reporting-Token; GET is read-only)
    ▼
 EvidenceCorrelationService (service.py)
-   ├─ Checks source_fingerprint against latest usable record -> idempotent reuse unless force=true
+   ├─ Bounded O(1)-row history lookup (_select_records: targeted .limit(1) queries, zero .all())
+   ├─ Compares content-sensitive source_fingerprint -> idempotent reuse or explicit provenance.is_stale=True on drift
    ├─ Preserves last usable result if recompute fails or raises
    ▼
 EvidenceCorrelationEngine (engine.py)
@@ -45,13 +46,17 @@ EvidenceCorrelationEngine (engine.py)
    │     ├─ Rejects cross-sample static contamination (status="FAILED")
    │     ├─ Flags sample_fallback static reuse cleanly
    │     └─ Strips cross-sample/invalid func: and str: prefixes
-   ├─ 2. Bounded SQL event retrieval (_fetch_bounded_events: COUNT + prioritized tiers <= 250)
-   ├─ 3. validate_runtime_events() -> drops wrong-analysis or malformed events, sanitizes Replay flags
+   ├─ 2. compute_streaming_evidence_fingerprint() -> incremental SHA-256 over canonical static facts +
+   │     ordered dynamic columns (yield_per(200), never loading full dataset or shallow ID bounds)
+   ├─ 3. Bounded SQL event retrieval (_fetch_bounded_events <= 250) + validate_runtime_events() ->
+   │     builds frozen NormalizedDynamicEvent DTOs (MappingProxyType) with ZERO raw DB ORM mutation,
+   │     validates HMAC trace_auth + module/base/IP/API bounds
    ├─ 4. Build O(F + E) StaticCapabilityIndex + execute deterministic rules (rules.py)
-   └─ 5. Enforce serialized size budget (<= 131,072 bytes) & persist to evidence_correlations table
+   └─ 5. Enforce hard serialized size budget (max_bytes across ALL 5 statuses including findings=[])
+         & persist to evidence_correlations table
 ```
 
-- **Isolation Guarantees**: Raw `AnalysisEvent`, `BehavioralFinding`, `StaticAnalysisRecord`, and `AnalysisReport.risk_score` remain completely immutable during correlation. Correlation never spawns Ghidra, CAPE, or OpenCode.
+- **Isolation Guarantees**: Raw `AnalysisEvent`, `BehavioralFinding`, `StaticAnalysisRecord`, and `AnalysisReport.risk_score` remain completely immutable (SQLite rows are never dirtied or rewritten) during correlation. Malbox currently does not integrate an external runtime call-stack tracer backend (`normalizer.py`/`replay.py`/`cape.py`), so runtime correlation fails conservatively (`CONSISTENT_WITH` / `INSUFFICIENT_EVIDENCE` / `SYNTHETIC_SCENARIO_ONLY`) with explicit missing-trace limitations. Correlation never spawns Ghidra, CAPE, or OpenCode.
 
 ---
 

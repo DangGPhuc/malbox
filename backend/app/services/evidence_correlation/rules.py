@@ -3,15 +3,19 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from app.models.event import AnalysisEvent
 from app.schemas.static_analysis import (
     FunctionMetadata,
     ImportedSymbol,
     StaticAnalysisResult,
     StaticStringEvidence,
+)
+from app.services.evidence_correlation.normalization import (
+    CAPABILITY_DOMAIN_APIS,
+    normalize_api_root,
 )
 from app.services.evidence_correlation.schemas import (
     CorrelationConfidence,
@@ -20,107 +24,9 @@ from app.services.evidence_correlation.schemas import (
     CorrelationRelationship,
 )
 from app.services.evidence_correlation.verifier import (
-    TRUSTED_RUNTIME_TRACE_TOOLS,
+    NormalizedDynamicEvent,
     VerifiedCorrelationContext,
 )
-
-CAPABILITY_DOMAIN_APIS: Dict[str, Set[str]] = {
-    "file": {
-        "createfile",
-        "writefile",
-        "deletefile",
-        "movefile",
-        "movefileex",
-        "copyfile",
-        "setfileattributes",
-        "cryptencrypt",
-        "cryptdecrypt",
-        "cryptderivekey",
-        "cryptacquirecontext",
-        "bcryptencrypt",
-        "findfirstfile",
-        "findnextfile",
-        "ntcreatefile",
-        "ntwritefile",
-        "ntdeletefile",
-    },
-    "file_mutation": {
-        "writefile",
-        "deletefile",
-        "movefile",
-        "movefileex",
-        "copyfile",
-        "setfileattributes",
-        "cryptencrypt",
-        "cryptderivekey",
-        "bcryptencrypt",
-        "ntwritefile",
-        "ntdeletefile",
-    },
-    "registry": {
-        "regopenkey",
-        "regopenkeyex",
-        "regcreatekey",
-        "regcreatekeyex",
-        "regsetvalue",
-        "regsetvalueex",
-        "regqueryvalue",
-        "regqueryvalueex",
-        "regdeletekey",
-        "regdeletevalue",
-        "reggetvalue",
-        "ntopenkey",
-        "ntsetvaluekey",
-        "shsetvalue",
-    },
-    "registry_write": {
-        "regcreatekey",
-        "regcreatekeyex",
-        "regsetvalue",
-        "regsetvalueex",
-        "regdeletekey",
-        "regdeletevalue",
-        "ntsetvaluekey",
-        "shsetvalue",
-    },
-    "process": {
-        "createprocess",
-        "createprocessinternal",
-        "shellexecute",
-        "shellexecuteex",
-        "winexec",
-        "ntcreateprocess",
-        "ntcreateuserprocess",
-        "system",
-        "createthread",
-        "createremotethread",
-        "writeprocessmemory",
-        "virtualallocex",
-    },
-    "network": {
-        "wsastartup",
-        "wsaconnect",
-        "connect",
-        "send",
-        "sendto",
-        "recv",
-        "recvfrom",
-        "getaddrinfo",
-        "gethostbyname",
-        "dnsquery",
-        "internetopen",
-        "internetopenurl",
-        "internetconnect",
-        "httpopenrequest",
-        "httpsendrequest",
-        "winhttpopen",
-        "winhttpconnect",
-        "winhttpopenrequest",
-        "winhttpsendrequest",
-        "urldownloadtofile",
-        "socket",
-    },
-}
 
 _GENERIC_STRING_ALLOW_BLOCKLIST = {
     "kernel32.dll",
@@ -159,29 +65,6 @@ _HIGH_SIGNAL_STR_KEYWORDS = (
 )
 
 
-def normalize_api_root(raw_api: str) -> str:
-    """Normalizes Win32 API symbols cleanly while avoiding aggressive root over-stemming."""
-    norm = (raw_api or "").split("::")[-1].split("!")[-1].strip()
-    if norm.lower().startswith("__imp_"):
-        norm = norm[6:]
-    norm = norm.strip().lower()
-    known_all = (
-        CAPABILITY_DOMAIN_APIS["file"]
-        | CAPABILITY_DOMAIN_APIS["registry"]
-        | CAPABILITY_DOMAIN_APIS["process"]
-        | CAPABILITY_DOMAIN_APIS["network"]
-        | {"loadlibrary", "getprocaddress", "readfile"}
-    )
-    if norm in known_all:
-        return norm
-    for suffix in ("exa", "exw", "ex"):
-        if norm.endswith(suffix) and norm[: -len(suffix)] in known_all:
-            return norm[: -len(suffix)]
-    if len(norm) >= 5 and norm[-1] in ("a", "w") and norm[:-1] in known_all:
-        return norm[:-1]
-    return norm
-
-
 def make_correlation_id(
     rule_id: str,
     analysis_id: str,
@@ -199,7 +82,13 @@ def make_correlation_id(
     return f"corr:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:12]}"
 
 
-def _to_dynamic_ref(ev: AnalysisEvent, is_replay: bool, summary: Optional[str] = None) -> CorrelationEvidenceReference:
+def _to_dynamic_ref(
+    ev: NormalizedDynamicEvent,
+    is_replay: bool,
+    summary: Optional[str] = None,
+    *,
+    trace_verified: bool = False,
+) -> CorrelationEvidenceReference:
     ev_summary = summary or f"{ev.category}:{ev.action} target={ev.target_path or ev.process_name or 'none'}"
     if len(ev_summary) > 180:
         ev_summary = ev_summary[:177] + "..."
@@ -210,6 +99,7 @@ def _to_dynamic_ref(ev: AnalysisEvent, is_replay: bool, summary: Optional[str] =
         timestamp=ev.timestamp.isoformat() if ev.timestamp else None,
         summary=ev_summary,
         is_synthetic=bool(is_replay),
+        trace_verified=bool(trace_verified and not is_replay and ev.authenticated_trace is not None),
     )
 
 
@@ -375,7 +265,7 @@ def _build_limitations(ctx: VerifiedCorrelationContext, base_note: str) -> List[
 def run_deterministic_correlation_rules(
     ctx: VerifiedCorrelationContext,
     static_idx: StaticCapabilityIndex,
-    events: List[AnalysisEvent],
+    events: List[NormalizedDynamicEvent],
     max_findings: int = 30,
 ) -> Tuple[List[CorrelationFinding], int, int]:
     """
@@ -411,14 +301,14 @@ def run_deterministic_correlation_rules(
         return refs
 
     # ------------------------------------------------------------------
-    # RULE 1: Runtime API Telemetry vs Static Imports / Verified Traces
+    # RULE 1: Runtime API Telemetry vs Static Imports / Authenticated Traces
     # ------------------------------------------------------------------
     if api_events:
-        matched_traced: List[Tuple[AnalysisEvent, FunctionMetadata, str]] = []
-        matched_untraced: List[Tuple[AnalysisEvent, List[CorrelationEvidenceReference], str]] = []
+        matched_traced: List[Tuple[NormalizedDynamicEvent, FunctionMetadata, str]] = []
+        matched_untraced: List[Tuple[NormalizedDynamicEvent, List[CorrelationEvidenceReference], str]] = []
 
         for ev in api_events:
-            attrs = ev.attributes if isinstance(ev.attributes, dict) else {}
+            attrs = ev.attributes if isinstance(ev.attributes, Mapping) else {}
             raw_api = str(
                 attrs.get("api") or attrs.get("api_name") or attrs.get("function") or ev.target_path or ""
             ).strip()
@@ -431,19 +321,18 @@ def run_deterministic_correlation_rules(
             if not matching_funcs and not matching_imp:
                 continue
 
-            # Only non-replay + trusted trace tool + verified matching function reference -> DIRECTLY_OBSERVED
+            # Only non-replay + backend-authenticated HMAC trace verifying module/base/IP/API -> DIRECTLY_OBSERVED
             traced_fn: Optional[FunctionMetadata] = None
+            auth = ev.authenticated_trace
             if (
                 not is_replay
-                and ev.source_tool in TRUSTED_RUNTIME_TRACE_TOOLS
-                and attrs.get("trace_verified") is True
+                and auth is not None
+                and auth.norm_api == norm_api
+                and auth.function_id in static_idx.functions_by_id
             ):
-                req_fn_id = str(attrs.get("function_id") or "").strip()
-                req_addr = str(attrs.get("function_address") or "").strip().lower()
-                if req_fn_id and req_fn_id in static_idx.functions_by_id:
-                    traced_fn = static_idx.functions_by_id[req_fn_id]
-                elif req_addr and req_addr in static_idx.functions_by_addr:
-                    traced_fn = static_idx.functions_by_addr[req_addr]
+                candidate_fn = static_idx.functions_by_id[auth.function_id]
+                if candidate_fn in matching_funcs:
+                    traced_fn = candidate_fn
 
             if traced_fn is not None:
                 matched_traced.append((ev, traced_fn, raw_api))
@@ -455,8 +344,19 @@ def run_deterministic_correlation_rules(
 
         if matched_traced and len(findings) < max_findings:
             ev0, fn0, api0 = matched_traced[0]
+            auth0 = ev0.authenticated_trace
             srefs = [_to_static_func_ref(t[1], prov_scope) for t in matched_traced[:4]]
-            drefs = [_to_dynamic_ref(t[0], is_replay, f"verified trace api={t[2]} in {t[1].name}") for t in matched_traced[:4]]
+            drefs = [
+                _to_dynamic_ref(
+                    t[0],
+                    is_replay,
+                    f"authenticated trace api={t[2]} ip=0x{t[0].authenticated_trace.instruction_pointer:x} in {t[1].name}"
+                    if t[0].authenticated_trace
+                    else f"trace api={t[2]} in {t[1].name}",
+                    trace_verified=True,
+                )
+                for t in matched_traced[:4]
+            ]
             cid = make_correlation_id(
                 "CORR_RUNTIME_API_DIRECT_TRACE",
                 analysis_id,
@@ -472,15 +372,23 @@ def run_deterministic_correlation_rules(
                     static_references=srefs,
                     dynamic_references=drefs,
                     relationship="DIRECTLY_OBSERVED",
-                    relationship_summary=f"Trusted runtime callstack trace bound API '{api0}' directly to static function {fn0.name} ({fn0.entry_address}).",
+                    relationship_summary=(
+                        f"Backend-authenticated runtime trace bound API '{api0}' to static function "
+                        f"{fn0.name} ({fn0.entry_address})."
+                    ),
                     explanation=(
-                        f"Non-replay telemetry from trusted tracer '{ev0.source_tool}' reported trace_verified execution of '{api0}' "
-                        f"at static address {fn0.entry_address} ({fn0.function_id})."
+                        f"Non-replay telemetry from '{ev0.source_tool}' carried backend-signed trace session "
+                        f"'{auth0.trace_session_id if auth0 else 'verified'}' for module '{auth0.module_name if auth0 else 'sample'}' "
+                        f"mapping IP 0x{(auth0.instruction_pointer if auth0 else 0):x} -> VA 0x{(auth0.mapped_static_va if auth0 else 0):x} "
+                        f"inside {fn0.function_id} calling '{api0}'."
                     ),
                     confidence=CorrelationConfidence(
                         score=0.92,
                         level="high",
-                        rationale="Trusted module/function runtime trace matched verified sample SHA-256 function table.",
+                        rationale=(
+                            "Backend-authenticated module/base/IP trace matched verified sample SHA-256 function bounds "
+                            "and recorded API imports."
+                        ),
                     ),
                     known_limitations=_build_limitations(
                         ctx,
@@ -718,10 +626,10 @@ def run_deterministic_correlation_rules(
     # ------------------------------------------------------------------
     if static_idx.curated_strings and events:
         # Build O(E) reverse map of normalized target tokens to events (avoids O(S * E)!)
-        ev_by_token: Dict[str, List[AnalysisEvent]] = {}
-        ev_search_blobs: List[Tuple[AnalysisEvent, str]] = []
+        ev_by_token: Dict[str, List[NormalizedDynamicEvent]] = {}
+        ev_search_blobs: List[Tuple[NormalizedDynamicEvent, str]] = []
         for ev in events:
-            attrs = ev.attributes if isinstance(ev.attributes, dict) else {}
+            attrs = ev.attributes if isinstance(ev.attributes, Mapping) else {}
             candidates: List[str] = []
             for v in (
                 ev.target_path,
@@ -745,7 +653,7 @@ def run_deterministic_correlation_rules(
             for tok in candidates:
                 ev_by_token.setdefault(tok, []).append(ev)
 
-        matched_pairs: List[Tuple[StaticStringEvidence, AnalysisEvent]] = []
+        matched_pairs: List[Tuple[StaticStringEvidence, NormalizedDynamicEvent]] = []
         for norm_str, st in static_idx.curated_strings[:80]:
             candidates_evaluated += 1
             hit_events = ev_by_token.get(norm_str)
