@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Shield,
   Activity,
@@ -50,6 +50,7 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [loading, setLoading] = useState(true);
 
+  const mountedRef = useRef(true);
   const TERMINAL_STATES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'BLOCKED_BY_POLICY'];
 
   const fetchData = async (isInitial = false) => {
@@ -61,6 +62,7 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
         api.getOrchestration(analysisId),
         api.getArtifacts(analysisId),
       ]);
+      if (!mountedRef.current) return null;
       setAnalysis(analysisData);
       setEvents(eventsData.items);
       setOrchestration(orchData);
@@ -70,17 +72,23 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
       console.error(err);
       return null;
     } finally {
-      if (isInitial) setLoading(false);
+      if (isInitial && mountedRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     let timer: ReturnType<typeof setInterval>;
 
     const runPolling = async () => {
       const status = await fetchData(true);
+      if (!mountedRef.current) return;
       if (status && !TERMINAL_STATES.includes(status)) {
         timer = setInterval(async () => {
+          if (!mountedRef.current) {
+            clearInterval(timer);
+            return;
+          }
           const currentStatus = await fetchData(false);
           if (currentStatus && TERMINAL_STATES.includes(currentStatus)) {
             clearInterval(timer);
@@ -92,6 +100,7 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
     runPolling();
 
     return () => {
+      mountedRef.current = false;
       if (timer) clearInterval(timer);
     };
   }, [analysisId]);

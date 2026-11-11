@@ -18,20 +18,27 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
   const [highlightSuspicious, setHighlightSuspicious] = useState(true);
   const [filterType, setFilterType] = useState<string>('all');
 
+  const mountedRef = useRef(true);
+
   const fetchGraph = async () => {
     try {
       setLoading(true);
       const data = await api.getBehaviorGraph(analysisId);
+      if (!mountedRef.current) return;
       setGraphData(data);
     } catch (err) {
       console.error(err);
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     fetchGraph();
+    return () => {
+      mountedRef.current = false;
+    };
   }, [analysisId]);
 
   // Initialize and update Cytoscape instance

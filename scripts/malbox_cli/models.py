@@ -41,6 +41,10 @@ REQUIRED_DB_TABLES = {
     "behavioral_findings",
     "orchestration_records",
     "analysis_reports",
+    # Phase 3 — Ghidra static analysis results
+    "static_analysis_results",
+    # Phase 4 — Evidence correlation engine
+    "evidence_correlations",
 }
 
 

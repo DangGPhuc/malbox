@@ -1,9 +1,9 @@
 # malbox-ai — Build Status & Verification Ledger
 
 **Project Codename:** `malbox-ai`  
-**Architecture Version:** 0.2.8-alpha (Phase 4B Correlation Explorer UI & Report Integration)  
-**Active Branch:** `feat/phase4b-correlation-explorer`  
-**Status:** **OPERATIONAL — PHASE 4B CORRELATION EXPLORER & TRACE-KEY HARDENING VERIFIED**
+**Architecture Version:** 0.2.9-rc1 (Release Candidate — Coherence, Async Fencing & Mount Guard Hardening)  
+**Active Branch:** `audit/v02-release-candidate`  
+**Status:** **OPERATIONAL — RC GATE 0 VERIFIED (Coherent Correlation, Fenced Async Lookups, Mount Guards, Phase 3/4 DB Health Checks)**
 
 ---
 
@@ -32,12 +32,12 @@
 ## 2. Test Execution Outcomes
 
 ### Backend (`pytest` 9.2.0)
-- **Local Host Default Suite (Kali, `bwrap` + `opencode v2.1.4`):** **138 passed, 1 skipped** (`test_live_ghidra_bwrap_smoke_opt_in` skipped by default unless `MALBOX_RUN_LIVE_GHIDRA_TEST=1`)
+- **Local Host Default Suite (Kali, `bwrap` + `opencode v2.1.4`):** **139 passed, 1 skipped** (`test_live_ghidra_bwrap_smoke_opt_in` skipped by default unless `MALBOX_RUN_LIVE_GHIDRA_TEST=1`)
 - **Opt-In Live Ghidra + Bubblewrap + Cgroup v2 Smoke Test (`MALBOX_RUN_LIVE_GHIDRA_TEST=1`):** **Verified in Phase 3B Gate 0 (`843947c`)** (Ghidra `12.1.4` + OpenJDK `25.0.4.1` + `ExportProgramFacts.java` inside `systemd-run --user --scope` + `bwrap` on harmless constructed PE32 stub with decompiler `entry` output verified; `binary_executed=False`)
 - **Hosted `ubuntu-latest` CI Note:** Tests requiring host Linux `bwrap`/`opencode`/`ghidra` binaries (`test_real_bwrap_sandbox_and_real_opencode_cli_integration`, `test_live_ghidra_bwrap_smoke_opt_in`) skip cleanly when absent on hosted CI runners.
 
 ### Frontend (`tsc --noEmit` + `vitest` 4.1.12 + `vite` 6.4.6)
-- **Frontend Unit Tests:** **37/37 PASSED** across `frontend/src/__tests__/CorrelationPage.test.tsx` (8), `frontend/src/__tests__/ReportPage.test.tsx` (11), `frontend/src/__tests__/EnrichmentFlow.test.tsx` (4), and `frontend/src/__tests__/StaticAnalysisPage.test.tsx` (14)
+- **Frontend Unit Tests:** **39/39 PASSED** across `frontend/src/__tests__/CorrelationPage.test.tsx` (10), `frontend/src/__tests__/ReportPage.test.tsx` (11), `frontend/src/__tests__/EnrichmentFlow.test.tsx` (4), and `frontend/src/__tests__/StaticAnalysisPage.test.tsx` (14)
 - **TypeScript Strict Check:** `npm run typecheck` PASSED (0 errors)
 - **Production Build:** `npm run build` PASSED (lazy-loaded `StaticAnalysisPage` & split `cytoscape.esm` chunks)
 - **Dependency Audit Baseline:** `npm audit` -> 0 vulnerabilities (`vite@^6.4.6`, `vitest@^4.1.12`)
@@ -46,8 +46,8 @@
 1. `backend/tests/test_ai_orchestration.py`: (5/5 PASSED)
 2. `backend/tests/test_cape_adapter.py`: (3/3 PASSED)
 3. `backend/tests/test_detection_rules.py`: (6/6 PASSED)
-4. `backend/tests/test_doctor_cli.py`: (12/12 PASSED, including Phase 4B Gate 0 `MALBOX_TRACE_AUTH_KEY` policy & secret redaction)
-5. `backend/tests/test_evidence_correlation.py`: (18/18 PASSED, covering Phase 4A + Phase 4A.1 + Phase 4B Gate 0 trace-key isolation & HTML correlation export)
+4. `backend/tests/test_doctor_cli.py`: (12/12 PASSED, including Phase 4B Gate 0 `MALBOX_TRACE_AUTH_KEY` policy & secret redaction; RC Gate 1 Phase 3/4 DB table health checks for `static_analysis_results` and `evidence_correlations`)
+5. `backend/tests/test_evidence_correlation.py`: (19/19 PASSED, covering Phase 4A + Phase 4A.1 + Phase 4B Gate 0 trace-key isolation & HTML correlation export + RC Gate 0 coherent correlation selection & fenced async lookup)
 6. `backend/tests/test_health.py`: (2/2 PASSED)
 7. `backend/tests/test_intelligence_engine.py`: (13/13 PASSED)
 8. `backend/tests/test_opencode_and_hardening.py`: (13/13 PASSED)
