@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.analysis import Analysis
 from app.models.event import AnalysisEvent
 from app.schemas.static_analysis import StaticAnalysisResult
@@ -23,6 +24,7 @@ from app.services.evidence_correlation.schemas import (
 from app.services.evidence_correlation.verifier import (
     compute_streaming_evidence_fingerprint,
     validate_runtime_events,
+    validate_trace_auth_key,
     verify_correlation_inputs,
 )
 
@@ -47,12 +49,14 @@ class EvidenceCorrelationEngine:
         max_functions: int = DEFAULT_MAX_CORR_FUNCTIONS,
         max_findings: int = DEFAULT_MAX_CORR_FINDINGS,
         max_bytes: int = DEFAULT_MAX_CORR_BYTES,
+        trace_signing_secret: Optional[str] = None,
     ) -> None:
         self.db = db
         self.max_events = max(10, int(max_events))
         self.max_functions = max(10, int(max_functions))
         self.max_findings = max(1, int(max_findings))
         self.max_bytes = max(4096, int(max_bytes))
+        self.trace_signing_secret = trace_signing_secret
 
     def _fetch_bounded_events(self, analysis_id: str, total_count: int) -> List[AnalysisEvent]:
         if total_count <= 0:
@@ -148,6 +152,7 @@ class EvidenceCorrelationEngine:
             static_result=ctx.static_result,
             sample_file_name=ctx.sample.file_name if ctx.sample else None,
             pe_metadata=pe_meta,
+            signing_secret=self.trace_signing_secret,
         )
 
         static_res = ctx.static_result
@@ -159,12 +164,25 @@ class EvidenceCorrelationEngine:
                 f"Dynamic telemetry bounded cleanly: scanned {len(events)} of {total_events_db} events."
             )
 
+        active_trace_key = (
+            self.trace_signing_secret
+            if self.trace_signing_secret is not None
+            else settings.TRACE_AUTH_KEY
+        )
+        trace_key_ok, _ = validate_trace_auth_key(active_trace_key)
+
         if ctx.is_replay:
             trace_mode = "replay_synthetic_disallowed"
         elif has_trusted_trace:
             trace_mode = "authenticated_runtime_trace_verified"
         elif any("trace" in w.lower() for w in ev_warnings):
-            trace_mode = "unauthenticated_or_mismatched_trace_rejected"
+            trace_mode = (
+                "trace_auth_disabled_or_unconfigured"
+                if not trace_key_ok
+                else "unauthenticated_or_mismatched_trace_rejected"
+            )
+        elif not trace_key_ok:
+            trace_mode = "trace_auth_disabled"
         else:
             trace_mode = "no_authenticated_runtime_trace"
 

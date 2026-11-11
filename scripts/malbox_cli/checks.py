@@ -218,6 +218,52 @@ def check_resources(
     )
 
 
+_WEAK_TRACE_KEY_VALUES = {
+    "malbox-development-secret-key-32chars-minimum",
+    "dev-secret-key-change-in-production-min32chars",
+    "changeme",
+    "change-me",
+    "development",
+    "dev-key",
+    "test-key",
+    "secret",
+    "password",
+    "placeholder",
+    "default",
+    "malbox-trace-auth-key",
+    "malbox-dev-trace-key",
+}
+_WEAK_TRACE_KEY_SUBSTRINGS = (
+    "malbox-development-secret",
+    "dev-secret",
+    "change-in-production",
+    "changeme",
+    "change_me",
+    "placeholder",
+    "example-key",
+    "sample-key",
+    "test-secret",
+    "dummy-key",
+    "insecure",
+)
+
+
+def _trace_key_policy_error(trace_key: str, app_secret_key: str) -> Optional[str]:
+    cleaned = trace_key.strip()
+    if not cleaned:
+        return None
+    if cleaned == app_secret_key.strip():
+        return "MALBOX_TRACE_AUTH_KEY matches MALBOX_SECRET_KEY."
+    lowered = cleaned.lower()
+    if lowered in _WEAK_TRACE_KEY_VALUES or any(sub in lowered for sub in _WEAK_TRACE_KEY_SUBSTRINGS):
+        return "MALBOX_TRACE_AUTH_KEY uses a known development or placeholder secret."
+    if len(cleaned) < 32:
+        return "MALBOX_TRACE_AUTH_KEY is shorter than 32 characters."
+    if len(set(cleaned)) < 10:
+        return "MALBOX_TRACE_AUTH_KEY has insufficient character entropy."
+    return None
+
+
 def check_env_config(
     root_dir: Path,
     environ: Optional[Dict[str, str]] = None,
@@ -262,6 +308,19 @@ def check_env_config(
             summary="UNSAFE CONFIGURATION: MALBOX_LIVE_MODE_ENABLED=true without MALBOX_OPERATOR_TOKEN.",
             details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
             remediation="Set `MALBOX_LIVE_MODE_ENABLED=false` in `.env` for Replay Mode, or configure a strong `MALBOX_OPERATOR_TOKEN` if an isolated CAPE lab is intended.",
+        )
+
+    trace_key_raw = (config.get("MALBOX_TRACE_AUTH_KEY") or "").strip()
+    secret_key_raw = (config.get("MALBOX_SECRET_KEY") or "").strip()
+    trace_key_err = _trace_key_policy_error(trace_key_raw, secret_key_raw)
+    if trace_key_err:
+        return CheckResult(
+            id="env_config",
+            name="Configuration (.env) & Safety Policy",
+            status=CheckStatus.FAIL,
+            summary=f"UNSAFE TRACE KEY CONFIGURATION: {trace_key_err}",
+            details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
+            remediation="Leave `MALBOX_TRACE_AUTH_KEY=` empty to disable live trace auth cleanly, or generate an isolated key via `openssl rand -hex 32`.",
         )
 
     warnings: List[str] = []

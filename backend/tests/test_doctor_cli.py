@@ -684,3 +684,54 @@ def test_root_malbox_entrypoint_cli_json_and_smoke_invocation():
     payload = json.loads(res_check.stdout)
     assert payload["mode"] == "check"
     assert {c["status"] for c in payload["checks"]}.issubset({"PASS", "WARN", "FAIL", "SKIP"})
+
+
+def test_doctor_trace_auth_key_policy_and_redaction(tmp_path):
+    """Gate 0: Doctor rejects dev/weak/SECRET_KEY-shared MALBOX_TRACE_AUTH_KEY without exposing secrets."""
+    ws = _make_isolated_workspace(tmp_path)
+    runner = FakeToolchainRunner(ws)
+
+    # Empty TRACE_AUTH_KEY passes cleanly (traces disabled by default)
+    res_empty = run_doctor(ws, mode="default", environ={}, runner=runner, which_fn=_fake_which)
+    assert res_empty["exit_code"] == 0
+    env_chk = next(c for c in res_empty["checks"] if c["id"] == "env_config")
+    assert env_chk["status"] == "PASS"
+    assert env_chk["details"]["config"]["trace_auth_key_configured"] is False
+
+    # Reject dev default / shared SECRET_KEY / short / low-entropy values without printing them
+    for bad_trace_key in (
+        "dev-secret-key-change-in-production-min32chars",
+        "malbox-development-secret-key-32chars-minimum",
+        "too-short-trace-key",
+        "b" * 48,
+    ):
+        (ws / ".env").write_text(
+            "MALBOX_HOST=127.0.0.1\n"
+            "MALBOX_LIVE_MODE_ENABLED=false\n"
+            "MALBOX_SECRET_KEY=dev-secret-key-change-in-production-min32chars\n"
+            f"MALBOX_TRACE_AUTH_KEY={bad_trace_key}\n",
+            encoding="utf-8",
+        )
+        os.chmod(ws / ".env", 0o600)
+        rep = run_doctor(ws, mode="check", environ={}, runner=runner, which_fn=_fake_which)
+        assert rep["exit_code"] == 1
+        bad_chk = next(c for c in rep["checks"] if c["id"] == "env_config")
+        assert bad_chk["status"] == "FAIL"
+        assert bad_trace_key not in json.dumps(rep)
+
+    # Strong high-entropy isolated TRACE_AUTH_KEY passes cleanly & remains hidden
+    strong_trace_key = "8e3b9f10c4a267d518a0f9e2b34c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c"
+    (ws / ".env").write_text(
+        "MALBOX_HOST=127.0.0.1\n"
+        "MALBOX_LIVE_MODE_ENABLED=false\n"
+        "MALBOX_SECRET_KEY=dev-secret-key-change-in-production-min32chars\n"
+        f"MALBOX_TRACE_AUTH_KEY={strong_trace_key}\n",
+        encoding="utf-8",
+    )
+    os.chmod(ws / ".env", 0o600)
+    rep_ok = run_doctor(ws, mode="check", environ={}, runner=runner, which_fn=_fake_which)
+    assert rep_ok["exit_code"] == 0
+    ok_chk = next(c for c in rep_ok["checks"] if c["id"] == "env_config")
+    assert ok_chk["status"] == "PASS"
+    assert ok_chk["details"]["config"]["trace_auth_key_configured"] is True
+    assert strong_trace_key not in json.dumps(rep_ok)

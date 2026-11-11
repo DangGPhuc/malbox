@@ -56,8 +56,10 @@ class Settings(BaseSettings):
     AI_MAX_TOKENS: int = 2048
     AI_TEMPERATURE: float = 0.1
 
-    # Reporting Enrichment Authorization, Consent & Budget (No hardcoded secrets; fail closed)
-    REPORTING_AUTH_TOKEN: str = ""  # Required via X-Reporting-Token for POST .../report/intelligence
+    # Reporting & Correlation Security (No hardcoded secrets; fail closed)
+    REPORTING_AUTH_TOKEN: str = ""  # Required via X-Reporting-Token for POST .../report/intelligence & .../correlation
+    # Isolated high-entropy HMAC key for live runtime trace verification (Empty = authenticated traces disabled; NEVER falls back to SECRET_KEY)
+    TRACE_AUTH_KEY: str = ""
     REPORTING_EXTERNAL_AI_CONSENT: bool = False  # Server-level consent for sending evidence to external providers
     REPORTING_RATE_LIMIT_REQUESTS: int = 10
     REPORTING_RATE_LIMIT_WINDOW_SECONDS: int = 60

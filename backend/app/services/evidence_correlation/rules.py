@@ -377,10 +377,11 @@ def run_deterministic_correlation_rules(
                         f"{fn0.name} ({fn0.entry_address})."
                     ),
                     explanation=(
-                        f"Non-replay telemetry from '{ev0.source_tool}' carried backend-signed trace session "
-                        f"'{auth0.trace_session_id if auth0 else 'verified'}' for module '{auth0.module_name if auth0 else 'sample'}' "
-                        f"mapping IP 0x{(auth0.instruction_pointer if auth0 else 0):x} -> VA 0x{(auth0.mapped_static_va if auth0 else 0):x} "
-                        f"inside {fn0.function_id} calling '{api0}'."
+                        f"Non-replay telemetry from '{ev0.source_tool}' carried backend-signed trace from producer "
+                        f"'{auth0.trace_producer if auth0 else 'verified'}' (session '{auth0.trace_session_id if auth0 else 'verified'}') "
+                        f"for module '{auth0.module_name if auth0 else 'sample'}' mapping IP 0x{(auth0.instruction_pointer if auth0 else 0):x} -> "
+                        f"VA 0x{(auth0.mapped_static_va if auth0 else 0):x} inside {fn0.function_id} calling '{api0}'. "
+                        "Note: HMAC verification proves trace signer authenticity rather than OS sensor infallibility."
                     ),
                     confidence=CorrelationConfidence(
                         score=0.92,

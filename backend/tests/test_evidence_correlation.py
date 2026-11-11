@@ -56,6 +56,7 @@ from app.services.evidence_correlation.service import EvidenceCorrelationService
 from app.services.evidence_correlation.verifier import (
     compute_authenticated_trace_proof,
     validate_runtime_events,
+    validate_trace_auth_key,
     verify_correlation_inputs,
 )
 from app.services.intelligence.bundle_builder import EvidenceBundleBuilder
@@ -356,20 +357,23 @@ def test_4_normalized_api_matching_and_execution_invariant(db_session):
 
     res2 = EvidenceCorrelationEngine(db_session).correlate(analysis.id)
     assert [f for f in res2.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
-    assert any("Unauthenticated trace metadata" in w for w in res2.warnings)
+    assert any("MALBOX_TRACE_AUTH_KEY" in w or "Unauthenticated trace metadata" in w for w in res2.warnings)
 
-    # Backend-authenticated HMAC trace provenance with valid module, ASLR base, IP range, and matching API -> DIRECTLY_OBSERVED
+    # Backend-authenticated HMAC trace provenance with isolated high-entropy key + valid module/base/IP/API -> DIRECTLY_OBSERVED
+    isolated_trace_key = hashlib.sha256(b"isolated-test-trace-signer-key-v1").hexdigest()
     trace_proof = compute_authenticated_trace_proof(
         analysis_id=analysis.id,
         sample_sha256=sample.sha256,
         trace_session_id="sess-trace-001",
         source_tool="backend-callstack-verifier",
+        trace_producer="backend-callstack-verifier",
         module_name=sample.file_name,
         module_base="0x10000000",
         instruction_pointer="0x10001028",  # maps to static 0x401028 inside [0x401000, 0x4010dc)
         function_id=fn_id,
         function_address="0x401000",
         api_name="InternetOpenW",
+        signing_secret=isolated_trace_key,
     )
     ev_traced = AnalysisEvent(
         analysis_id=analysis.id,
@@ -387,7 +391,13 @@ def test_4_normalized_api_matching_and_execution_invariant(db_session):
     db_session.add(ev_traced)
     db_session.commit()
 
-    res3 = EvidenceCorrelationEngine(db_session).correlate(analysis.id)
+    # With default empty settings.TRACE_AUTH_KEY, even signed event stays disabled (no SECRET_KEY fallback!)
+    res_disabled = EvidenceCorrelationEngine(db_session).correlate(analysis.id)
+    assert [f for f in res_disabled.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
+    assert res_disabled.provenance.trace_verification_mode == "trace_auth_disabled_or_unconfigured"
+
+    # With isolated signing key passed cleanly, verified event emits DIRECTLY_OBSERVED
+    res3 = EvidenceCorrelationEngine(db_session, trace_signing_secret=isolated_trace_key).correlate(analysis.id)
     direct = [f for f in res3.findings if f.relationship == "DIRECTLY_OBSERVED"]
     assert len(direct) == 1
     assert direct[0].behavioral_execution_directly_observed is True
@@ -977,7 +987,13 @@ def test_21_forged_tracer_names_and_unauthenticated_trace_flags_rejected(db_sess
     assert all(not f.behavioral_execution_directly_observed for f in res.findings)
     assert any(f.relationship == "CONSISTENT_WITH" for f in res.findings)
     assert res.limitations.has_runtime_function_trace is False
-    assert res.provenance.trace_verification_mode == "unauthenticated_or_mismatched_trace_rejected"
+    assert res.provenance.trace_verification_mode == "trace_auth_disabled_or_unconfigured"
+
+    # Even with an isolated high-entropy signing key enabled, forged tool names without trace_auth are still rejected
+    isolated_trace_key = hashlib.sha256(b"test21-isolated-key-forged-tools").hexdigest()
+    res_with_key = EvidenceCorrelationEngine(db_session, trace_signing_secret=isolated_trace_key).correlate(analysis.id)
+    assert [f for f in res_with_key.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
+    assert res_with_key.provenance.trace_verification_mode == "unauthenticated_or_mismatched_trace_rejected"
 
     # Also enforce CorrelationFinding Pydantic schema invariant when static_references or trace_verified missing
     with pytest.raises(ValidationError):
@@ -1059,17 +1075,20 @@ def test_22_trace_provenance_mismatches_and_replay_override_blocked(db_session):
     internet_fn_id = make_static_function_id(sample.sha256, "0x402500")
     ts = datetime(2026, 11, 10, 14, 15, 0, tzinfo=timezone.utc)
 
+    isolated_trace_key = hashlib.sha256(b"isolated-test-trace-signer-mismatch-v1").hexdigest()
     common = dict(
         analysis_id=analysis.id,
         sample_sha256=sample.sha256,
         trace_session_id="sess-bad-cases",
         source_tool="backend-callstack-verifier",
+        trace_producer="backend-callstack-verifier",
         module_name=sample.file_name,
         module_base="0x400000",
         instruction_pointer="0x402520",
         function_id=internet_fn_id,
         function_address="0x402500",
         api_name="InternetOpenW",
+        signing_secret=isolated_trace_key,
     )
 
     bad_cases = [
@@ -1106,7 +1125,7 @@ def test_22_trace_provenance_mismatches_and_replay_override_blocked(db_session):
         )
     db_session.commit()
 
-    res = EvidenceCorrelationEngine(db_session).correlate(analysis.id)
+    res = EvidenceCorrelationEngine(db_session, trace_signing_secret=isolated_trace_key).correlate(analysis.id)
     assert [f for f in res.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
     assert res.limitations.has_runtime_function_trace is False
     assert all(not f.behavioral_execution_directly_observed for f in res.findings)
@@ -1127,12 +1146,14 @@ def test_22_trace_provenance_mismatches_and_replay_override_blocked(db_session):
         sample_sha256=rep_sample.sha256,
         trace_session_id="sess-replay-spoof",
         source_tool="backend-callstack-verifier",
+        trace_producer="backend-callstack-verifier",
         module_name=rep_sample.file_name,
         module_base="0x400000",
         instruction_pointer="0x401010",
         function_id=rep_fn_id,
         function_address="0x401000",
         api_name="InternetOpenW",
+        signing_secret=isolated_trace_key,
     )
     db_session.add(
         AnalysisEvent(
@@ -1148,7 +1169,7 @@ def test_22_trace_provenance_mismatches_and_replay_override_blocked(db_session):
     )
     db_session.commit()
 
-    rep_res = EvidenceCorrelationEngine(db_session).correlate(rep_analysis.id)
+    rep_res = EvidenceCorrelationEngine(db_session, trace_signing_secret=isolated_trace_key).correlate(rep_analysis.id)
     assert [f for f in rep_res.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
     assert rep_res.provenance.trace_verification_mode == "replay_synthetic_disallowed"
     assert all(f.relationship in ("SYNTHETIC_SCENARIO_ONLY", "INSUFFICIENT_EVIDENCE") for f in rep_res.findings)
@@ -1560,4 +1581,251 @@ def test_27_bounded_history_retrieval_across_large_history_and_replay_invariance
         assert any("preserved previous usable result" in w for w in ro.warnings)
     finally:
         event.remove(db_session.bind, "before_cursor_execute", _capture_sql)
+
+
+# ===========================================================================
+# PHASE 4B GATE 0 — SECURE TRACE AUTHENTICATION TESTS
+# ===========================================================================
+
+
+def test_gate0_trace_auth_key_isolation_producer_ownership_and_secret_protection(
+    client, db_session, monkeypatch
+):
+    """
+    Phase 4B Gate 0:
+    - TRACE_AUTH_KEY defaults empty (disabled) and NEVER falls back to SECRET_KEY.
+    - Rejects empty, weak, short, low-entropy, development/example, and SECRET_KEY-shared keys.
+    - Enforces trace_producer & trace_session_id ownership + prevents session splicing/replays.
+    - Never leaks signing keys in API responses, reports, warnings, or errors.
+    """
+    job_queue_manager.stop()
+
+    # 1. Default settings.TRACE_AUTH_KEY is empty; validate_trace_auth_key rejects empty/default/dev/weak keys
+    assert settings.TRACE_AUTH_KEY == ""
+    for bad_key in (
+        "",
+        "   ",
+        settings.SECRET_KEY,
+        "malbox-development-secret-key-32chars-minimum",
+        "dev-secret-key-change-in-production-min32chars",
+        "changeme",
+        "short-key",
+        "a" * 64,
+        "dev-secret-placeholder-12345678901234567890",
+    ):
+        valid_k, err = validate_trace_auth_key(bad_key)
+        assert valid_k is None
+        assert err is not None
+        if bad_key.strip():
+            assert bad_key.strip() not in err
+
+    with pytest.raises(ValueError):
+        compute_authenticated_trace_proof(
+            analysis_id="ana_1",
+            sample_sha256="a" * 64,
+            trace_session_id="sess-1",
+            source_tool="backend-callstack-verifier",
+            module_name="x.exe",
+            module_base="0x400000",
+            instruction_pointer="0x401010",
+            function_id="func:" + ("a" * 16) + ":0x401000",
+            function_address="0x401000",
+            api_name="InternetOpenW",
+            signing_secret=settings.SECRET_KEY,
+        )
+
+    strong_key = hashlib.sha256(b"gate0-isolated-high-entropy-trace-key-2026").hexdigest()
+    good_k, good_err = validate_trace_auth_key(strong_key)
+    assert good_k == strong_key and good_err is None
+
+    sample, analysis = _create_sample_and_analysis(db_session, tag="gate0_trace", backend_type="cape")
+    _, static_res = _create_static_record(
+        db_session, sample, analysis.id, imports=[("WININET.dll", "InternetOpenW")]
+    )
+    fn_id = static_res.functions[0].function_id
+    ts = datetime(2026, 11, 11, 10, 0, 0, tzinfo=timezone.utc)
+
+    # 2. Forged signature made using general SECRET_KEY must NEVER be trusted even when TRACE_AUTH_KEY is empty or weak
+    import hmac as _hmac
+
+    forged_msg = "|".join(
+        [
+            "malbox-trace-v1",
+            analysis.id,
+            sample.sha256,
+            "backend-callstack-verifier",
+            "sess-forged-secretkey",
+            "backend-callstack-verifier",
+            sample.file_name,
+            "0x400000",
+            "0x401018",
+            fn_id,
+            "0x401000",
+            "internetopen",
+        ]
+    ).encode("utf-8")
+    forged_hmac_secret_key = _hmac.new(
+        settings.SECRET_KEY.encode("utf-8"), forged_msg, hashlib.sha256
+    ).hexdigest()
+    forged_proof = {
+        "version": "malbox-trace-v1",
+        "analysis_id": analysis.id,
+        "sample_sha256": sample.sha256,
+        "trace_producer": "backend-callstack-verifier",
+        "trace_session_id": "sess-forged-secretkey",
+        "module_name": sample.file_name,
+        "module_base": "0x400000",
+        "instruction_pointer": "0x401018",
+        "function_id": fn_id,
+        "function_address": "0x401000",
+        "api_name": "InternetOpenW",
+        "hmac_sha256": forged_hmac_secret_key,
+    }
+    db_session.add(
+        AnalysisEvent(
+            id="ev_gate0_forged_secret",
+            analysis_id=analysis.id,
+            category="api",
+            action="call",
+            timestamp=ts,
+            process_name=sample.file_name,
+            attributes={"api": "InternetOpenW", "trace_auth": forged_proof},
+            source_tool="backend-callstack-verifier",
+        )
+    )
+    db_session.commit()
+
+    # Empty key fails conservatively -> CONSISTENT_WITH
+    res_no_key = EvidenceCorrelationEngine(db_session).correlate(analysis.id)
+    assert [f for f in res_no_key.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
+    assert any(f.relationship == "CONSISTENT_WITH" for f in res_no_key.findings)
+    assert res_no_key.provenance.trace_verification_mode == "trace_auth_disabled_or_unconfigured"
+
+    # Known weak key set in settings.TRACE_AUTH_KEY STILL rejects -> fails conservatively
+    monkeypatch.setattr(settings, "TRACE_AUTH_KEY", "dev-secret-key-change-in-production-min32chars")
+    res_weak_key = EvidenceCorrelationEngine(db_session).correlate(analysis.id)
+    assert [f for f in res_weak_key.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
+    assert res_weak_key.provenance.trace_verification_mode == "trace_auth_disabled_or_unconfigured"
+    assert "dev-secret-key-change-in-production-min32chars" not in json.dumps(res_weak_key.model_dump(mode="json"))
+
+    # Strong key configured, forged HMAC signed with SECRET_KEY STILL rejected
+    monkeypatch.setattr(settings, "TRACE_AUTH_KEY", strong_key)
+    res_strong_forged = EvidenceCorrelationEngine(db_session).correlate(analysis.id)
+    assert [f for f in res_strong_forged.findings if f.relationship == "DIRECTLY_OBSERVED"] == []
+    assert strong_key not in json.dumps(res_strong_forged.model_dump(mode="json"))
+
+    # 3. Wrong producer ownership, mismatched session attr, and cross-session conflict rejected
+    valid_proof = compute_authenticated_trace_proof(
+        analysis_id=analysis.id,
+        sample_sha256=sample.sha256,
+        trace_session_id="sess-primary-owner",
+        source_tool="backend-callstack-verifier",
+        trace_producer="backend-callstack-verifier",
+        module_name=sample.file_name,
+        module_base="0x400000",
+        instruction_pointer="0x401018",
+        function_id=fn_id,
+        function_address="0x401000",
+        api_name="InternetOpenW",
+        signing_secret=strong_key,
+    )
+    # Wrong source_tool vs signed trace_producer
+    ev_wrong_producer = AnalysisEvent(
+        id="ev_gate0_wrong_prod",
+        analysis_id=analysis.id,
+        category="api",
+        action="call",
+        timestamp=ts + timedelta(seconds=1),
+        process_name=sample.file_name,
+        attributes={"api": "InternetOpenW", "trace_auth": valid_proof},
+        source_tool="different-tool-spoof",
+    )
+    # Mismatched event trace_session_id attribute
+    ev_wrong_sess_attr = AnalysisEvent(
+        id="ev_gate0_wrong_sess_attr",
+        analysis_id=analysis.id,
+        category="api",
+        action="call",
+        timestamp=ts + timedelta(seconds=2),
+        process_name=sample.file_name,
+        attributes={
+            "api": "InternetOpenW",
+            "trace_session_id": "sess-other-tampered",
+            "trace_auth": valid_proof,
+        },
+        source_tool="backend-callstack-verifier",
+    )
+    # Valid primary session event
+    ev_valid_primary = AnalysisEvent(
+        id="ev_gate0_valid_1",
+        analysis_id=analysis.id,
+        category="api",
+        action="call",
+        timestamp=ts + timedelta(seconds=3),
+        process_name=sample.file_name,
+        attributes={"api": "InternetOpenW", "trace_auth": valid_proof},
+        source_tool="backend-callstack-verifier",
+    )
+    # Second event claiming a different conflicting session inside same analysis
+    proof_other_sess = compute_authenticated_trace_proof(
+        analysis_id=analysis.id,
+        sample_sha256=sample.sha256,
+        trace_session_id="sess-conflicting-secondary",
+        source_tool="backend-callstack-verifier",
+        trace_producer="backend-callstack-verifier",
+        module_name=sample.file_name,
+        module_base="0x400000",
+        instruction_pointer="0x401020",
+        function_id=fn_id,
+        function_address="0x401000",
+        api_name="InternetOpenW",
+        signing_secret=strong_key,
+    )
+    ev_conflict_sess = AnalysisEvent(
+        id="ev_gate0_conflict_sess",
+        analysis_id=analysis.id,
+        category="api",
+        action="call",
+        timestamp=ts + timedelta(seconds=4),
+        process_name=sample.file_name,
+        attributes={"api": "InternetOpenW", "trace_auth": proof_other_sess},
+        source_tool="backend-callstack-verifier",
+    )
+    db_session.add_all([ev_wrong_producer, ev_wrong_sess_attr, ev_valid_primary, ev_conflict_sess])
+    db_session.commit()
+
+    monkeypatch.setattr(settings, "REPORTING_AUTH_TOKEN", "gate0-api-tok")
+    post_res = client.post(
+        f"/api/v1/analyses/{analysis.id}/correlation",
+        headers={"X-Reporting-Token": "gate0-api-tok"},
+    )
+    assert post_res.status_code == 200
+    body = post_res.json()
+    assert strong_key not in post_res.text
+    assert settings.SECRET_KEY not in post_res.text
+    # Only ev_gate0_valid_1 from sess-primary-owner passes; conflicting/wrong-producer events are rejected cleanly
+    direct = [f for f in body["findings"] if f["relationship"] == "DIRECTLY_OBSERVED"]
+    assert len(direct) == 1
+    assert [d["ref_id"] for d in direct[0]["dynamic_references"]] == ["ev_gate0_valid_1"]
+    assert any("conflicting trace session" in w for w in body["warnings"])
+    assert any("does not match event source_tool" in w for w in body["warnings"])
+    assert any("trace_session_id disagrees" in w for w in body["warnings"])
+    assert "signers authenticity" in direct[0]["explanation"] or "signer authenticity" in direct[0]["explanation"]
+
+    # 4. Simulated exception carrying TRACE_AUTH_KEY is redacted cleanly in persisted/returned error
+    monkeypatch.setattr(
+        "app.services.evidence_correlation.engine.EvidenceCorrelationEngine.correlate",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError(f"crash with MALBOX_TRACE_AUTH_KEY={strong_key}")
+        ),
+    )
+    other_sample, other_ana = _create_sample_and_analysis(db_session, tag="gate0_err_redact", backend_type="cape")
+    fail_post = client.post(
+        f"/api/v1/analyses/{other_ana.id}/correlation",
+        headers={"X-Reporting-Token": "gate0-api-tok"},
+    )
+    assert fail_post.status_code == 200
+    assert strong_key not in fail_post.text
+    assert "[REDACTED]" in fail_post.text
+
 

@@ -52,6 +52,7 @@ def _collect_reporting_secrets() -> list[str]:
         for s in (
             settings.REPORTING_AUTH_TOKEN,
             settings.OPERATOR_TOKEN,
+            settings.TRACE_AUTH_KEY,
             settings.AI_API_KEY,
             settings.OPENCODE_PROVIDER_API_KEY,
             settings.SECRET_KEY,

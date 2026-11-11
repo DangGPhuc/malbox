@@ -30,9 +30,86 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 CORRELATION_RULES_VERSION = "corr-v1.1.0"
 TRACE_PROOF_VERSION = "malbox-trace-v1"
+TRACE_KEY_MIN_LENGTH = 32
+TRACE_KEY_MIN_UNIQUE_CHARS = 10
+
+_KNOWN_WEAK_TRACE_KEYS: Set[str] = {
+    "malbox-development-secret-key-32chars-minimum",
+    "dev-secret-key-change-in-production-min32chars",
+    "changeme",
+    "change-me",
+    "development",
+    "dev-key",
+    "test-key",
+    "secret",
+    "password",
+    "placeholder",
+    "default",
+    "malbox-trace-auth-key",
+    "malbox-dev-trace-key",
+}
+_KNOWN_WEAK_TRACE_SUBSTRINGS: Tuple[str, ...] = (
+    "malbox-development-secret",
+    "dev-secret",
+    "change-in-production",
+    "changeme",
+    "change_me",
+    "placeholder",
+    "example-key",
+    "sample-key",
+    "test-secret",
+    "dummy-key",
+    "insecure",
+)
+_GENERIC_UNTRUSTED_PRODUCERS: Set[str] = {
+    "sandbox",
+    "replay",
+    "mock",
+    "unknown",
+    "sandbox-apimon",
+    "sandbox-fsmon",
+    "sandbox-netmon",
+    "sandbox-regmon",
+    "sandbox-procmon",
+}
 
 # Retained intentionally empty: plain source_tool labels NEVER grant execution proof.
 TRUSTED_RUNTIME_TRACE_TOOLS: Set[str] = set()
+
+
+def validate_trace_auth_key(
+    raw_key: Optional[str],
+    *,
+    forbidden_secret_key: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Validates MALBOX_TRACE_AUTH_KEY cleanly without ever exposing secret values or
+    falling back to settings.SECRET_KEY. Rejects empty, known development/example
+    placeholders, SECRET_KEY reuse, short (<32), and low-entropy signing keys.
+    """
+    cleaned = (raw_key or "").strip()
+    if not cleaned:
+        return None, "MALBOX_TRACE_AUTH_KEY is unconfigured; authenticated runtime trace verification is disabled."
+
+    app_secret = (
+        forbidden_secret_key
+        if forbidden_secret_key is not None
+        else getattr(settings, "SECRET_KEY", "")
+    ).strip()
+    if app_secret and hmac.compare_digest(cleaned.encode("utf-8"), app_secret.encode("utf-8")):
+        return None, "Rejected trace signing key matching application SECRET_KEY; configure an isolated high-entropy MALBOX_TRACE_AUTH_KEY."
+
+    lowered = cleaned.lower()
+    if lowered in _KNOWN_WEAK_TRACE_KEYS or any(sub in lowered for sub in _KNOWN_WEAK_TRACE_SUBSTRINGS):
+        return None, "Rejected known development, default, or placeholder trace signing key."
+
+    if len(cleaned) < TRACE_KEY_MIN_LENGTH:
+        return None, f"Rejected trace signing key shorter than {TRACE_KEY_MIN_LENGTH} characters."
+
+    if len(set(cleaned)) < TRACE_KEY_MIN_UNIQUE_CHARS:
+        return None, "Rejected low-entropy trace signing key."
+
+    return cleaned, None
 
 
 def _basename_lower(path_like: Optional[str]) -> str:
@@ -53,6 +130,7 @@ def _make_trace_hmac_message(
     *,
     analysis_id: str,
     sample_sha256: str,
+    trace_producer: str,
     trace_session_id: str,
     source_tool: str,
     module_name: str,
@@ -67,6 +145,7 @@ def _make_trace_hmac_message(
             TRACE_PROOF_VERSION,
             analysis_id.strip(),
             sample_sha256.strip().lower(),
+            trace_producer.strip(),
             trace_session_id.strip(),
             (source_tool or "").strip(),
             _basename_lower(module_name),
@@ -92,20 +171,33 @@ def compute_authenticated_trace_proof(
     function_id: str,
     function_address: str,
     api_name: str,
+    trace_producer: Optional[str] = None,
     signing_secret: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Constructs a backend-authenticated runtime trace provenance payload signed with
-    HMAC-SHA256 bound to analysis ownership, sample SHA-256, runtime module identity,
-    loaded base address, instruction pointer, static function ID/entry, and API name.
+    HMAC-SHA256 bound to an isolated high-entropy MALBOX_TRACE_AUTH_KEY (or explicit
+    test signing_secret), producer/session ownership, analysis ID, sample SHA-256,
+    module identity, loaded base, instruction pointer, static function ID/entry, and API.
+    Note: HMAC verifies signer authenticity, not underlying OS sensor infallibility.
     """
-    secret = (signing_secret if signing_secret is not None else settings.SECRET_KEY).encode("utf-8")
+    candidate_key = signing_secret if signing_secret is not None else settings.TRACE_AUTH_KEY
+    valid_key, key_err = validate_trace_auth_key(candidate_key)
+    if not valid_key:
+        raise ValueError(key_err or "Invalid trace authentication signing key.")
+
+    eff_producer = (trace_producer if trace_producer is not None else source_tool).strip()
+    if len(eff_producer) < 3 or eff_producer.lower() in _GENERIC_UNTRUSTED_PRODUCERS:
+        raise ValueError("Invalid trace_producer identity.")
+
+    secret = valid_key.encode("utf-8")
     norm_mod_base = normalize_entry_address(module_base)
     norm_ip = normalize_entry_address(instruction_pointer)
     norm_fn_addr = normalize_entry_address(function_address)
     msg = _make_trace_hmac_message(
         analysis_id=analysis_id,
         sample_sha256=sample_sha256,
+        trace_producer=eff_producer,
         trace_session_id=trace_session_id,
         source_tool=source_tool,
         module_name=module_name,
@@ -120,6 +212,7 @@ def compute_authenticated_trace_proof(
         "version": TRACE_PROOF_VERSION,
         "analysis_id": analysis_id.strip(),
         "sample_sha256": sample_sha256.strip().lower(),
+        "trace_producer": eff_producer,
         "trace_session_id": trace_session_id.strip(),
         "module_name": module_name.strip(),
         "module_base": norm_mod_base,
@@ -135,6 +228,7 @@ def compute_authenticated_trace_proof(
 class VerifiedRuntimeTrace:
     analysis_id: str
     sample_sha256: str
+    trace_producer: str
     trace_session_id: str
     source_tool: str
     module_name: str
@@ -392,14 +486,19 @@ def verify_runtime_trace_provenance(
     expected_modules: Set[str],
     static_image_base: Optional[int],
     signing_secret: Optional[str] = None,
+    trusted_producers: Optional[Set[str]] = None,
 ) -> Tuple[Optional[VerifiedRuntimeTrace], Optional[str]]:
     """
     Strictly verifies whether an event carries authentic backend-signed runtime
     instruction-pointer trace provenance binding execution directly to a static function.
 
-    Returns (VerifiedRuntimeTrace, None) on full cryptographic & address-range verification,
-    (None, None) for normal untraced events, or (None, warning_message) when a weak/spoofed/
-    mismatched execution trace claim was rejected conservatively.
+    Security contract:
+    - Uses isolated MALBOX_TRACE_AUTH_KEY (or explicit isolated test signing_secret);
+      NEVER falls back to general SECRET_KEY and rejects weak/default/dev keys.
+    - HMAC verification proves authenticity of the trace signer, NOT absolute correctness
+      of the underlying OS instrumentation sensor.
+    - Enforces trace_producer & trace_session_id ownership alongside analysis_id, SHA-256,
+      module identity, loaded base, instruction-pointer range, and API membership.
     """
     trace_auth = attrs.get("trace_auth")
     claims_trace = bool(
@@ -416,6 +515,14 @@ def verify_runtime_trace_provenance(
         return (
             None,
             f"Replay Mode rejected runtime trace execution claim on event '{event_id}'; synthetic telemetry cannot prove execution.",
+        )
+
+    candidate_key = signing_secret if signing_secret is not None else settings.TRACE_AUTH_KEY
+    valid_key, key_err = validate_trace_auth_key(candidate_key)
+    if not valid_key:
+        return (
+            None,
+            f"Event '{event_id}' execution trace claim rejected: {key_err}",
         )
 
     if not sample_sha256 or not _SHA256_RE.match(sample_sha256):
@@ -445,6 +552,7 @@ def verify_runtime_trace_provenance(
     required_keys = (
         "analysis_id",
         "sample_sha256",
+        "trace_producer",
         "trace_session_id",
         "module_name",
         "module_base",
@@ -461,6 +569,7 @@ def verify_runtime_trace_provenance(
 
     tr_analysis_id = trace_auth["analysis_id"].strip()
     tr_sha = trace_auth["sample_sha256"].strip().lower()
+    tr_producer = trace_auth["trace_producer"].strip()
     tr_session = trace_auth["trace_session_id"].strip()
     tr_mod_name = trace_auth["module_name"].strip()
     tr_mod_base_raw = trace_auth["module_base"].strip()
@@ -470,8 +579,31 @@ def verify_runtime_trace_provenance(
     tr_api_raw = trace_auth["api_name"].strip()
     provided_hmac = trace_auth["hmac_sha256"].strip().lower()
 
+    if len(tr_producer) < 3 or tr_producer.lower() in _GENERIC_UNTRUSTED_PRODUCERS:
+        return None, f"Event '{event_id}' rejected: unverified or generic trace_producer identity."
+
+    if tr_producer != (source_tool or "").strip():
+        return (
+            None,
+            f"Event '{event_id}' rejected: trace_producer '{tr_producer}' does not match event source_tool '{source_tool}'.",
+        )
+
+    if trusted_producers is not None and tr_producer not in trusted_producers:
+        return (
+            None,
+            f"Event '{event_id}' rejected: trace_producer '{tr_producer}' is not in verified producer allowlist.",
+        )
+
+    attr_producer = attrs.get("trace_producer")
+    if attr_producer is not None and str(attr_producer).strip() and str(attr_producer).strip() != tr_producer:
+        return None, f"Event '{event_id}' rejected: event attribute trace_producer disagrees with trace_auth."
+
     if len(tr_session) < 4:
         return None, f"Event '{event_id}' rejected: invalid trace_session_id."
+
+    attr_session = attrs.get("trace_session_id")
+    if attr_session is not None and str(attr_session).strip() and str(attr_session).strip() != tr_session:
+        return None, f"Event '{event_id}' rejected: event attribute trace_session_id disagrees with trace_auth."
 
     if tr_analysis_id != analysis_id:
         return (
@@ -493,10 +625,11 @@ def verify_runtime_trace_provenance(
             f"Event '{event_id}' rejected: invalid module_base or instruction_pointer runtime address.",
         )
 
-    secret = (signing_secret if signing_secret is not None else settings.SECRET_KEY).encode("utf-8")
+    secret = valid_key.encode("utf-8")
     expected_msg = _make_trace_hmac_message(
         analysis_id=tr_analysis_id,
         sample_sha256=tr_sha,
+        trace_producer=tr_producer,
         trace_session_id=tr_session,
         source_tool=source_tool,
         module_name=tr_mod_name,
@@ -598,8 +731,9 @@ def verify_runtime_trace_provenance(
         VerifiedRuntimeTrace(
             analysis_id=tr_analysis_id,
             sample_sha256=tr_sha,
+            trace_producer=tr_producer,
             trace_session_id=tr_session,
-            source_tool=source_tool or "backend-tracer",
+            source_tool=source_tool or tr_producer,
             module_name=mod_base_name,
             module_base=mod_base,
             instruction_pointer=ip,
@@ -622,18 +756,20 @@ def validate_runtime_events(
     sample_file_name: Optional[str] = None,
     pe_metadata: Optional[Mapping[str, Any]] = None,
     signing_secret: Optional[str] = None,
+    trusted_producers: Optional[Set[str]] = None,
 ) -> Tuple[List[NormalizedDynamicEvent], Set[str], List[str], bool]:
     """
     Validates normalized dynamic event records WITHOUT mutating ORM rows:
     - Drops cross-analysis or malformed events.
     - Wraps event attributes in deep read-only MappingProxyType copies.
-    - Requires backend-authenticated HMAC trace proof + module/IP/API verification
-      before marking any event eligible for DIRECTLY_OBSERVED correlation.
+    - Requires backend-authenticated HMAC trace proof (isolated MALBOX_TRACE_AUTH_KEY)
+      + producer/session ownership + module/IP/API verification before DIRECTLY_OBSERVED.
     """
     verified: List[NormalizedDynamicEvent] = []
     valid_event_ids: Set[str] = set()
     warnings: List[str] = []
     has_trusted_trace = False
+    active_session_owner: Optional[Tuple[str, str]] = None
 
     fn_by_id: Dict[str, FunctionMetadata] = {}
     expected_modules: Set[str] = set()
@@ -691,7 +827,17 @@ def validate_runtime_events(
             expected_modules=expected_modules,
             static_image_base=static_image_base,
             signing_secret=signing_secret,
+            trusted_producers=trusted_producers,
         )
+        if auth_trace is not None:
+            owner_pair = (auth_trace.trace_producer, auth_trace.trace_session_id)
+            if active_session_owner is None:
+                active_session_owner = owner_pair
+            elif active_session_owner != owner_pair:
+                warnings.append(
+                    f"Event '{ev.id}' rejected: conflicting trace session/producer ownership within single analysis."
+                )
+                auth_trace = None
         if trace_warn:
             warnings.append(trace_warn)
         if auth_trace is not None:

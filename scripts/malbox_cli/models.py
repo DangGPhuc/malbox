@@ -22,6 +22,8 @@ class CheckStatus(str, Enum):
 
 SECRET_ENV_KEYS = {
     "MALBOX_OPERATOR_TOKEN",
+    "MALBOX_REPORTING_AUTH_TOKEN",
+    "MALBOX_TRACE_AUTH_KEY",
     "MALBOX_AI_API_KEY",
     "MALBOX_SECRET_KEY",
     "MALBOX_CAPE_API_TOKEN",
@@ -590,6 +592,8 @@ def redacted_config_summary(config: Dict[str, str]) -> Dict[str, Any]:
         "live_mode_enabled": parse_bool(config.get("MALBOX_LIVE_MODE_ENABLED"), default=False),
         "require_explicit_approval": parse_bool(config.get("MALBOX_REQUIRE_EXPLICIT_APPROVAL"), default=True),
         "operator_token_configured": bool((config.get("MALBOX_OPERATOR_TOKEN") or "").strip()),
+        "reporting_auth_token_configured": bool((config.get("MALBOX_REPORTING_AUTH_TOKEN") or "").strip()),
+        "trace_auth_key_configured": bool((config.get("MALBOX_TRACE_AUTH_KEY") or "").strip()),
         "ai_provider": config.get("MALBOX_AI_PROVIDER", "mock"),
         "ai_api_key_configured": bool((config.get("MALBOX_AI_API_KEY") or "").strip()),
         "cape_api_url": config.get("MALBOX_CAPE_API_URL", "http://127.0.0.1:8008"),

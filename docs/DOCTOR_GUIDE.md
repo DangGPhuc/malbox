@@ -58,6 +58,7 @@ Every check reports one of four deterministic statuses:
    - Detects missing `.env` and checks POSIX permissions (`0600`).
    - Validates `MALBOX_PORT` and `MALBOX_FRONTEND_PORT` (1–65535, no backend/frontend collision).
    - Blocks **unsafe Live Mode** (`MALBOX_LIVE_MODE_ENABLED=true` with empty `MALBOX_OPERATOR_TOKEN`).
+   - Validates `MALBOX_TRACE_AUTH_KEY` policy: empty (`""`, disabled by default) passes safely for Replay Mode, while known development/default values, keys shared with `MALBOX_SECRET_KEY`, short keys (`< 32` chars), or low-entropy keys fail cleanly (`[FAIL]`) without exposing secrets.
    - Warns if `MALBOX_HOST` is bound publicly (e.g., `0.0.0.0`).
 6. **Runtime & Quarantine Directories**: Verifies `data/`, `data/quarantine/` (`0700`), `data/artifacts/`, `.malbox/` (`0700`), and `.malbox/*.pid`/`.malbox/*.log` (`0600`).
 7. **Virtualenv & Backend Dependencies**: Verifies `.venv` and importability of FastAPI, Uvicorn, Pydantic, SQLAlchemy, `pefile`, Jinja2, HTTPX, and `pytest`.
@@ -72,7 +73,7 @@ Every check reports one of four deterministic statuses:
 ## 4. Hardened Security & Lifecycle Guarantees
 
 - **Zero `sudo` Invocations:** Doctor never installs OS system packages or executes privilege escalation commands.
-- **Secret & Permission Protection:** Existing `.env` files and secrets (`MALBOX_OPERATOR_TOKEN`, `MALBOX_AI_API_KEY`, `MALBOX_SECRET_KEY`, `MALBOX_CAPE_API_TOKEN`) are **never overwritten** automatically and **never printed** in human or `--json` output. Newly created `.env` files get POSIX `0600`, `.malbox` and `data/quarantine` get `0700`, and PID/log files get `0600`.
+- **Secret & Permission Protection:** Existing `.env` files and secrets (`MALBOX_OPERATOR_TOKEN`, `MALBOX_REPORTING_AUTH_TOKEN`, `MALBOX_TRACE_AUTH_KEY`, `MALBOX_AI_API_KEY`, `MALBOX_SECRET_KEY`, `MALBOX_CAPE_API_TOKEN`) are **never overwritten** automatically and **never printed** in human or `--json` output. Newly created `.env` files get POSIX `0600`, `.malbox` and `data/quarantine` get `0700`, and PID/log files get `0600`.
 - **Strong Managed Process Ownership Verification:**
   - `start`, `stop`, and `status` record OS process start identity (`proc_start_time` from `/proc/<pid>/stat` or `ps`) and validate exact service command signatures (`uvicorn` + `app.main:app` for backend; `vite` for frontend) plus workspace working directory.
   - Stored PGIDs are never blindly trusted: `stop` queries live `os.getpgid(pid)` from the kernel and sends group signals (`killpg`) only when the verified service leads its own dedicated session group (`os_pgid == pid != caller_pgid`).

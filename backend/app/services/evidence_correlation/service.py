@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import redact_sensitive_text
 from app.models.analysis import Analysis
 from app.models.correlation import StaticDynamicCorrelationRecord
@@ -207,8 +208,20 @@ class EvidenceCorrelationService:
             )
         except Exception as exc:
             self.db.rollback()
+            secrets = [
+                s
+                for s in (
+                    settings.TRACE_AUTH_KEY,
+                    settings.SECRET_KEY,
+                    settings.REPORTING_AUTH_TOKEN,
+                    settings.OPERATOR_TOKEN,
+                )
+                if s
+            ]
             safe_err = redact_sensitive_text(
-                f"Correlation engine failed ({type(exc).__name__}): {exc}", max_chars=240
+                f"Correlation engine failed ({type(exc).__name__}): {exc}",
+                extra_secrets=secrets,
+                max_chars=240,
             )
             fail_fp = self.engine.preview_source_fingerprint(analysis_id) or "failed"
             fail_result = self.engine.enforce_serialized_limit(

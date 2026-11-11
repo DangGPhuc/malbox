@@ -44,6 +44,8 @@ MALBOX_ARTIFACTS_DIR=./data/artifacts
 MALBOX_LIVE_MODE_ENABLED=false
 MALBOX_REQUIRE_EXPLICIT_APPROVAL=true
 MALBOX_OPERATOR_TOKEN=
+MALBOX_REPORTING_AUTH_TOKEN=
+MALBOX_TRACE_AUTH_KEY=
 MALBOX_DEFAULT_SANDBOX_BACKEND=replay
 MALBOX_AI_PROVIDER=mock
 MALBOX_CAPE_API_URL=http://127.0.0.1:8008
@@ -386,6 +388,7 @@ def run_replay_smoke_test(
             "MALBOX_DEFAULT_SANDBOX_BACKEND": "replay",
             "MALBOX_AI_PROVIDER": "mock",
             "MALBOX_OPERATOR_TOKEN": "",
+            "MALBOX_TRACE_AUTH_KEY": "",
         })
 
         t_start = time.perf_counter()

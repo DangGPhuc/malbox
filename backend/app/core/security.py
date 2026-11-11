@@ -65,6 +65,11 @@ def redact_sensitive_text(
         r"\1[REDACTED]",
         redacted,
     )
+    redacted = re.sub(
+        r"(?i)((?:malbox_)?trace_auth_key\s*[:=]\s*)[^\s,;'\"]+",
+        r"\1[REDACTED]",
+        redacted,
+    )
     redacted = re.sub(r"(?i)\bsk-[A-Za-z0-9_\-]{6,}", "[REDACTED_KEY]", redacted)
     redacted = re.sub(r"(?i)([?&](?:api_key|key|token|secret|password)=)[^&\s]+", r"\1[REDACTED]", redacted)
     redacted = re.sub(r"/(?:home|Users|tmp|var|opt|etc|root)/[^\s'\":,;)}\]]+", "[redacted-path]", redacted)
