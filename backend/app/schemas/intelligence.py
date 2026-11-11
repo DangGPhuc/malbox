@@ -146,13 +146,22 @@ class ArtifactEvidence(BaseModel):
 class StaticAnalysisPlaceholder(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["not_available", "available"] = "not_available"
+    status: Literal["not_available", "available", "partial", "failed", "timed_out"] = "not_available"
     tool: str = "ghidra_headless"
     notes: str = (
-        "Static disassembly/decompilation (Phase 2B Ghidra) was not executed; "
+        "Static disassembly/decompilation (Ghidra Headless) was not executed; "
         "no static function symbols or CFG internals are available."
     )
+    analysis_id: Optional[str] = None
+    sample_sha256: Optional[str] = None
+    ghidra_version: Optional[str] = None
+    program_metadata: Optional[Dict[str, Any]] = None
     functions: List[Dict[str, Any]] = Field(default_factory=list)
+    ranked_function_count: int = 0
+    decompiled_count: int = 0
+    decompiled_omitted_for_external_ai: bool = False
+    truncation: Optional[Dict[str, Any]] = None
+    errors: List[str] = Field(default_factory=list)
 
 
 class TruncationMetadata(BaseModel):

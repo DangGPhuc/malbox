@@ -65,7 +65,7 @@ Every check reports one of four deterministic statuses:
 9. **Database Health**: Runs read-only SQLite `PRAGMA quick_check` and verifies all required tables (`samples`, `analyses`, `analysis_events`, `behavioral_findings`, `orchestration_records`, `analysis_reports`).
 10. **Replay Mode Fixtures**: Parses `fixtures/replay/ransomware_wannacry_mock.json` and `fixtures/replay/infostealer_redline_mock.json` to ensure valid JSON telemetry.
 11. **Network Port Availability**: Checks configured backend/frontend localhost ports, clearly identifying external/unmanaged conflicts without falsely attributing them to Malbox.
-12. **Optional Integrations**: Checks CAPE, Ghidra, OpenCode, and external LLM API keys as `[SKIP]` / `[PASS]` without blocking setup.
+12. **Optional Integrations**: Checks CAPE, Ghidra (JDK 21+ compiler/runtime + `analyzeHeadless` + Bubblewrap preflight when `MALBOX_GHIDRA_ENABLED=true`), OpenCode, and external LLM API keys as `[SKIP]` / `[WARN]` / `[PASS]` without blocking setup.
 
 ---
 

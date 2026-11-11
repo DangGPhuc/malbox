@@ -81,6 +81,24 @@ class Settings(BaseSettings):
     OPENCODE_PROVIDER_API_KEY: str = ""
     OPENCODE_PROVIDER_ENV_NAME: str = "OPENAI_API_KEY"
 
+    # Static Analysis (Ghidra Headless - Optional, disabled by default)
+    GHIDRA_ENABLED: bool = False
+    GHIDRA_HOME: str = ""
+    GHIDRA_WORKSPACE_ROOT: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent.parent.parent / "data" / "ghidra_projects"
+    )
+    GHIDRA_SCRIPTS_DIR: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent.parent.parent / "ghidra_scripts"
+    )
+    GHIDRA_MAX_MEMORY_MB: int = 1024
+    GHIDRA_MAX_CPU: int = 1
+    GHIDRA_TIMEOUT_SECONDS: int = 120
+    GHIDRA_MAX_SAMPLE_BYTES: int = 16777216  # 16 MiB
+    GHIDRA_MAX_FUNCTIONS: int = 250
+    GHIDRA_MAX_DECOMPILE_FUNCTIONS: int = 10
+    GHIDRA_MAX_PSEUDOCODE_CHARS: int = 8192
+    GHIDRA_MAX_OUTPUT_BYTES: int = 524288  # 512 KiB
+
     # Pluggable Sandbox Settings
     DEFAULT_SANDBOX_BACKEND: str = "replay"  # replay, cape
     CAPE_API_URL: str = "http://127.0.0.1:8008"  # Distinct from application port 8000
@@ -99,8 +117,10 @@ class Settings(BaseSettings):
         self.QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
         self.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
         self.FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+        self.GHIDRA_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
         try:
             self.QUARANTINE_DIR.chmod(0o700)
+            self.GHIDRA_WORKSPACE_ROOT.chmod(0o700)
         except OSError:
             pass
 

@@ -98,6 +98,11 @@ class _EvidenceLookup:
             self.findings[f"rule:{f.rule_id}"] = f
         self.artifacts: Dict[str, ArtifactEvidence] = {a.evidence_id: a for a in bundle.artifacts}
         self.sample: SampleIdentityEvidence = bundle.sample_identity
+        self.static_functions: Dict[str, Dict[str, Any]] = {}
+        if bundle.static_analysis.status in ("available", "partial"):
+            for fn in bundle.static_analysis.functions:
+                if isinstance(fn, dict) and fn.get("function_id"):
+                    self.static_functions[str(fn["function_id"])] = fn
 
     def resolve_ids(
         self, eids: List[str]
@@ -164,6 +169,14 @@ class _EvidenceLookup:
                 source_labels.append(f"timeline:{tl.category}:{tl.action}")
                 blobs.append(tl.model_dump_json())
                 categories.add(tl.category)
+                continue
+
+            if eid in self.static_functions:
+                sfn = self.static_functions[eid]
+                cited_types.add("static")
+                source_labels.append(f"static:{sfn.get('name', eid)}")
+                blobs.append(json.dumps(sfn))
+                categories.add("static_analysis")
 
         return list(dict.fromkeys(source_labels)), " ".join(blobs).lower(), categories, cited_types
 
@@ -607,6 +620,10 @@ class EvidenceValidator:
             if any(k in text_lower for k in ("spawned process", "contacted c2", "encrypted files", "exfiltrated")):
                 return "claims dynamic execution behavior while citing only static sample metadata"
 
+        if cited_types == {"static"}:
+            if any(k in text_lower for k in ("dynamically executed", "executed at runtime", "spawned process", "contacted c2")):
+                return "claims dynamic execution behavior while citing only static disassembly metadata"
+
         return None
 
     @staticmethod
@@ -673,6 +690,21 @@ class EvidenceValidator:
                 attr_words.add(ev.category.lower())
                 action_overlap = claim_tokens & attr_words
                 if has_entity and len(action_overlap) >= 1:
+                    matched_records += 1
+            elif eid in lookup.static_functions:
+                sfn = lookup.static_functions[eid]
+                fn_name = str(sfn.get("name") or "")
+                fn_addr = str(sfn.get("entry_address") or "")
+                has_fn = (fn_name and fn_name.lower() in claim_text.lower()) or (
+                    fn_addr and fn_addr.lower() in claim_text.lower()
+                )
+                apis = [str(a).lower() for a in (sfn.get("imported_api_calls") or [])]
+                has_attr = (
+                    any(a in claim_text.lower() for a in apis)
+                    or str(sfn.get("size_bytes", "")) in claim_text
+                    or "static" in claim_text.lower()
+                )
+                if has_fn and has_attr:
                     matched_records += 1
 
         if matched_records >= 1:
@@ -772,9 +804,18 @@ class EvidenceValidator:
 
     @staticmethod
     def _contains_static_fabrication(text: str, bundle: VerifiedEvidenceBundle) -> bool:
-        if bundle.static_analysis.status == "available":
-            return False
-        return any(pat.search(text) for pat in _STATIC_FABRICATION_PATTERNS)
+        if bundle.static_analysis.status not in ("available", "partial") or not bundle.static_analysis.functions:
+            return any(pat.search(text) for pat in _STATIC_FABRICATION_PATTERNS)
+
+        known_names = {
+            str(fn.get("name", "")).lower()
+            for fn in bundle.static_analysis.functions
+            if isinstance(fn, dict) and fn.get("name")
+        }
+        for sym_match in re.finditer(r"\b(?:FUN|LAB|DAT)_[0-9a-fA-F]{4,}\b|\bsub_[0-9a-fA-F]{4,}\b", text):
+            if sym_match.group(0).lower() not in known_names:
+                return True
+        return False
 
     @staticmethod
     def _claims_false_live_execution(text: str) -> bool:

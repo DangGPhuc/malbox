@@ -677,10 +677,103 @@ def check_ports(
     )
 
 
+def _probe_ghidra_and_jdk(
+    ghidra_home_raw: str,
+    which_fn: Callable[[str], Optional[str]],
+    runner: CommandRunner,
+    env_map: Dict[str, str],
+) -> Dict[str, Any]:
+    """Read-only probe for optional Ghidra installation and JDK compatibility."""
+    ghidra_dir: Optional[Path] = None
+    headless_path: Optional[Path] = None
+
+    if ghidra_home_raw:
+        cand = Path(ghidra_home_raw)
+        if cand.is_dir() and (cand / "support" / "analyzeHeadless").is_file():
+            ghidra_dir = cand.resolve()
+            headless_path = ghidra_dir / "support" / "analyzeHeadless"
+    else:
+        which_ah = which_fn("analyzeHeadless")
+        if which_ah:
+            ah = Path(which_ah).resolve()
+            if ah.is_file():
+                headless_path = ah
+                if ah.parent.name == "support":
+                    ghidra_dir = ah.parent.parent
+        elif which_fn is shutil.which:
+            for std_dir in ("/usr/share/ghidra", "/opt/ghidra"):
+                cand = Path(std_dir)
+                if cand.is_dir() and (cand / "support" / "analyzeHeadless").is_file():
+                    ghidra_dir = cand.resolve()
+                    headless_path = ghidra_dir / "support" / "analyzeHeadless"
+                    break
+
+    if headless_path is None:
+        return {"installed": False}
+
+    ghidra_ver = "unknown"
+    req_java_min = 21
+    if ghidra_dir is not None:
+        props = ghidra_dir / "Ghidra" / "application.properties"
+        if props.is_file():
+            for line in props.read_text(encoding="utf-8", errors="replace").splitlines():
+                s = line.strip()
+                if s.startswith("application.version="):
+                    ghidra_ver = s.partition("=")[2].strip() or ghidra_ver
+                elif s.startswith("application.java.min="):
+                    val = s.partition("=")[2].strip()
+                    if val.isdigit():
+                        req_java_min = int(val)
+
+    java_home = (env_map.get("JAVA_HOME") or "").strip()
+    java_bin = (
+        str(Path(java_home) / "bin" / "java")
+        if java_home and (Path(java_home) / "bin" / "java").is_file()
+        else which_fn("java")
+    )
+    javac_bin = (
+        str(Path(java_home) / "bin" / "javac")
+        if java_home and (Path(java_home) / "bin" / "javac").is_file()
+        else which_fn("javac")
+    )
+
+    java_major: Optional[int] = None
+    java_raw = ""
+    if java_bin:
+        try:
+            proc = runner([java_bin, "-version"])
+            raw = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
+            java_raw = raw.splitlines()[0] if raw else ""
+            m = re.search(r'"(\d+)(?:\.(\d+))?[^"]*"', raw) or re.search(
+                r"\b(?:openjdk|java)\s+(\d+)(?:\.(\d+))?", raw, re.IGNORECASE
+            )
+            if m:
+                first = int(m.group(1))
+                second = int(m.group(2)) if m.group(2) else None
+                java_major = second if (first == 1 and second is not None) else first
+        except Exception:
+            java_major = None
+
+    jdk_ok = bool(java_bin and javac_bin and java_major is not None and java_major >= req_java_min)
+    return {
+        "installed": True,
+        "ghidra_home": str(ghidra_dir) if ghidra_dir else None,
+        "analyze_headless": str(headless_path),
+        "ghidra_version": ghidra_ver,
+        "required_java_major": req_java_min,
+        "java_bin": java_bin,
+        "javac_bin": javac_bin,
+        "java_version": java_raw,
+        "java_major": java_major,
+        "jdk_compatible": jdk_ok,
+    }
+
+
 def check_optional_integrations(
     root_dir: Path,
     environ: Optional[Dict[str, str]] = None,
     which_fn: Callable[[str], Optional[str]] = shutil.which,
+    runner: CommandRunner = default_command_runner,
 ) -> List[CheckResult]:
     config = resolve_effective_config(root_dir, environ=environ)
     env_map = environ if environ is not None else os.environ
@@ -706,22 +799,57 @@ def check_optional_integrations(
             details={"cape_api_url": cape_url, "live_mode_enabled": False},
         ))
 
-    # 2. Ghidra
-    ghidra_home = env_map.get("GHIDRA_HOME", "").strip()
-    ghidra_headless = which_fn("analyzeHeadless")
-    if ghidra_home or ghidra_headless:
+    # 2. Ghidra Headless & JDK (optional; missing Ghidra must never block Replay readiness)
+    ghidra_enabled = parse_bool(config.get("MALBOX_GHIDRA_ENABLED"), default=False)
+    ghidra_home = (config.get("MALBOX_GHIDRA_HOME") or env_map.get("GHIDRA_HOME") or "").strip()
+    g_info = _probe_ghidra_and_jdk(
+        ghidra_home_raw=ghidra_home,
+        which_fn=which_fn,
+        runner=runner,
+        env_map=env_map,
+    )
+    if not g_info["installed"]:
+        if ghidra_enabled:
+            results.append(CheckResult(
+                id="opt_ghidra",
+                name="Optional: Ghidra Headless",
+                status=CheckStatus.WARN,
+                summary="MALBOX_GHIDRA_ENABLED=true, but Ghidra analyzeHeadless was not found (Replay Mode remains ready).",
+                details={"ghidra_enabled": True, "ghidra_home": ghidra_home or None},
+                remediation="Install Ghidra and set MALBOX_GHIDRA_HOME, or set MALBOX_GHIDRA_ENABLED=false.",
+            ))
+        else:
+            results.append(CheckResult(
+                id="opt_ghidra",
+                name="Optional: Ghidra Headless",
+                status=CheckStatus.SKIP,
+                summary="Optional Ghidra not installed/configured (not required for Replay Mode).",
+                details={"ghidra_enabled": False},
+            ))
+    elif not g_info["jdk_compatible"]:
         results.append(CheckResult(
             id="opt_ghidra",
             name="Optional: Ghidra Headless",
-            status=CheckStatus.PASS,
-            summary=f"Optional Ghidra detected ({ghidra_home or ghidra_headless}; not started in Phase 1).",
+            status=CheckStatus.WARN,
+            summary=(
+                f"Ghidra {g_info['ghidra_version']} found at {g_info['ghidra_home'] or g_info['analyze_headless']}, "
+                f"but compatible JDK {g_info['required_java_major']}+ (with javac) is unavailable "
+                f"(detected Java={g_info['java_major'] or 'missing'}; Replay Mode unaffected)."
+            ),
+            details={**g_info, "ghidra_enabled": ghidra_enabled},
+            remediation=f"Install OpenJDK {g_info['required_java_major']}+ JDK package (including javac) without running doctor with sudo.",
         ))
     else:
         results.append(CheckResult(
             id="opt_ghidra",
             name="Optional: Ghidra Headless",
-            status=CheckStatus.SKIP,
-            summary="Optional Ghidra not installed/configured (not required for Replay Mode).",
+            status=CheckStatus.PASS,
+            summary=(
+                f"Optional Ghidra {g_info['ghidra_version']} & JDK {g_info['java_major']} verified "
+                f"({g_info['ghidra_home'] or g_info['analyze_headless']}; "
+                f"{'enabled' if ghidra_enabled else 'disabled by default'})."
+            ),
+            details={**g_info, "ghidra_enabled": ghidra_enabled},
         ))
 
     # 3. OpenCode CLI
@@ -785,5 +913,5 @@ def run_all_checks(
         check_replay_fixtures(root_dir),
         check_ports(root_dir, skip_frontend=skip_frontend, environ=environ),
     ]
-    results.extend(check_optional_integrations(root_dir, environ=environ, which_fn=which_fn))
+    results.extend(check_optional_integrations(root_dir, environ=environ, which_fn=which_fn, runner=runner))
     return results

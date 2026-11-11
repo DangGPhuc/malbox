@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.core.database import init_db, SessionLocal
 from app.api.router import api_router
 from app.workers.job_queue import job_queue_manager
+from app.services.static_analysis.worker import static_worker_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -13,8 +14,9 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         recovered = job_queue_manager.recover_stale_jobs(db)
-        if recovered > 0:
-            print(f"[*] malbox-ai startup: Safely recovered {recovered} interrupted analysis task(s).")
+        static_recovered = static_worker_manager.recover_stale_jobs(db)
+        if recovered > 0 or static_recovered > 0:
+            print(f"[*] malbox-ai startup: Safely recovered {recovered} dynamic and {static_recovered} static task(s).")
     finally:
         db.close()
 

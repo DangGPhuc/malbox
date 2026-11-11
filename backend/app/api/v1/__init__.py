@@ -7,6 +7,7 @@ from app.api.v1.graph import router as graph_router
 from app.api.v1.orchestration import router as orchestration_router
 from app.api.v1.report import router as report_router
 from app.api.v1.artifacts import router as artifacts_router
+from app.api.v1.static_analysis import router as static_analysis_router
 
 __all__ = [
     "health_router",
@@ -18,5 +19,6 @@ __all__ = [
     "orchestration_router",
     "report_router",
     "artifacts_router",
+    "static_analysis_router",
 ]
 

@@ -10,6 +10,9 @@ from app.models.analysis import Analysis
 from app.models.event import AnalysisEvent
 from app.models.finding import BehavioralFinding
 from app.models.sample import Sample
+from app.models.static_analysis import StaticAnalysisRecord
+from app.schemas.static_analysis import StaticAnalysisResult
+from app.services.static_analysis.intelligence_bridge import build_static_bundle_contract
 from app.schemas.intelligence import (
     ArtifactEvidence,
     BundleProvenance,
@@ -291,7 +294,35 @@ class EvidenceBundleBuilder:
         art_pool = [ev for ev in ioc_pool if ev.category == "artifact"]
         artifacts_ev = self._build_artifacts(analysis.id, art_pool, is_replay, tracker)
 
-        static_info = static_analysis or StaticAnalysisPlaceholder()
+        static_limits: List[str] = []
+        static_ids: List[str] = []
+        if static_analysis is not None:
+            static_info = static_analysis
+            if static_info.status in ("available", "partial"):
+                static_ids = [
+                    str(fn.get("function_id"))
+                    for fn in static_info.functions
+                    if isinstance(fn, dict) and fn.get("function_id")
+                ]
+        else:
+            static_rec = (
+                self.db.query(StaticAnalysisRecord)
+                .filter(
+                    StaticAnalysisRecord.sample_sha256 == sample_sha256,
+                    (StaticAnalysisRecord.analysis_id == analysis.id)
+                    | (StaticAnalysisRecord.sample_id == analysis.sample_id),
+                )
+                .order_by(StaticAnalysisRecord.created_at.desc())
+                .first()
+            )
+            parsed_static: Optional[StaticAnalysisResult] = None
+            if static_rec and isinstance(static_rec.result_json, dict):
+                try:
+                    parsed_static = StaticAnalysisResult.model_validate(static_rec.result_json)
+                except Exception:
+                    parsed_static = None
+            static_info, static_ids, static_limits = build_static_bundle_contract(parsed_static)
+
         known_limitations = self._build_known_limitations(
             is_replay=is_replay,
             scenario_id=scenario_id,
@@ -299,9 +330,10 @@ class EvidenceBundleBuilder:
             omitted_events=omitted_count,
             findings_count=len(findings_ev),
             has_unattributed_network=has_unattributed_network,
-            static_available=(static_info.status == "available"),
+            static_available=(static_info.status in ("available", "partial")),
             artifacts=artifacts_ev,
         )
+        known_limitations.extend(static_limits)
 
         included_ev_ids = {e.event_id for e in selected_events} | {t.event_id for t in timeline_ev if t.event_id}
         valid_ids = self._collect_valid_ids(
@@ -311,6 +343,7 @@ class EvidenceBundleBuilder:
             timeline=timeline_ev,
             artifacts=artifacts_ev,
             all_event_ids=included_ev_ids,
+            static_ids=static_ids,
         )
 
         truncation = TruncationMetadata(
@@ -872,6 +905,7 @@ class EvidenceBundleBuilder:
         timeline: List[TimelineEntryEvidence],
         artifacts: List[ArtifactEvidence],
         all_event_ids: Set[str],
+        static_ids: Optional[List[str]] = None,
     ) -> Set[str]:
         valid: Set[str] = {sample_evidence_id}
         for ev in events:
@@ -891,6 +925,8 @@ class EvidenceBundleBuilder:
             for eid in f.supporting_event_ids:
                 if not all_event_ids or eid in all_event_ids:
                     valid.add(eid)
+        for sid in (static_ids or []):
+            valid.add(sid)
         return valid
 
     def _current_bytes(self, bundle: VerifiedEvidenceBundle) -> int:
@@ -901,6 +937,15 @@ class EvidenceBundleBuilder:
         all_evt_ids = {e.event_id for e in bundle.events} | {
             t.event_id for t in bundle.timeline if t.event_id
         }
+        static_ids = (
+            [
+                str(fn.get("function_id"))
+                for fn in bundle.static_analysis.functions
+                if isinstance(fn, dict) and fn.get("function_id")
+            ]
+            if bundle.static_analysis.status in ("available", "partial")
+            else []
+        )
         bundle.valid_evidence_ids = sorted(
             self._collect_valid_ids(
                 sample_evidence_id=sample_id,
@@ -909,6 +954,7 @@ class EvidenceBundleBuilder:
                 timeline=bundle.timeline,
                 artifacts=bundle.artifacts,
                 all_event_ids=all_evt_ids,
+                static_ids=static_ids,
             )
         )
 
@@ -981,6 +1027,11 @@ class EvidenceBundleBuilder:
 
         while cur > self.max_bundle_bytes and len(bundle.mitre_mappings) > 0:
             bundle.mitre_mappings.pop()
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        while cur > self.max_bundle_bytes and len(bundle.static_analysis.functions) > 0:
+            bundle.static_analysis.functions.pop()
             bundle.truncation.truncated = True
             cur = self._current_bytes(bundle)
 
