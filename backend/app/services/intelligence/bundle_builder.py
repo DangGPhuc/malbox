@@ -11,6 +11,10 @@ from app.models.event import AnalysisEvent
 from app.models.finding import BehavioralFinding
 from app.models.sample import Sample
 from app.schemas.static_analysis import StaticAnalysisResult
+from app.services.evidence_correlation.engine import (
+    EvidenceCorrelationEngine,
+    build_correlation_bundle_section,
+)
 from app.services.static_analysis.intelligence_bridge import build_static_bundle_contract
 from app.services.static_analysis.selector import build_static_result_response
 from app.schemas.intelligence import (
@@ -319,6 +323,20 @@ class EvidenceBundleBuilder:
                 parsed_static = None
             static_info, static_ids, static_limits = build_static_bundle_contract(parsed_static)
 
+        correlation_section = None
+        corr_ids: List[str] = []
+        if parsed_static is not None and parsed_static.status in ("COMPLETED", "PARTIAL"):
+            corr_res = EvidenceCorrelationEngine(self.db).correlate(
+                analysis_id=analysis.id,
+                static_override=parsed_static,
+            )
+            correlation_section = build_correlation_bundle_section(corr_res)
+            corr_ids = [
+                str(cf.get("correlation_id"))
+                for cf in correlation_section.findings
+                if isinstance(cf, dict) and cf.get("correlation_id")
+            ]
+
         known_limitations = self._build_known_limitations(
             is_replay=is_replay,
             scenario_id=scenario_id,
@@ -330,6 +348,10 @@ class EvidenceBundleBuilder:
             artifacts=artifacts_ev,
         )
         known_limitations.extend(static_limits)
+        if correlation_section is not None:
+            for clim in correlation_section.limitations:
+                if clim not in known_limitations:
+                    known_limitations.append(clim)
 
         included_ev_ids = {e.event_id for e in selected_events} | {t.event_id for t in timeline_ev if t.event_id}
         valid_ids = self._collect_valid_ids(
@@ -340,6 +362,7 @@ class EvidenceBundleBuilder:
             artifacts=artifacts_ev,
             all_event_ids=included_ev_ids,
             static_ids=static_ids,
+            corr_ids=corr_ids,
         )
 
         truncation = TruncationMetadata(
@@ -371,6 +394,7 @@ class EvidenceBundleBuilder:
             artifacts=artifacts_ev,
             known_limitations=known_limitations,
             static_analysis=static_info,
+            correlation_summary=correlation_section,
             valid_evidence_ids=sorted(valid_ids),
             truncation=truncation,
         )
@@ -902,6 +926,7 @@ class EvidenceBundleBuilder:
         artifacts: List[ArtifactEvidence],
         all_event_ids: Set[str],
         static_ids: Optional[List[str]] = None,
+        corr_ids: Optional[List[str]] = None,
     ) -> Set[str]:
         valid: Set[str] = {sample_evidence_id}
         for ev in events:
@@ -923,6 +948,8 @@ class EvidenceBundleBuilder:
                     valid.add(eid)
         for sid in (static_ids or []):
             valid.add(sid)
+        for cid in (corr_ids or []):
+            valid.add(cid)
         return valid
 
     def _current_bytes(self, bundle: VerifiedEvidenceBundle) -> int:
@@ -942,6 +969,15 @@ class EvidenceBundleBuilder:
             if bundle.static_analysis.status in ("available", "partial")
             else []
         )
+        corr_ids = (
+            [
+                str(cf.get("correlation_id"))
+                for cf in bundle.correlation_summary.findings
+                if isinstance(cf, dict) and cf.get("correlation_id")
+            ]
+            if bundle.correlation_summary is not None
+            else []
+        )
         bundle.valid_evidence_ids = sorted(
             self._collect_valid_ids(
                 sample_evidence_id=sample_id,
@@ -951,8 +987,25 @@ class EvidenceBundleBuilder:
                 artifacts=bundle.artifacts,
                 all_event_ids=all_evt_ids,
                 static_ids=static_ids,
+                corr_ids=corr_ids,
             )
         )
+        if bundle.correlation_summary is not None:
+            valid_evt_and_finding_ids = all_evt_ids | {f.finding_id for f in bundle.findings}
+            valid_fn_set = set(static_ids)
+            for cf in bundle.correlation_summary.findings:
+                if not isinstance(cf, dict):
+                    continue
+                if "dynamic_ref_ids" in cf and isinstance(cf["dynamic_ref_ids"], list):
+                    cf["dynamic_ref_ids"] = [
+                        did for did in cf["dynamic_ref_ids"] if did in valid_evt_and_finding_ids
+                    ]
+                if "static_ref_ids" in cf and isinstance(cf["static_ref_ids"], list):
+                    cf["static_ref_ids"] = [
+                        sid
+                        for sid in cf["static_ref_ids"]
+                        if (not sid.startswith("func:") or sid in valid_fn_set)
+                    ]
 
     def _enforce_byte_budget(
         self, bundle: VerifiedEvidenceBundle, finding_event_ids: Set[str]
@@ -1028,6 +1081,16 @@ class EvidenceBundleBuilder:
 
         while cur > self.max_bundle_bytes and len(bundle.static_analysis.functions) > 0:
             bundle.static_analysis.functions.pop()
+            bundle.truncation.truncated = True
+            cur = self._current_bytes(bundle)
+
+        while (
+            cur > self.max_bundle_bytes
+            and bundle.correlation_summary is not None
+            and len(bundle.correlation_summary.findings) > 0
+        ):
+            bundle.correlation_summary.findings.pop()
+            bundle.correlation_summary.truncated = True
             bundle.truncation.truncated = True
             cur = self._current_bytes(bundle)
 

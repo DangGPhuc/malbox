@@ -184,8 +184,42 @@ def build_deterministic_proposed_intelligence(
                     supporting_evidence_ids=list(dict.fromkeys(corroborating))[:12],
                     confidence=0.82 if not prov.is_replay else 0.78,
                     caveats=[
-                        "Correlation establishes behavioral pattern fit across observed events; static code inspection was not performed."
+                        (
+                            "Behavioral correlation connects observed telemetry events alongside available static metadata without proving runtime call stacks."
+                            if bundle.static_analysis.status in ("available", "partial")
+                            else "Correlation establishes behavioral pattern fit across observed events; static code inspection was not performed."
+                        )
                     ],
+                )
+            )
+            claim_idx += 1
+
+    if bundle.correlation_summary is not None and bundle.correlation_summary.findings:
+        corr_finding = bundle.correlation_summary.findings[0]
+        corr_id = str(corr_finding.get("correlation_id") or "")
+        corr_rel = str(corr_finding.get("relationship") or "INSUFFICIENT_EVIDENCE")
+        corr_summary = str(corr_finding.get("relationship_summary") or "")
+        if corr_id in valid_ids:
+            c_refs = [corr_id]
+            for sid in corr_finding.get("static_ref_ids") or []:
+                if sid in valid_ids and sid not in c_refs:
+                    c_refs.append(sid)
+            for did in corr_finding.get("dynamic_ref_ids") or []:
+                if did in valid_ids and did not in c_refs:
+                    c_refs.append(did)
+            claims.append(
+                ProposedClaim(
+                    claim_id=f"CLM-{claim_idx:03d}",
+                    classification="INFERENCE" if corr_rel in ("CONSISTENT_WITH", "CONTRADICTORY") else "FACT",
+                    claim_text=(
+                        f"Static/dynamic correlation {corr_id} ({corr_rel}): {corr_summary}"
+                    ),
+                    supporting_evidence_ids=c_refs[:8],
+                    confidence=round(float(corr_finding.get("confidence_score") or 0.5), 2),
+                    caveats=[
+                        str(lim)
+                        for lim in (corr_finding.get("known_limitations") or [])[:2]
+                    ] or ["Static capability alone does not prove runtime invocation of specific code blocks."],
                 )
             )
             claim_idx += 1

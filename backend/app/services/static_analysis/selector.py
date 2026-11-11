@@ -334,3 +334,4 @@ def build_static_result_response(
             "warnings": warnings,
         }
     )
+

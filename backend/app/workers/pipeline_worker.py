@@ -301,6 +301,28 @@ class PipelineWorker:
                 env_metadata=raw_env,
             )
 
+            # Optional deterministic static/dynamic correlation post-processing
+            # ONLY when verified usable static evidence already exists (never spawns Ghidra/CAPE/OpenCode).
+            try:
+                if sample is not None:
+                    from app.services.evidence_correlation.service import EvidenceCorrelationService
+                    from app.services.static_analysis.selector import select_static_records
+
+                    sel_static = select_static_records(
+                        db=self.db,
+                        sample_id=sample.id,
+                        sample_sha256=sample.sha256,
+                        requested_analysis_id=analysis.id,
+                        prefer_usable_over_active=True,
+                    )
+                    if sel_static.usable_record is not None:
+                        EvidenceCorrelationService(self.db).compute_and_persist(
+                            analysis_id=analysis.id,
+                            triggered_automatically=True,
+                        )
+            except Exception:
+                pass
+
             # Re-read status under lock to avoid race conditions with concurrent cancellation
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)

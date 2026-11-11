@@ -27,7 +27,7 @@ def init_db():
     """Initializes database schema and ensures storage directories exist."""
     settings.setup_directories()
     # Import all models to register them on Base.metadata
-    from app.models import sample, analysis, event, finding, audit, report
+    from app.models import sample, analysis, event, finding, audit, report, static_analysis, correlation
     Base.metadata.create_all(bind=engine)
 
     # Lightweight migration for SQLite dev database

@@ -22,6 +22,7 @@ from app.schemas.intelligence import (
     ValidationSummary,
     VerifiedEvidenceBundle,
 )
+from app.services.evidence_correlation.schemas import CorrelationBundleSection
 
 
 _STATIC_FABRICATION_PATTERNS = [
@@ -51,6 +52,19 @@ _INJECTION_ARTIFACT_PATTERNS = [
 _HYPOTHESIS_OVERCONFIDENT_PATTERNS = [
     re.compile(r"\b(?:confirmed\s+fact|definitively\s+proves|verified\s+observation|undoubtedly|100%\s+certain)\b", re.IGNORECASE),
 ]
+
+_EXECUTION_UPGRADE_PATTERNS = [
+    re.compile(
+        r"\b(?:directly\s+observed|proven\s+(?:runtime\s+)?execution|proves\s+(?:runtime\s+)?execution|"
+        r"confirmed\s+function\s+execution|definitely\s+executed|confirmed\s+runtime\s+invocation)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:static\s+function\s+\S+\s+(?:executed|ran|invoked)\s+at\s+runtime)\b",
+        re.IGNORECASE,
+    ),
+]
+_CORR_ID_RE = re.compile(r"\bcorr:[A-Za-z0-9_-]{4,}\b", re.IGNORECASE)
 
 _SPECULATIVE_FACT_TERMS = re.compile(
     r"\b(?:nation-state|apt\d+|lazarus|conti|zero-day|kernel\s+rootkit|idt\s+hooking|"
@@ -103,6 +117,78 @@ class _EvidenceLookup:
             for fn in bundle.static_analysis.functions:
                 if isinstance(fn, dict) and fn.get("function_id"):
                     self.static_functions[str(fn["function_id"])] = fn
+
+        self.correlations: Dict[str, Dict[str, Any]] = {}
+        self.validated_correlation_section: Optional[CorrelationBundleSection] = None
+        self.correlation_warnings: List[str] = []
+        self.rejected_correlation_refs: List[str] = []
+
+        if bundle.correlation_summary is not None:
+            sha16 = (bundle.sample_identity.sha256 or "").strip().lower()[:16]
+            verified_findings: List[Dict[str, Any]] = []
+            for cf in bundle.correlation_summary.findings:
+                if not isinstance(cf, dict):
+                    continue
+                cid = str(cf.get("correlation_id") or "").strip()
+                if not cid.startswith("corr:"):
+                    self.correlation_warnings.append("Dropped correlation entry with invalid ID format.")
+                    continue
+                rel = str(cf.get("relationship") or "")
+                direct = bool(cf.get("behavioral_execution_directly_observed"))
+                if bundle.provenance.is_replay and (direct or rel == "DIRECTLY_OBSERVED"):
+                    self.correlation_warnings.append(
+                        f"Rejected invalid Replay correlation '{cid}' claiming directly observed execution."
+                    )
+                    self.rejected_correlation_refs.append(cid)
+                    continue
+
+                static_refs = cf.get("static_ref_ids") or []
+                dynamic_refs = cf.get("dynamic_ref_ids") or []
+                static_ok = True
+                for sid in static_refs:
+                    sid_str = str(sid)
+                    if sid_str.startswith("func:"):
+                        if sid_str not in self.static_functions:
+                            static_ok = False
+                            self.rejected_correlation_refs.append(sid_str)
+                    elif sid_str.startswith("str:"):
+                        if not sha16 or not sid_str.startswith(f"str:{sha16}:"):
+                            static_ok = False
+                            self.rejected_correlation_refs.append(sid_str)
+                    elif sid_str.startswith("imp:"):
+                        if bundle.static_analysis.status not in ("available", "partial"):
+                            static_ok = False
+                            self.rejected_correlation_refs.append(sid_str)
+                    else:
+                        static_ok = False
+                        self.rejected_correlation_refs.append(sid_str)
+
+                dynamic_ok = True
+                for did in dynamic_refs:
+                    did_str = str(did)
+                    if did_str not in self.events and did_str not in self.timeline and did_str not in self.findings:
+                        dynamic_ok = False
+                        self.rejected_correlation_refs.append(did_str)
+
+                if not static_ok or not dynamic_ok:
+                    self.rejected_correlation_refs.append(cid)
+                    self.correlation_warnings.append(
+                        f"Rejected correlation '{cid}' citing nonexistent static or dynamic reference(s)."
+                    )
+                    continue
+
+                self.correlations[cid] = cf
+                verified_findings.append(cf)
+
+            self.validated_correlation_section = bundle.correlation_summary.model_copy(
+                update={
+                    "findings": verified_findings,
+                    "truncated": bool(
+                        bundle.correlation_summary.truncated
+                        or len(verified_findings) < len(bundle.correlation_summary.findings)
+                    ),
+                }
+            )
 
     def resolve_ids(
         self, eids: List[str]
@@ -177,6 +263,14 @@ class _EvidenceLookup:
                 source_labels.append(f"static:{sfn.get('name', eid)}")
                 blobs.append(json.dumps(sfn))
                 categories.add("static_analysis")
+                continue
+
+            if eid in self.correlations:
+                corr = self.correlations[eid]
+                cited_types.add("correlation")
+                source_labels.append(f"correlation:{corr.get('rule_id', eid)}")
+                blobs.append(json.dumps(corr))
+                categories.add("correlation")
 
         return list(dict.fromkeys(source_labels)), " ".join(blobs).lower(), categories, cited_types
 
@@ -221,7 +315,11 @@ class EvidenceValidator:
 
         valid_ids: Set[str] = set(bundle.valid_evidence_ids)
         lookup = _EvidenceLookup(bundle)
-        removed_invalid_ids: List[str] = []
+        # Ensure any correlation IDs rejected during EvidenceLookup verification are not trusted
+        for bad_corr_id in lookup.rejected_correlation_refs:
+            valid_ids.discard(bad_corr_id)
+        removed_invalid_ids: List[str] = list(dict.fromkeys(lookup.rejected_correlation_refs))
+        warnings.extend(lookup.correlation_warnings)
 
         validated_claims: List[AnalyticalClaim] = []
         for claim in proposed.technical_claims:
@@ -308,6 +406,8 @@ class EvidenceValidator:
         if (
             self._contains_static_fabrication(exec_assess, bundle)
             or self._contains_static_fabrication(narrative, bundle)
+            or self._contains_correlation_fabrication(exec_assess, lookup)
+            or self._contains_correlation_fabrication(narrative, lookup)
             or self._contains_injection_artifact(exec_assess)
             or self._contains_injection_artifact(narrative)
         ):
@@ -396,6 +496,7 @@ class EvidenceValidator:
             limitations=[self._scrub_text(l) for l in limitations],
             recommended_follow_up_actions=proposed.recommended_follow_up_actions,
             evidence_truncation=bundle.truncation,
+            correlation_summary=lookup.validated_correlation_section,
             provider_metadata=effective_provider_meta,
             validation_summary=validation_summary,
         )
@@ -440,6 +541,20 @@ class EvidenceValidator:
                 "References unverified static disassembly/function symbols while static analysis is unavailable."
             )
             warnings.append(f"Claim '{claim.claim_id}' rejected for static analysis fabrication.")
+        elif self._contains_correlation_fabrication(claim.claim_text, lookup):
+            status = "REJECTED"
+            support_cat = "UNSUPPORTED_OR_FABRICATED"
+            notes_parts.append("References nonexistent or unverified static/dynamic correlation ID.")
+            warnings.append(f"Claim '{claim.claim_id}' rejected for hallucinated correlation ID.")
+        elif self._attempts_weak_correlation_execution_upgrade(claim.claim_text, v_ids, lookup, bundle):
+            status = "REJECTED"
+            support_cat = "UNSUPPORTED_OR_FABRICATED"
+            notes_parts.append(
+                "Refused to upgrade weak, unexecuted, or synthetic correlation evidence into proven runtime execution."
+            )
+            warnings.append(
+                f"Claim '{claim.claim_id}' rejected: attempted to claim proven runtime execution from weak/synthetic correlation."
+            )
         elif self._contains_injection_artifact(claim.claim_text):
             status = "REJECTED"
             support_cat = "UNSUPPORTED_OR_FABRICATED"
@@ -706,6 +821,25 @@ class EvidenceValidator:
                 )
                 if has_fn and has_attr:
                     matched_records += 1
+            elif eid in lookup.correlations:
+                cf = lookup.correlations[eid]
+                rel = str(cf.get("relationship") or "")
+                # Weak associations ("CONSISTENT_WITH") cannot pass FACT unless stated conservatively
+                if any(pat.search(claim_text) for pat in _EXECUTION_UPGRADE_PATTERNS) and rel != "DIRECTLY_OBSERVED":
+                    return False, "weak correlation cannot assert proven runtime execution"
+                rule_tok = str(cf.get("rule_id") or "").lower()
+                corr_tok = str(cf.get("correlation_id") or "").lower()
+                rel_words = {
+                    w.lower()
+                    for w in re.findall(r"[A-Za-z0-9_.-]{4,}", str(cf.get("relationship_summary") or ""))
+                    if w.lower() not in _STOPWORDS
+                }
+                if (
+                    (rule_tok and rule_tok in claim_text.lower())
+                    or (corr_tok and corr_tok in claim_text.lower())
+                    or len(claim_tokens & rel_words) >= 2
+                ):
+                    matched_records += 1
 
         if matched_records >= 1:
             return True, "programmatically grounded"
@@ -815,6 +949,39 @@ class EvidenceValidator:
         for sym_match in re.finditer(r"\b(?:FUN|LAB|DAT)_[0-9a-fA-F]{4,}\b|\bsub_[0-9a-fA-F]{4,}\b", text):
             if sym_match.group(0).lower() not in known_names:
                 return True
+        return False
+
+    @staticmethod
+    def _contains_correlation_fabrication(text: str, lookup: _EvidenceLookup) -> bool:
+        for match in _CORR_ID_RE.finditer(text or ""):
+            if match.group(0) not in lookup.correlations:
+                return True
+        return False
+
+    @staticmethod
+    def _attempts_weak_correlation_execution_upgrade(
+        claim_text: str,
+        v_ids: List[str],
+        lookup: _EvidenceLookup,
+        bundle: VerifiedEvidenceBundle,
+    ) -> bool:
+        if not any(pat.search(claim_text or "") for pat in _EXECUTION_UPGRADE_PATTERNS):
+            return False
+        corr_hits = [lookup.correlations[eid] for eid in v_ids if eid in lookup.correlations]
+        if corr_hits:
+            return any(
+                (not bool(cf.get("behavioral_execution_directly_observed")))
+                or str(cf.get("relationship") or "") != "DIRECTLY_OBSERVED"
+                or bundle.provenance.is_replay
+                for cf in corr_hits
+            )
+        if bundle.correlation_summary is not None and any(eid in lookup.static_functions for eid in v_ids):
+            # Also reject upgrading static function IDs directly without a DIRECTLY_OBSERVED trace
+            has_direct = any(
+                bool(cf.get("behavioral_execution_directly_observed"))
+                for cf in lookup.correlations.values()
+            )
+            return not has_direct
         return False
 
     @staticmethod

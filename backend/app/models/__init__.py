@@ -5,6 +5,7 @@ from app.models.finding import BehavioralFinding
 from app.models.audit import OrchestrationRecord
 from app.models.report import AnalysisReport
 from app.models.static_analysis import StaticAnalysisRecord
+from app.models.correlation import StaticDynamicCorrelationRecord
 
 __all__ = [
     "Sample",
@@ -18,4 +19,5 @@ __all__ = [
     "OrchestrationRecord",
     "AnalysisReport",
     "StaticAnalysisRecord",
+    "StaticDynamicCorrelationRecord",
 ]

@@ -1,6 +1,8 @@
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.services.evidence_correlation.schemas import CorrelationBundleSection
+
 
 ClaimClassification = Literal["FACT", "INFERENCE", "HYPOTHESIS"]
 ClaimValidationStatus = Literal["VERIFIED", "UNVERIFIED", "REJECTED"]
@@ -198,6 +200,7 @@ class VerifiedEvidenceBundle(BaseModel):
     artifacts: List[ArtifactEvidence] = Field(default_factory=list)
     known_limitations: List[str] = Field(default_factory=list)
     static_analysis: StaticAnalysisPlaceholder = Field(default_factory=StaticAnalysisPlaceholder)
+    correlation_summary: Optional[CorrelationBundleSection] = None
     valid_evidence_ids: List[str] = Field(default_factory=list)
     truncation: TruncationMetadata = Field(default_factory=TruncationMetadata)
 
@@ -336,6 +339,7 @@ class IntelligenceReport(BaseModel):
     limitations: List[str] = Field(default_factory=list)
     recommended_follow_up_actions: List[FollowUpAction] = Field(default_factory=list)
     evidence_truncation: TruncationMetadata
+    correlation_summary: Optional[CorrelationBundleSection] = None
     provider_metadata: AIProviderMetadata
     validation_summary: ValidationSummary
 
