@@ -1,9 +1,14 @@
 # malbox-ai — Build Status & Verification Ledger
 
 **Project Codename:** `malbox-ai`  
-**Architecture Version:** 0.2.9-rc1 (Release Candidate — Coherence, Async Fencing & Mount Guard Hardening)  
+**Architecture Version:** 0.2.0-rc1 (Release Candidate 1 — Full System Verification)  
 **Active Branch:** `audit/v02-release-candidate`  
-**Status:** **OPERATIONAL — RC GATE 0 VERIFIED (Coherent Correlation, Fenced Async Lookups, Mount Guards, Phase 3/4 DB Health Checks)**
+**Audited Commit SHA:** `2841fe724ef6a83b7f3470e400575f5575250c47`  
+**Status:** **OPERATIONAL — RELEASE CANDIDATE 1 AUDITED (READY FOR OPERATOR ACCEPTANCE TEST)**  
+**Release Documents:**
+- [`V02_RELEASE_AUDIT.md`](release/V02_RELEASE_AUDIT.md) — Comprehensive Full-System Audit & Verification Matrix
+- [`V02_KALI_E2E_CHECKLIST.md`](release/V02_KALI_E2E_CHECKLIST.md) — Kali Host Sequential Execution & Runbook Evidence Log
+- [`V02_KNOWN_LIMITATIONS.md`](release/V02_KNOWN_LIMITATIONS.md) — Operational Boundaries & Security Invariants
 
 ---
 
