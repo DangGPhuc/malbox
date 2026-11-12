@@ -1549,6 +1549,7 @@ def test_27_bounded_history_retrieval_across_large_history_and_replay_invariance
             )
         )
     # Add latest failure AFTER the usable record (must be preserved gracefully!)
+    latest_fail_dt = datetime.now(timezone.utc) + timedelta(days=1)
     hist_rows.append(
         StaticDynamicCorrelationRecord(
             id="hist_latest_failed",
@@ -1560,8 +1561,8 @@ def test_27_bounded_history_retrieval_across_large_history_and_replay_invariance
             is_replay=True,
             error_message="simulated prior crash",
             result_json=res_good.model_copy(update={"status": "FAILED"}).model_dump(mode="json"),
-            created_at=datetime(2026, 11, 11, 23, 0, 0, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 11, 11, 23, 0, 0, tzinfo=timezone.utc),
+            created_at=latest_fail_dt,
+            updated_at=latest_fail_dt,
         )
     )
     db_session.bulk_save_objects(hist_rows)
