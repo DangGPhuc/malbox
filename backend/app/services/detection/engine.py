@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from sqlalchemy.orm import Session
 from app.models.event import AnalysisEvent
 from app.models.finding import BehavioralFinding
@@ -9,13 +9,18 @@ class DetectionEngine:
     """
     Deterministic behavioral rule engine that identifies malicious TTPs,
     maps MITRE ATT&CK techniques with contextual thresholds, and derives explainable risk scores.
-    Separates verified factual observations from behavioral hypotheses.
+    Separates verified factual observations from behavioral hypotheses and distinguishes
+    telemetry completeness from absence of detection.
     """
 
     def __init__(self, db: Session):
         self.db = db
 
-    def evaluate_behavior(self, analysis_id: str) -> Tuple[List[BehavioralFinding], RiskAssessment]:
+    def evaluate_behavior(
+        self,
+        analysis_id: str,
+        telemetry_completeness: str = "COMPLETE",
+    ) -> Tuple[List[BehavioralFinding], RiskAssessment]:
         events = self.db.query(AnalysisEvent).filter(AnalysisEvent.analysis_id == analysis_id).all()
         findings: List[BehavioralFinding] = []
         rule_score_contribs: List[dict] = []
@@ -23,10 +28,11 @@ class DetectionEngine:
 
         # Pre-group events by category for efficient contextual evaluation
         proc_cmds = [(e.id, (e.attributes.get("command_line") or "").lower()) for e in events if e.category == "process"]
-        file_writes = [(e.id, (e.target_path or "").lower(), e.attributes or {}) for e in events if e.category == "file"]
+        file_writes = [(e.id, (e.target_path or "").lower(), e.attributes or {}, e.action or "") for e in events if e.category == "file"]
         reg_writes = [(e.id, (e.target_path or "").lower(), e.attributes or {}) for e in events if e.category == "registry"]
         net_conns = [(e.id, e.attributes or {}) for e in events if e.category == "network"]
         http_reqs = [(e.id, (e.target_path or "").lower(), e.attributes or {}) for e in events if e.category in ["http", "network"]]
+        proc_events = [e for e in events if e.category == "process"]
 
         for rule in BEHAVIORAL_RULES:
             matched_event_ids = []
@@ -44,7 +50,7 @@ class DetectionEngine:
             elif rule.rule_id == "RULE_MASS_FILE_ENCRYPTION":
                 encrypted_files = []
                 ransom_notes = []
-                for ev_id, path, attrs in file_writes:
+                for ev_id, path, attrs, action in file_writes:
                     is_enc = attrs.get("is_encrypted_target") or any(ext in path for ext in [".wnry", ".locked", ".crypted", ".crypto"])
                     is_note = attrs.get("is_ransom_note") or any(note in path for note in ["@wanadecryptor@", "readme_to_decrypt", "how_to_decrypt", "decrypt_instructions"])
                     if is_enc:
@@ -70,7 +76,7 @@ class DetectionEngine:
 
             # 5. Web Browser Credential Store Access (T1555.003)
             elif rule.rule_id == "RULE_CREDENTIAL_VAULT_ACCESS":
-                for ev_id, path, attrs in file_writes:
+                for ev_id, path, attrs, action in file_writes:
                     if attrs.get("is_credential_target") or any(target in path for target in ["login data", "key4.db", "logins.json", "web data"]):
                         matched_event_ids.append(ev_id)
 
@@ -116,6 +122,11 @@ class DetectionEngine:
                     "severity": rule.severity,
                     "weight": rule.score_weight,
                     "matched_events": len(matched_event_ids),
+                    "contributing_event_ids": matched_event_ids,
+                    "explanation": rule.explanation,
+                    "limitations": rule.limitations,
+                    "mitre_attack_id": rule.mitre_attack_id,
+                    "mitre_tactic": rule.mitre_tactic,
                 })
 
         # Bounded explainable score 0-100
@@ -126,19 +137,30 @@ class DetectionEngine:
             level = "Suspicious"
         elif clamped_score >= 20:
             level = "Low"
+        elif telemetry_completeness in ("INCOMPLETE", "UNVERIFIED"):
+            # Do not provide a false "Clean" conclusion when telemetry was missing or analyzer crashed (A6)
+            level = "Analysis Incomplete — Inconclusive"
         else:
-            # Do not provide a false "Clean" guarantee; absence of evidence is not evidence of absence
+            # Absence of evidence is not evidence of absence
             level = "No Suspicious Behavior Observed"
 
         # Persist findings to database
         self.db.add_all(findings)
         self.db.commit()
 
+        # Confidence is calibrated by telemetry completeness
+        if telemetry_completeness == "INCOMPLETE":
+            confidence = 0.40
+        elif telemetry_completeness == "PARTIAL":
+            confidence = 0.65
+        else:
+            confidence = 0.95 if findings else 0.80
+
         assessment = RiskAssessment(
             score=clamped_score,
             level=level,
             rule_breakdown=rule_score_contribs,
-            confidence=0.95 if findings else 0.80,
+            confidence=confidence,
         )
 
         return findings, assessment

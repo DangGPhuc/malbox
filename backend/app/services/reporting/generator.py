@@ -146,6 +146,8 @@ class ReportGenerator:
             "confinement": confinement_str,
             "replay_scenario_id": scenario_id,
             "fixture_version": fixture_ver,
+            "telemetry_completeness": env_meta.get("telemetry_completeness", "COMPLETE"),
+            "telemetry_notes": env_meta.get("telemetry_notes", []),
         }
 
         # Activity summaries
@@ -175,6 +177,8 @@ class ReportGenerator:
             "sandbox_evasion_risk": "Dormant payloads, anti-VM checks, or delayed execution loops may limit observable dynamic behavior.",
             "network_confinement": "Simulated or isolated network egress was enforced to prevent real-world malicious propagation.",
             "overall_entropy": sample.pe_metadata.get("overall_entropy", 0.0) if sample and sample.pe_metadata else 0.0,
+            "telemetry_completeness": env_meta.get("telemetry_completeness", "COMPLETE"),
+            "telemetry_notes": env_meta.get("telemetry_notes", []),
         }
 
         follow_up = ai_follow_up or {

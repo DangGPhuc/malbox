@@ -68,6 +68,8 @@ class PipelineWorker:
         if AnalysisStatus(analysis.status) in TERMINAL_STATES:
             return analysis
 
+        raw_results: Dict[str, Any] = {}
+
         try:
             # Check cancellation before starting
             if self._is_cancelled():
@@ -166,18 +168,20 @@ class PipelineWorker:
 
                     status_info = sandbox.get_task_status(backend_task_id)
                     curr_status = status_info.get("status")
+                    is_ready = status_info.get("is_ready_for_report", False)
 
-                    if curr_status in ["completed", "reported"]:
+                    if is_ready or curr_status in ["completed", "reported"]:
                         cape_ready = True
                         break
-                    elif curr_status == "failed":
+                    elif curr_status in ["failed", "failed_analysis", "failed_processing"]:
                         safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
                         analysis.error_message = f"CAPE analysis failed: {status_info.get('error', 'Execution error')}"
                         analysis.completed_at = datetime.now(timezone.utc)
                         self.db.commit()
                         return analysis
-                    elif curr_status == "cancelled":
+                    elif curr_status in ["cancelled", "not_found"]:
                         safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
+                        analysis.error_message = f"CAPE task terminated: {status_info.get('error') or curr_status}"
                         analysis.completed_at = datetime.now(timezone.utc)
                         self.db.commit()
                         return analysis
@@ -250,7 +254,8 @@ class PipelineWorker:
             safe_update_status(analysis, self.db, AnalysisStatus.CORRELATING)
             safe_update_status(analysis, self.db, AnalysisStatus.SCORING)
             detector = DetectionEngine(self.db)
-            findings, risk_assessment = detector.evaluate_behavior(analysis.id)
+            telemetry_comp = raw_results.get("telemetry_completeness", "COMPLETE")
+            findings, risk_assessment = detector.evaluate_behavior(analysis.id, telemetry_completeness=telemetry_comp)
 
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
@@ -293,6 +298,8 @@ class PipelineWorker:
                     raw_env["scenario_id"] = meta["scenario_id"]
                 if "fixture_version" in meta:
                     raw_env["fixture_version"] = meta["fixture_version"]
+                raw_env["telemetry_completeness"] = raw_results.get("telemetry_completeness") or meta.get("telemetry_completeness", "COMPLETE")
+                raw_env["telemetry_notes"] = raw_results.get("telemetry_notes") or meta.get("telemetry_notes", [])
             reporter.generate_report(
                 analysis.id,
                 risk_assessment,
