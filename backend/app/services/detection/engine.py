@@ -102,6 +102,54 @@ class DetectionEngine:
                 elif len(smb_evs) == 1 and any("spread" in cmd or "worm" in cmd for _, cmd in proc_cmds):
                     matched_event_ids.extend(smb_evs)
 
+            # 8. Dropped Executable Payload (T1027 / T1105) - Contextual requirement:
+            # Requires verified executable extension or explicit sandbox memory-dump extraction flag.
+            # Benign text, log, or standard non-executable writes must NOT trigger this rule.
+            elif rule.rule_id == "RULE_DROPPED_EXECUTABLE_PAYLOAD":
+                executable_exts = (".exe", ".dll", ".sys", ".scr", ".cpl", ".bin", ".bat", ".cmd", ".vbs", ".ps1")
+                for ev_id, path, attrs, action in file_writes:
+                    is_dropped_bin = bool(attrs.get("is_dropped_binary")) or bool(attrs.get("is_injected_payload"))
+                    has_exec_ext = any(path.endswith(ext) for ext in executable_exts)
+                    # Non-executable formats are excluded unless explicit dropped-binary flag is set
+                    is_benign_text = path.endswith(".txt") or path.endswith(".log") or path.endswith(".tmp") or path.endswith(".ini")
+                    if is_dropped_bin or (has_exec_ext and not is_benign_text and action in ["write", "create", "modify", "access"]):
+                        matched_event_ids.append(ev_id)
+
+            # 9. Process Injection Technique (T1055) - Contextual requirement:
+            # Requires executable memory allocation/protection coupled with remote thread creation or cross-PID write.
+            # A lone local VirtualAlloc (even RW) must NOT trigger this rule.
+            elif rule.rule_id == "RULE_PROCESS_INJECTION_TECHNIQUE":
+                alloc_events = []
+                write_events = []
+                thread_events = []
+                explicit_injections = []
+
+                for ev in proc_events:
+                    act = (ev.action or "").lower()
+                    attrs = ev.attributes or {}
+                    args = attrs.get("arguments", {})
+                    prot_str = (str(args.get("protect", "")) + " " + str(args.get("flProtect", ""))).lower()
+                    is_exec_prot = any(p in prot_str for p in ["execute_readwrite", "0x40", "page_execute_read", "0x20", "execute"]) or \
+                                   bool(attrs.get("executable_memory"))
+
+                    if act in ["virtualalloc", "virtualallocex", "ntallocatevirtualmemory", "zwallocatevirtualmemory", "ntprotectvirtualmemory"]:
+                        if is_exec_prot or "protect" in act or bool(attrs.get("cross_process")):
+                            alloc_events.append(ev.id)
+                    elif act in ["writeprocessmemory", "ntwritevirtualmemory", "zwwritevirtualmemory"] or bool(attrs.get("cross_process_write")):
+                        write_events.append(ev.id)
+                    elif act in ["createremotethread", "ntcreatethreadex", "zwcreatethreadex", "rtlcreateuserthread"] or bool(attrs.get("remote_thread")):
+                        thread_events.append(ev.id)
+                    elif bool(attrs.get("is_process_injection")):
+                        explicit_injections.append(ev.id)
+
+                # Contextual sequence requirement
+                if thread_events and (alloc_events or write_events):
+                    matched_event_ids.extend(list(set(thread_events + alloc_events + write_events)))
+                elif write_events and alloc_events:
+                    matched_event_ids.extend(list(set(write_events + alloc_events)))
+                elif explicit_injections:
+                    matched_event_ids.extend(explicit_injections)
+
             if matched_event_ids:
                 finding = BehavioralFinding(
                     analysis_id=analysis_id,

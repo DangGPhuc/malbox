@@ -735,3 +735,66 @@ def test_doctor_trace_auth_key_policy_and_redaction(tmp_path):
     assert ok_chk["status"] == "PASS"
     assert ok_chk["details"]["config"]["trace_auth_key_configured"] is True
     assert strong_trace_key not in json.dumps(rep_ok)
+
+
+def test_doctor_cape_connectivity_and_readiness(tmp_path, monkeypatch):
+    """Doctor optional check correctly probes CAPE API readiness, unauthorized, and unreachable states."""
+    import urllib.request
+    import urllib.error
+    from malbox_cli.checks import check_optional_integrations
+    from malbox_cli.models import CheckStatus
+
+    ws = _make_isolated_workspace(tmp_path)
+    env_live = {
+        "MALBOX_LIVE_MODE_ENABLED": "true",
+        "MALBOX_CAPE_API_URL": "http://127.0.0.1:8008",
+        "MALBOX_OPERATOR_TOKEN": "valid-operator-token-long-enough-32c",
+    }
+
+    # 1. CAPE READY
+    class MockRespReady:
+        def __init__(self):
+            self.code = 200
+        def getcode(self):
+            return 200
+        def read(self):
+            return json.dumps({"error": False, "data": {"version": "2.4-CAPE", "tasks": {"running": 0}}}).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=2.5: MockRespReady())
+    results = check_optional_integrations(ws, environ=env_live, which_fn=lambda _: None)
+    cape_chk = next(r for r in results if r.id == "opt_cape")
+    assert cape_chk.status == CheckStatus.PASS
+    assert "READY" in cape_chk.summary
+
+    # 2. CAPE UNAUTHORIZED (HTTP 401)
+    class MockHTTPError(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__("http://127.0.0.1:8008/apiv2/cuckoo/status/", 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=2.5: (_ for _ in ()).throw(MockHTTPError()))
+    results_unauth = check_optional_integrations(ws, environ=env_live, which_fn=lambda _: None)
+    cape_unauth = next(r for r in results_unauth if r.id == "opt_cape")
+    assert cape_unauth.status == CheckStatus.WARN
+    assert "UNAUTHORIZED" in cape_unauth.summary
+
+    # 3. CAPE UNREACHABLE (URLError)
+    class MockURLError(urllib.error.URLError):
+        def __init__(self):
+            super().__init__("Connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=2.5: (_ for _ in ()).throw(MockURLError()))
+    results_unreach = check_optional_integrations(ws, environ=env_live, which_fn=lambda _: None)
+    cape_unreach = next(r for r in results_unreach if r.id == "opt_cape")
+    assert cape_unreach.status == CheckStatus.WARN
+    assert "UNREACHABLE" in cape_unreach.summary
+
+    # 4. CAPE DISABLED (when MALBOX_LIVE_MODE_ENABLED=false)
+    env_disabled = {"MALBOX_LIVE_MODE_ENABLED": "false"}
+    results_dis = check_optional_integrations(ws, environ=env_disabled, which_fn=lambda _: None)
+    cape_dis = next(r for r in results_dis if r.id == "opt_cape")
+    assert cape_dis.status == CheckStatus.SKIP
+

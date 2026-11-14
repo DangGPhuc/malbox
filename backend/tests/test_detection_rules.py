@@ -223,3 +223,142 @@ def test_normal_http_post_not_c2_exfiltration(db_session):
     assert "RULE_C2_HTTP_EXFILTRATION" not in matched_rules
 
 
+def test_dropped_executable_rule_positive_and_negative(db_session):
+    """RULE_DROPPED_EXECUTABLE_PAYLOAD triggers on binary dropped files, but ignores benign text/log writes."""
+    sample = Sample(
+        sha256="drop" + "1" * 60, md5="d" * 32, sha1="d" * 40,
+        file_name="dropper.exe", file_size=50, quarantine_path="/tmp/d.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    # 1. Negative test: benign text file write
+    analysis_benign = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis_benign)
+    db_session.commit()
+
+    ev_txt = AnalysisEvent(
+        analysis_id=analysis_benign.id, category="file", action="write",
+        timestamp=datetime.now(timezone.utc), process_id=701,
+        target_path="C:\\Users\\User\\AppData\\Local\\Temp\\log.txt",
+        attributes={"is_dropped_binary": False}
+    )
+    db_session.add(ev_txt)
+    db_session.commit()
+
+    engine = DetectionEngine(db_session)
+    findings_neg, assessment_neg = engine.evaluate_behavior(analysis_benign.id)
+    matched_neg = [f.rule_id for f in findings_neg]
+    assert "RULE_DROPPED_EXECUTABLE_PAYLOAD" not in matched_neg
+
+    # 2. Positive test: dropped .exe or explicit is_dropped_binary payload
+    analysis_mal = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis_mal)
+    db_session.commit()
+
+    ev_exe = AnalysisEvent(
+        analysis_id=analysis_mal.id, category="file", action="write",
+        timestamp=datetime.now(timezone.utc), process_id=702,
+        target_path="C:\\Users\\User\\AppData\\Local\\Temp\\secondary_payload.exe",
+        attributes={"is_dropped_binary": True}
+    )
+    db_session.add(ev_exe)
+    db_session.commit()
+
+    findings_pos, assessment_pos = engine.evaluate_behavior(analysis_mal.id)
+    matched_pos = [f.rule_id for f in findings_pos]
+    assert "RULE_DROPPED_EXECUTABLE_PAYLOAD" in matched_pos
+    assert assessment_pos.score >= 30
+
+
+def test_process_injection_rule_positive_and_negative(db_session):
+    """RULE_PROCESS_INJECTION_TECHNIQUE requires executable allocation paired with remote thread or cross-PID write."""
+    sample = Sample(
+        sha256="inj" + "2" * 61, md5="i" * 32, sha1="i" * 40,
+        file_name="injector.exe", file_size=50, quarantine_path="/tmp/i.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    # 1. Negative test: lone local VirtualAlloc without thread execution or cross-PID
+    analysis_lone = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis_lone)
+    db_session.commit()
+
+    ev_alloc_lone = AnalysisEvent(
+        analysis_id=analysis_lone.id, category="process", action="virtualalloc",
+        timestamp=datetime.now(timezone.utc), process_id=801,
+        target_path=None,
+        attributes={"arguments": {"protect": "PAGE_READWRITE", "flAllocationType": "0x1000"}}
+    )
+    db_session.add(ev_alloc_lone)
+    db_session.commit()
+
+    engine = DetectionEngine(db_session)
+    findings_lone, _ = engine.evaluate_behavior(analysis_lone.id)
+    assert "RULE_PROCESS_INJECTION_TECHNIQUE" not in [f.rule_id for f in findings_lone]
+
+    # 2. Positive test: VirtualAllocEx (PAGE_EXECUTE_READWRITE) + CreateRemoteThread
+    analysis_inj = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis_inj)
+    db_session.commit()
+
+    ev_alloc_exec = AnalysisEvent(
+        analysis_id=analysis_inj.id, category="process", action="virtualallocex",
+        timestamp=datetime.now(timezone.utc), process_id=802,
+        target_path=None,
+        attributes={"arguments": {"protect": "PAGE_EXECUTE_READWRITE", "flProtect": "0x40"}}
+    )
+    ev_thread = AnalysisEvent(
+        analysis_id=analysis_inj.id, category="process", action="createremotethread",
+        timestamp=datetime.now(timezone.utc), process_id=802,
+        target_path=None,
+        attributes={"arguments": {"hProcess": "0x444"}, "remote_thread": True}
+    )
+    db_session.add_all([ev_alloc_exec, ev_thread])
+    db_session.commit()
+
+    findings_inj, assessment_inj = engine.evaluate_behavior(analysis_inj.id)
+    assert "RULE_PROCESS_INJECTION_TECHNIQUE" in [f.rule_id for f in findings_inj]
+    assert assessment_inj.score >= 40
+
+
+def test_incomplete_telemetry_quality_contract_prevents_false_clean(db_session):
+    """When telemetry is INCOMPLETE (e.g. analyzer crashed), assessment level must NOT be Clean or No Suspicious Behavior."""
+    sample = Sample(
+        sha256="inc" + "3" * 61, md5="c" * 32, sha1="c" * 40,
+        file_name="crashed.exe", file_size=50, quarantine_path="/tmp/c.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    analysis = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.CAPE.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    engine = DetectionEngine(db_session)
+    findings, assessment = engine.evaluate_behavior(analysis.id, telemetry_completeness="INCOMPLETE")
+
+    assert len(findings) == 0
+    assert assessment.score == 0
+    assert assessment.level == "Analysis Incomplete — Inconclusive"
+    assert "Clean" not in assessment.level
+    assert "No Suspicious Behavior" not in assessment.level
+    assert assessment.confidence <= 0.50
+
+

@@ -1,76 +1,124 @@
-# CAPE Sandbox Integration Guide — malbox-ai
+# CAPE Sandbox v2 Production Integration Guide
 
-This document details the configuration and operational requirements for connecting `malbox-ai` to a live CAPE Sandbox (v2) cluster.
+**Document Reference:** `docs/setup/cape-integration.md`  
+**Applies to:** Malbox-AI v0.2+ & CAPE Sandbox v2.4+  
+**Target Environment:** Isolated Kali Linux Host with VirtualBox Machinery
 
 ---
 
-## 1. Architecture Overview
+## 1. Architectural Overview
 
-`malbox-ai` communicates with CAPE Sandbox via its official REST API v2 (`apiv2/` endpoints).
+Malbox interacts with CAPE Sandbox through its REST API v2 (`/apiv2/`). The interaction lifecycle consists of:
+1. **Health Verification:** Probing `/apiv2/cuckoo/status/` via Doctor CLI or live readiness check.
+2. **Sample Submission:** Submitting quarantined PE binaries with strict option validation to `/apiv2/tasks/create/file/`.
+3. **Lifecycle Polling:** Tracking task status from `pending` -> `running` -> `completed` (VM shutdown) -> `reported` (report compiled).
+4. **Telemetry Ingestion:** Fetching `/apiv2/tasks/get/report/<task_id>/` with bounded retry and backoff, extracting processes, API calls, dropped files, registry modifications, and network connections.
+5. **Quality Contract Evaluation:** Assessing whether telemetry is `COMPLETE`, `PARTIAL`, `INCOMPLETE`, or `UNVERIFIED`.
 
-```text
-[ malbox-ai Backend ]
-        │  (HTTP REST / Token Auth)
-        ▼
-[ CAPE Web Service /apiv2/ ]
-        │  (Task Spooler & Monitor)
-        ▼
-[ KVM / QEMU Isolated Guest VM ] (Windows 10/11)
+---
+
+## 2. Server Configuration Templates
+
+### 2.1 `cuckoo.conf` Critical Parameters
+
+Ensure `conf/cuckoo.conf` within your CAPE installation root contains the following settings:
+
+```ini
+[cuckoo]
+version_check = no
+delete_original = off
+delete_bin_copy = off
+
+# Storage and disk management (Fix for ISSUE-09 / freespace issues)
+# Lower freespace limit if running in a constrained virtualized lab
+freespace = 10240
+
+[resultserver]
+# Resultserver IP binding:
+# CRITICAL: Set to 0.0.0.0 or the exact host-only gateway IP (e.g. 192.168.56.1).
+# Do not hardcode an unroutable external IP.
+ip = 0.0.0.0
+port = 2042
+force_port = no
+upload_max_size = 104857600
+
+[processing]
+# Ensure analysis summary and report generation are active
+analysis_size_limit = 104857600
+resolve_dns = yes
+sort_pcap = yes
 ```
 
-The adapter is implemented in `backend/app/services/sandbox/cape.py` (`CapeSandboxBackend`).
+### 2.2 `virtualbox.conf` Template
+
+```ini
+[virtualbox]
+# VirtualBox management mode
+mode = headless
+path = /usr/bin/vboxmanage
+
+# Host-only network interface
+interface = vboxnet0
+
+# Registered Virtual Machines
+machines = win10_analyst
+
+[win10_analyst]
+label = win10_analyst
+platform = windows
+ip = 192.168.56.101
+snapshot = Snapshot_Clean
+# Tags are optional. If set, Malbox will target them when requested.
+tags = win10_x64,clean
+```
 
 ---
 
-## 2. Prerequisites for Live Mode Activation
+## 3. Standardized Windows Guest Requirements
 
-To transition from Replay Mode to Live Detonation Mode:
+To prevent guest analyzer crashes and ensure telemetry fidelity:
 
-1. **Active CAPE Sandbox Installation:**
-   - CAPE Sandbox 2.x installed on a dedicated Linux hypervisor host.
-   - Dedicated isolated guest VM (e.g. Windows 10 x64) configured with CAPE agent (`agent.py`) and a clean baseline snapshot (e.g. `clean_snapshot`).
-2. **Network Isolation:**
-   - Host-only virtual bridge interface (`virbr0` or `cape-br0`).
-   - Network routing configured through `INetSim` (simulated DNS/HTTP/SMTP) or an isolated Tor/VPN proxy. External LAN egress must be blocked with `iptables`.
-3. **API Service:**
-   - CAPE REST API running:
-     ```bash
-     cd /opt/CAPEv2
-     poetry run python cuckoo.py api
-     ```
+1. **Python Runtime (Fix for ISSUE-10):**
+   - **Requirement:** Python 3.10+ (64-bit or 32-bit matching guest architecture).
+   - **Critical:** Older Python versions (<= 3.5) lack support for modern f-strings and typing syntax used in CAPE `analyzer.py`, leading to immediate guest analyzer crashes.
+   - Install Python to `C:\Python310` and ensure it is registered in system `PATH`.
+
+2. **Guest Agent Installation:**
+   - Copy `agent/agent.py` from CAPE repository into `C:\agent\agent.py`.
+   - Configure auto-start via Windows Registry Run key or Task Scheduler on logon.
+
+3. **Security Countermeasures in Guest:**
+   - Permanently disable Windows Defender Real-time Protection, Tamper Protection, and Cloud-delivered protection.
+   - Disable Windows Firewall for Domain, Private, and Public profiles (`netsh advfirewall set allprofiles state off`).
+   - Disable Windows Update and User Account Control (UAC: Never Notify).
+
+4. **Static IP Configuration:**
+   - IP: `192.168.56.101`
+   - Subnet Mask: `255.255.255.0`
+   - Default Gateway: `192.168.56.1`
+   - Primary DNS: `192.168.56.1` (or INetSim IP if used)
 
 ---
 
-## 3. Configuration in malbox-ai
+## 4. Malbox Environment Configuration
 
-In your `.env` or system environment variables:
+In your Malbox `.env` file, configure the following:
 
 ```bash
-# Enable live execution capabilities
+# Enable Live Execution Gate (requires explicit operator token)
 MALBOX_LIVE_MODE_ENABLED=true
-MALBOX_REQUIRE_EXPLICIT_APPROVAL=true
-
-# Sandbox backend defaults
 MALBOX_DEFAULT_SANDBOX_BACKEND=cape
-MALBOX_CAPE_API_URL=http://192.168.122.1:8000
-MALBOX_CAPE_API_TOKEN=your-cape-api-token-here
-MALBOX_CAPE_TIMEOUT_SECONDS=180
-MALBOX_CAPE_POLL_INTERVAL_SECONDS=5
+MALBOX_OPERATOR_TOKEN=your-random-high-entropy-token-min-32-chars
+
+# CAPE API Endpoints
+MALBOX_CAPE_API_URL=http://127.0.0.1:8008
+MALBOX_CAPE_API_TOKEN=your-cape-bearer-token-if-configured
+MALBOX_CAPE_TIMEOUT_SECONDS=120
 ```
 
----
-
-## 4. Verification and Readiness Testing
-
-You can verify your CAPE connection using the built-in health check:
-
+Verify readiness using the Doctor CLI:
 ```bash
-python3 -c "
-from app.services.sandbox.cape import CapeSandboxBackend
-cape = CapeSandboxBackend()
-print(cape.check_readiness())
-"
+./scripts/malbox doctor
 ```
-
-If the CAPE cluster is offline, `check_readiness()` gracefully reports `ready: false` with missing prerequisites and error details without crashing the platform.
-
+If CAPE is online and responsive, the doctor output will confirm:
+`[PASS] Optional: CAPE Sandbox: CAPE Sandbox READY at http://127.0.0.1:8008 (version: 2.4-CAPE).`

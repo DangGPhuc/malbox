@@ -856,6 +856,44 @@ def _probe_ghidra_and_jdk(
     }
 
 
+def _probe_cape_readiness(cape_url: str, token: Optional[str] = None) -> Dict[str, Any]:
+    import urllib.request
+    import urllib.error
+
+    status_url = f"{cape_url.rstrip('/')}/apiv2/cuckoo/status/"
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Token {token}"
+    req = urllib.request.Request(status_url, headers=headers)
+
+    try:
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            code = resp.getcode()
+            if code == 200:
+                body = resp.read()
+                data = json.loads(body.decode("utf-8", errors="replace"))
+                cuckoo_data = data.get("data", {}) if isinstance(data, dict) else {}
+                return {
+                    "classification": "READY",
+                    "version": cuckoo_data.get("version", "2.x"),
+                    "tasks": cuckoo_data.get("tasks", {}),
+                    "code": code,
+                }
+            return {
+                "classification": "DEGRADED",
+                "code": code,
+                "error": f"HTTP {code}",
+            }
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {"classification": "UNAUTHORIZED", "code": e.code, "error": f"HTTP {e.code} Unauthorized"}
+        return {"classification": "DEGRADED", "code": e.code, "error": f"HTTP {e.code}"}
+    except urllib.error.URLError as e:
+        return {"classification": "UNREACHABLE", "error": str(e.reason)}
+    except Exception as e:
+        return {"classification": "UNREACHABLE", "error": str(e)}
+
+
 def check_optional_integrations(
     root_dir: Path,
     environ: Optional[Dict[str, str]] = None,
@@ -869,21 +907,43 @@ def check_optional_integrations(
     # 1. CAPE Sandbox
     live_enabled = parse_bool(config.get("MALBOX_LIVE_MODE_ENABLED"), default=False)
     cape_url = config.get("MALBOX_CAPE_API_URL", "http://127.0.0.1:8008")
+    cape_token = (config.get("MALBOX_CAPE_API_TOKEN") or "").strip() or None
     if live_enabled:
-        results.append(CheckResult(
-            id="opt_cape",
-            name="Optional: CAPE Sandbox",
-            status=CheckStatus.WARN,
-            summary=f"Live Mode enabled targeting {cape_url} (hypervisor is NOT contacted automatically by doctor).",
-            details={"cape_api_url": cape_url, "live_mode_enabled": True},
-        ))
+        probe = _probe_cape_readiness(cape_url, token=cape_token)
+        classification = probe.get("classification", "UNREACHABLE")
+        if classification == "READY":
+            results.append(CheckResult(
+                id="opt_cape",
+                name="Optional: CAPE Sandbox",
+                status=CheckStatus.PASS,
+                summary=f"CAPE Sandbox READY at {cape_url} (version: {probe.get('version', '2.x')}).",
+                details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe},
+            ))
+        elif classification == "UNAUTHORIZED":
+            results.append(CheckResult(
+                id="opt_cape",
+                name="Optional: CAPE Sandbox",
+                status=CheckStatus.WARN,
+                summary=f"CAPE Sandbox UNAUTHORIZED at {cape_url} (HTTP 401/403). Check MALBOX_CAPE_API_TOKEN in .env.",
+                details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe},
+                remediation="Ensure MALBOX_CAPE_API_TOKEN is set to a valid CAPE REST API bearer token.",
+            ))
+        else:
+            results.append(CheckResult(
+                id="opt_cape",
+                name="Optional: CAPE Sandbox",
+                status=CheckStatus.WARN,
+                summary=f"CAPE Sandbox {classification} at {cape_url}: {probe.get('error', 'Service unavailable')}.",
+                details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe},
+                remediation="Verify CAPE API service is active (systemctl status cape-web or poetry run python manage.py runserver 0.0.0.0:8008).",
+            ))
     else:
         results.append(CheckResult(
             id="opt_cape",
             name="Optional: CAPE Sandbox",
             status=CheckStatus.SKIP,
-            summary="Optional live CAPE Sandbox disabled in Replay Mode (configured URL: " + cape_url + ").",
-            details={"cape_api_url": cape_url, "live_mode_enabled": False},
+            summary=f"Optional live CAPE Sandbox disabled in Replay Mode (configured URL: {cape_url}).",
+            details={"cape_api_url": cape_url, "live_mode_enabled": False, "classification": "DISABLED"},
         ))
 
     # 2. Ghidra Headless & JDK (optional; missing Ghidra must never block Replay readiness)
