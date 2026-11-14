@@ -54,6 +54,25 @@ export default function App() {
   const [requestedFunctionId, setRequestedFunctionId] = useState<string | null>(initialRoute.functionId);
   const [requestedCorrelationId, setRequestedCorrelationId] = useState<string | null>(initialRoute.correlationId);
 
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('malbox_theme');
+      if (stored === 'dark' || stored === 'light') return stored;
+    }
+    return 'light';
+  });
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-theme', theme);
+      localStorage.setItem('malbox_theme', theme);
+    }
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
+  };
+
   useEffect(() => {
     api
       .getHealth()
@@ -108,6 +127,8 @@ export default function App() {
         setCurrentTab={handleNavbarTabChange}
         health={health}
         activeAnalysisId={activeAnalysisId}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
 
       <main style={{ flex: 1, paddingBottom: '3rem' }}>
@@ -132,7 +153,7 @@ export default function App() {
         {currentTab === 'graph' && activeAnalysisId && (
           <Suspense
             fallback={
-              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
                 Loading interactive behavior graph...
               </div>
             }
@@ -151,7 +172,7 @@ export default function App() {
         {currentTab === 'static' && activeAnalysisId && (
           <Suspense
             fallback={
-              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
                 Loading Ghidra static function explorer...
               </div>
             }
@@ -167,7 +188,7 @@ export default function App() {
         {currentTab === 'correlation' && activeAnalysisId && (
           <Suspense
             fallback={
-              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
                 Loading static/dynamic correlation explorer...
               </div>
             }

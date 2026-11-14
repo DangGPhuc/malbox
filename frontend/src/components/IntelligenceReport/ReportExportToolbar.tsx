@@ -102,7 +102,7 @@ export const ReportExportToolbar: React.FC<ReportExportToolbarProps> = ({
           <Printer size={14} aria-hidden="true" /> Print / Save PDF
         </button>
       </div>
-      <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
         Exports preserve Replay provenance, deterministic scores, AI metadata, claim statuses &amp; caveats.
       </span>
     </div>

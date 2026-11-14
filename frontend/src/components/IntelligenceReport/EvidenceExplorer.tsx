@@ -52,14 +52,14 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
       className="card no-print"
       style={{
         border: '1px solid #38bdf8',
-        background: '#0b1120',
+        background: 'var(--bg-surface)',
         boxShadow: '0 0 24px rgba(56, 189, 248, 0.12)',
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.65rem', marginBottom: '0.85rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
           <FileCode size={18} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '1rem', color: '#f8fafc' }}>Evidence Record Inspector</h3>
+          <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-main)' }}>Evidence Record Inspector</h3>
           <span className="evidence-chip" style={{ cursor: 'default' }}>{selectedEvidenceId}</span>
         </div>
 
@@ -105,8 +105,8 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
             <strong style={{ color: '#86efac' }}>Resolved: Deterministic Behavioral Finding</strong>
             <span className="badge badge-neutral mono">{resolved.finding.rule_id}</span>
           </div>
-          <div style={{ fontWeight: 700, color: '#f8fafc' }}>{resolved.finding.title}</div>
-          <div style={{ color: '#cbd5e1' }}>{resolved.finding.description}</div>
+          <div style={{ fontWeight: 700, color: 'var(--text-main)' }}>{resolved.finding.title}</div>
+          <div style={{ color: 'var(--text-secondary)' }}>{resolved.finding.description}</div>
           {resolved.finding.mitre_attack_id && (
             <div><strong>MITRE Technique:</strong> <span className="mono">{resolved.finding.mitre_attack_id}</span> ({resolved.finding.mitre_tactic})</div>
           )}
@@ -170,13 +170,13 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
                 <pre
                   className="mono-wrap"
                   style={{
-                    background: '#070a12',
+                    background: 'var(--bg-main)',
                     border: '1px solid var(--border)',
                     borderRadius: '6px',
                     padding: '0.6rem',
                     margin: '0.35rem 0 0 0',
                     fontSize: '0.76rem',
-                    color: '#cbd5e1',
+                    color: 'var(--text-secondary)',
                     maxHeight: '180px',
                     overflowY: 'auto',
                   }}
@@ -205,9 +205,9 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
             <span className="badge badge-info">{resolved.correlation.relationship}</span>
             <span className="badge badge-neutral mono">{resolved.correlation.rule_id}</span>
           </div>
-          <div style={{ fontWeight: 600, color: '#f8fafc' }}>{resolved.correlation.relationship_summary}</div>
-          <div style={{ color: '#cbd5e1' }}>{resolved.correlation.explanation}</div>
-          <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+          <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>{resolved.correlation.relationship_summary}</div>
+          <div style={{ color: 'var(--text-secondary)' }}>{resolved.correlation.explanation}</div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
             Execution directly observed: <strong>{resolved.correlation.behavioral_execution_directly_observed ? 'Yes' : 'No'}</strong> ·
             Static Refs: <code className="mono">{resolved.correlation.static_ref_ids.join(', ') || 'none'}</code> ·
             Dynamic Refs: <code className="mono">{resolved.correlation.dynamic_ref_ids.join(', ') || 'none'}</code>
@@ -221,7 +221,7 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({
             <AlertTriangle size={16} color="#f59e0b" aria-hidden="true" />
             <strong>Evidence Record Unavailable / Not Retrieved</strong>
           </div>
-          <p style={{ margin: 0, color: '#e2e8f0' }}>{resolved.reason}</p>
+          <p style={{ margin: 0, color: 'var(--text-main)' }}>{resolved.reason}</p>
         </div>
       )}
     </aside>

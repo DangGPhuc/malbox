@@ -141,7 +141,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
   ];
 
   const renderFnJumpButton = (fnId: string | null | undefined) => {
-    if (!fnId) return <span style={{ color: '#64748b', fontSize: '0.74rem' }}>—</span>;
+    if (!fnId) return <span style={{ color: 'var(--text-muted)', fontSize: '0.74rem' }}>—</span>;
     const found = fnById.get(fnId);
     return (
       <button
@@ -170,7 +170,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <BookOpen size={18} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: 'var(--text-main)' }}>
             Static Artifacts, References & Heuristic Triage
           </h3>
         </div>
@@ -179,7 +179,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
           <Search
             size={13}
             aria-hidden="true"
-            style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: '#64748b' }}
+            style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}
           />
           <input
             type="text"
@@ -229,7 +229,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
           </div>
 
           {filteredFindings.length === 0 ? (
-            <div style={{ padding: '1.2rem', textAlign: 'center', color: '#64748b', fontSize: '0.84rem' }}>
+            <div style={{ padding: '1.2rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.84rem' }}>
               No ranked static findings available for this binary.
             </div>
           ) : (
@@ -254,11 +254,11 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
                   }}
                 >
                   <div>
-                    <strong style={{ color: '#f8fafc', fontSize: '0.92rem' }}>{finding.name}</strong>{' '}
+                    <strong style={{ color: 'var(--text-main)', fontSize: '0.92rem' }}>{finding.name}</strong>{' '}
                     <span className="mono-cell" style={{ fontSize: '0.8rem', color: '#38bdf8' }}>
                       @ {finding.entry_address}
                     </span>{' '}
-                    <code style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{finding.function_id}</code>
+                    <code style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{finding.function_id}</code>
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
@@ -284,7 +284,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
                 )}
 
                 {(finding.imported_apis.length > 0 || finding.string_signals.length > 0) && (
-                  <div style={{ fontSize: '0.76rem', color: '#cbd5e1', marginBottom: '0.4rem' }}>
+                  <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
                     {finding.imported_apis.length > 0 && (
                       <span>
                         APIs: <code>{finding.imported_apis.join(', ')}</code>
@@ -299,7 +299,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
                   </div>
                 )}
 
-                <div style={{ fontSize: '0.73rem', color: '#94a3b8', fontStyle: 'italic' }}>
+                <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
                   {finding.disclaimer}
                 </div>
               </div>
@@ -312,7 +312,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
         <div>
           {exports.length > 0 && (
             <div style={{ marginBottom: '0.85rem' }}>
-              <div style={{ fontSize: '0.76rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.35rem' }}>
+              <div style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.35rem' }}>
                 Exported Symbols ({exports.length})
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
@@ -326,7 +326,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
           )}
 
           {filteredImports.length === 0 ? (
-            <div style={{ padding: '1.2rem', textAlign: 'center', color: '#64748b', fontSize: '0.84rem' }}>
+            <div style={{ padding: '1.2rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.84rem' }}>
               No matching imported symbols recorded.
             </div>
           ) : (
@@ -346,13 +346,13 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
                     const callers = callersBySymbolName.get(imp.name.toLowerCase()) ?? [];
                     return (
                       <tr key={`${imp.library}:${imp.name}:${idx}`}>
-                        <td style={{ fontWeight: 600, color: '#cbd5e1' }}>{imp.library}</td>
-                        <td className="mono-cell" style={{ color: '#f8fafc' }}>{imp.name}</td>
+                        <td style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>{imp.library}</td>
+                        <td className="mono-cell" style={{ color: 'var(--text-main)' }}>{imp.name}</td>
                         <td className="mono-cell">{imp.address || '—'}</td>
                         <td>{imp.ordinal ?? '—'}</td>
                         <td>
                           {callers.length === 0 ? (
-                            <span style={{ color: '#64748b', fontSize: '0.75rem' }}>—</span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>
                           ) : (
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}>
                               {callers.map((c) => (
@@ -382,7 +382,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
       {activeTab === 'strings' && (
         <div>
           {filteredStrings.length === 0 ? (
-            <div style={{ padding: '1.2rem', textAlign: 'center', color: '#64748b', fontSize: '0.84rem' }}>
+            <div style={{ padding: '1.2rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.84rem' }}>
               No matching extracted static strings recorded.
             </div>
           ) : (
@@ -410,7 +410,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
                       </td>
                       <td>
                         {str.referencing_function_ids.length === 0 ? (
-                          <span style={{ color: '#64748b', fontSize: '0.75rem' }}>—</span>
+                          <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>
                         ) : (
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}>
                             {str.referencing_function_ids.map((fid) => renderFnJumpButton(fid))}
@@ -429,7 +429,7 @@ export const StaticArtifactsPanel: React.FC<StaticArtifactsPanelProps> = ({
       {activeTab === 'xrefs' && (
         <div>
           {filteredXrefs.length === 0 ? (
-            <div style={{ padding: '1.2rem', textAlign: 'center', color: '#64748b', fontSize: '0.84rem' }}>
+            <div style={{ padding: '1.2rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.84rem' }}>
               No matching static cross-references recorded.
             </div>
           ) : (

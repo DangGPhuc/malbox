@@ -65,12 +65,12 @@ export const CorrelationTriggerBar: React.FC<CorrelationTriggerBarProps> = ({
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }}>
             <GitCompareArrows size={17} color="#38bdf8" aria-hidden="true" />
-            <strong style={{ color: '#f8fafc', fontSize: '0.95rem' }}>
+            <strong style={{ color: 'var(--text-main)', fontSize: '0.95rem' }}>
               Bounded Deterministic Correlation Engine
             </strong>
             <span className="badge badge-info">Read-Only on Load · Explicit Recompute</span>
           </div>
-          <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
             Correlates persisted Ghidra static observations with dynamic sandbox events for{' '}
             <code className="mono">{analysisId}</code>. Never launches Ghidra, CAPE, or external AI.
           </div>
@@ -143,7 +143,7 @@ export const CorrelationTriggerBar: React.FC<CorrelationTriggerBarProps> = ({
             <AlertTriangle size={15} color="#f87171" aria-hidden="true" />
             <span>{triggerError.title}</span>
           </div>
-          <div style={{ marginTop: '0.2rem', color: '#e2e8f0' }}>{triggerError.detail}</div>
+          <div style={{ marginTop: '0.2rem', color: 'var(--text-main)' }}>{triggerError.detail}</div>
         </div>
       )}
 
@@ -169,7 +169,7 @@ export const CorrelationTriggerBar: React.FC<CorrelationTriggerBarProps> = ({
                 gap: '0.35rem',
                 fontSize: '0.78rem',
                 fontWeight: 600,
-                color: '#cbd5e1',
+                color: 'var(--text-secondary)',
                 marginBottom: '0.3rem',
               }}
             >
@@ -190,8 +190,8 @@ export const CorrelationTriggerBar: React.FC<CorrelationTriggerBarProps> = ({
                 padding: '0.48rem 0.65rem',
                 borderRadius: '6px',
                 border: '1px solid #334155',
-                backgroundColor: '#0f172a',
-                color: '#f8fafc',
+                backgroundColor: 'var(--bg-card)',
+                color: 'var(--text-main)',
                 fontSize: '0.84rem',
               }}
             />
@@ -203,7 +203,7 @@ export const CorrelationTriggerBar: React.FC<CorrelationTriggerBarProps> = ({
               alignItems: 'center',
               gap: '0.45rem',
               fontSize: '0.82rem',
-              color: '#cbd5e1',
+              color: 'var(--text-secondary)',
               cursor: triggering ? 'not-allowed' : 'pointer',
               paddingBottom: '0.45rem',
             }}

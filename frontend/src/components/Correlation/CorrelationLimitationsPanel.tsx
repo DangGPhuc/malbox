@@ -15,7 +15,7 @@ export const CorrelationLimitationsPanel: React.FC<CorrelationLimitationsPanelPr
     <section className="card" aria-label="Correlation Limitations and Truncation">
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.7rem' }}>
         <Scissors size={17} color="#f59e0b" aria-hidden="true" />
-        <h3 style={{ margin: 0, fontSize: '1rem', color: '#f8fafc' }}>
+        <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-main)' }}>
           Limitations, Warnings &amp; Bounded Caps
         </h3>
       </div>
@@ -29,26 +29,26 @@ export const CorrelationLimitationsPanel: React.FC<CorrelationLimitationsPanelPr
         }}
       >
         <div className="corr-kpi-card">
-          <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>Events Omitted</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: truncation.events_omitted > 0 ? '#fcd34d' : '#cbd5e1' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>Events Omitted</div>
+          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: truncation.events_omitted > 0 ? '#fcd34d' : 'var(--text-secondary)' }}>
             {truncation.events_omitted} / {truncation.total_events_in_analysis}
           </div>
         </div>
         <div className="corr-kpi-card">
-          <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>Findings Omitted</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: truncation.findings_omitted > 0 ? '#fcd34d' : '#cbd5e1' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>Findings Omitted</div>
+          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: truncation.findings_omitted > 0 ? '#fcd34d' : 'var(--text-secondary)' }}>
             {truncation.findings_omitted}
           </div>
         </div>
         <div className="corr-kpi-card">
-          <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>Ambiguous Suppressed</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#cbd5e1' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>Ambiguous Suppressed</div>
+          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-secondary)' }}>
             {limitations.suppressed_ambiguous_count}
           </div>
         </div>
         <div className="corr-kpi-card">
-          <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>Candidates Evaluated</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#cbd5e1' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>Candidates Evaluated</div>
+          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-secondary)' }}>
             {truncation.candidate_relationships_evaluated}
           </div>
         </div>
@@ -56,13 +56,13 @@ export const CorrelationLimitationsPanel: React.FC<CorrelationLimitationsPanelPr
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
         <div>
-          <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#e2e8f0', marginBottom: '0.3rem' }}>
+          <div style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-main)', marginBottom: '0.3rem' }}>
             Recorded Methodological Limitations ({limitations.items.length})
           </div>
           {limitations.items.length === 0 ? (
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No additional limitations recorded.</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No additional limitations recorded.</div>
           ) : (
-            <ul style={{ margin: 0, paddingLeft: '1.15rem', display: 'flex', flexDirection: 'column', gap: '0.3rem', fontSize: '0.81rem', color: '#cbd5e1' }}>
+            <ul style={{ margin: 0, paddingLeft: '1.15rem', display: 'flex', flexDirection: 'column', gap: '0.3rem', fontSize: '0.81rem', color: 'var(--text-secondary)' }}>
               {limitations.items.map((item, idx) => (
                 <li key={`${idx}-${item.slice(0, 24)}`}>{item}</li>
               ))}

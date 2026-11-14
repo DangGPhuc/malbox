@@ -47,11 +47,11 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
       <section className="card" aria-label="Correlation Evidence Inspector">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
           <FileCode size={17} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '0.98rem', color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '0.98rem', color: 'var(--text-main)' }}>
             Source Evidence Inspector
           </h3>
         </div>
-        <p style={{ margin: 0, fontSize: '0.82rem', color: '#94a3b8' }}>
+        <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-muted)' }}>
           Select a correlation finding, graph node, or evidence reference chip to verify original static disassembly functions or raw normalized telemetry records.
         </p>
       </section>
@@ -65,7 +65,7 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
       className="card"
       style={{
         border: '1px solid rgba(56, 189, 248, 0.45)',
-        backgroundColor: '#0b1120',
+        backgroundColor: 'var(--bg-surface)',
         display: 'flex',
         flexDirection: 'column',
         gap: '0.85rem',
@@ -84,7 +84,7 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <FileCode size={17} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '0.98rem', color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '0.98rem', color: 'var(--text-main)' }}>
             Source Evidence Inspector
           </h3>
           {selectedFinding && (
@@ -118,7 +118,7 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
           }}
         >
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.45rem' }}>
-            <strong style={{ color: '#f8fafc' }}>Dynamic Reference:</strong>
+            <strong style={{ color: 'var(--text-main)' }}>Dynamic Reference:</strong>
             <code className="mono-wrap" style={{ color: '#7dd3fc' }}>{inspectedDynamicRef.ref_id}</code>
             <span className={`badge ${inspectedDynamicRef.is_synthetic ? 'badge-suspicious' : 'badge-clean'}`}>
               {inspectedDynamicRef.is_synthetic ? 'SYNTHETIC REPLAY RECORD' : 'LIVE TELEMETRY RECORD'}
@@ -173,7 +173,7 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
                     borderRadius: '6px',
                     backgroundColor: '#020617',
                     border: '1px solid #1e293b',
-                    color: '#cbd5e1',
+                    color: 'var(--text-secondary)',
                     fontSize: '0.75rem',
                     maxHeight: '180px',
                     overflowY: 'auto',
@@ -203,13 +203,13 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
               {selectedFinding.relationship}
             </span>
             <span className="badge badge-neutral mono">{selectedFinding.rule_id}</span>
-            <span style={{ color: '#cbd5e1' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>
               {selectedFinding.relationship_summary}
             </span>
           </div>
 
           <div>
-            <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#cbd5e1', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
               <Cpu size={13} color="#38bdf8" aria-hidden="true" />
               <span>Static Code References</span>
             </div>
@@ -233,8 +233,8 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
                     <div className="mono-wrap" style={{ color: '#7dd3fc', fontWeight: 600 }}>
                       {sr.ref_id}
                     </div>
-                    <div style={{ color: '#cbd5e1', fontSize: '0.77rem' }}>{sr.summary}</div>
-                    <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.77rem' }}>{sr.summary}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
                       kind: {sr.evidence_kind} · source: {sr.source_tool} · scope: {sr.provenance_scope || 'unexecuted'}
                     </div>
                   </div>
@@ -267,7 +267,7 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
                 <Info size={13} aria-hidden="true" />
                 <span>Static Function Verified Locally: {resolvedFunction.name} ({resolvedFunction.entry_address})</span>
               </div>
-              <div style={{ marginTop: '0.2rem', color: '#e2e8f0' }}>
+              <div style={{ marginTop: '0.2rem', color: 'var(--text-main)' }}>
                 Size: {resolvedFunction.size_bytes} B · Rank: {resolvedFunction.rank_score.toFixed(1)} · Recorded APIs:{' '}
                 {resolvedFunction.imported_api_calls.join(', ') || 'None'}
               </div>
@@ -276,7 +276,7 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
 
           {selectedFinding.dynamic_references.length > 0 && (
             <div>
-              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#cbd5e1', marginBottom: '0.35rem' }}>
+              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
                 Dynamic Telemetry References
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
@@ -296,11 +296,11 @@ export const CorrelationEvidenceInspector: React.FC<CorrelationEvidenceInspector
                     }}
                   >
                     <div>
-                      <div className="mono-wrap" style={{ color: '#e2e8f0', fontWeight: 600 }}>
+                      <div className="mono-wrap" style={{ color: 'var(--text-main)', fontWeight: 600 }}>
                         {dr.ref_id}
                       </div>
-                      <div style={{ color: '#cbd5e1', fontSize: '0.77rem' }}>{dr.summary}</div>
-                      <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.77rem' }}>{dr.summary}</div>
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
                         tool: {dr.source_tool} · {dr.is_synthetic ? 'synthetic' : 'live'} ·{' '}
                         {dr.trace_verified ? 'trace_verified=true' : 'no_trace_proof'}
                       </div>

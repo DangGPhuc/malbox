@@ -375,17 +375,17 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
               <Cpu size={20} color="#38bdf8" aria-hidden="true" />
-              <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: '#f8fafc' }}>
+              <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-main)' }}>
                 Ghidra Static Function Explorer
               </h2>
             </div>
-            <div style={{ fontSize: '0.82rem', color: '#94a3b8' }}>
-              Analysis ID: <code style={{ color: '#e2e8f0' }}>{analysisId}</code>
+            <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+              Analysis ID: <code style={{ color: 'var(--text-main)' }}>{analysisId}</code>
               {staticData?.provenance?.sample_sha256 && (
                 <>
                   {' '}
                   • Sample SHA-256:{' '}
-                  <code style={{ color: '#cbd5e1' }}>
+                  <code style={{ color: 'var(--text-secondary)' }}>
                     {staticData.provenance.sample_sha256.slice(0, 16)}...
                   </code>
                 </>
@@ -462,7 +462,7 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
       />
 
       {loading && !staticData && (
-        <div className="card" style={{ textAlign: 'center', padding: '2rem', color: '#94a3b8' }}>
+        <div className="card" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
           Loading persisted static disassembly facts...
         </div>
       )}
@@ -523,7 +523,7 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
                 marginBottom: '0.65rem',
                 fontSize: '0.92rem',
                 fontWeight: 700,
-                color: '#f8fafc',
+                color: 'var(--text-main)',
               }}
             >
               <FileText size={16} color="#38bdf8" aria-hidden="true" />
@@ -532,51 +532,51 @@ export const StaticAnalysisPage: React.FC<StaticAnalysisPageProps> = ({
 
             <div className="static-meta-grid" style={{ fontSize: '0.78rem' }}>
               <div className="static-kpi-box">
-                <div style={{ color: '#64748b' }}>Program Name</div>
-                <div style={{ fontWeight: 700, color: '#f8fafc' }}>
+                <div style={{ color: 'var(--text-muted)' }}>Program Name</div>
+                <div style={{ fontWeight: 700, color: 'var(--text-main)' }}>
                   {prog?.program_name || 'Not extracted'}
                 </div>
-                <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
                   {prog?.executable_format || 'Format unavailable'}
                 </div>
               </div>
 
               <div className="static-kpi-box">
-                <div style={{ color: '#64748b' }}>Architecture & ABI</div>
-                <div style={{ fontWeight: 700, color: '#f8fafc' }}>
+                <div style={{ color: 'var(--text-muted)' }}>Architecture & ABI</div>
+                <div style={{ fontWeight: 700, color: 'var(--text-main)' }}>
                   {prog?.architecture || 'Unknown'} {prog?.address_size ? `(${prog.address_size}-bit)` : ''}
                 </div>
-                <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
                   {prog?.language_id || prog?.endianness || '—'}
                 </div>
               </div>
 
               <div className="static-kpi-box">
-                <div style={{ color: '#64748b' }}>Image Base / Entry</div>
+                <div style={{ color: 'var(--text-muted)' }}>Image Base / Entry</div>
                 <div className="mono-cell" style={{ fontWeight: 700, color: '#38bdf8' }}>
                   {prog?.image_base || '—'}
                 </div>
-                <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
                   Entries: {prog?.entry_points?.slice(0, 2).join(', ') || '—'}
                 </div>
               </div>
 
               <div className="static-kpi-box">
-                <div style={{ color: '#64748b' }}>Functions / Decompiled</div>
-                <div style={{ fontWeight: 700, color: '#f8fafc' }}>
+                <div style={{ color: 'var(--text-muted)' }}>Functions / Decompiled</div>
+                <div style={{ fontWeight: 700, color: 'var(--text-main)' }}>
                   {staticData.functions.length} shown / {staticData.decompiled_functions.length} decompiled
                 </div>
-                <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
                   Total discovered: {prog?.total_functions_discovered ?? staticData.functions.length}
                 </div>
               </div>
 
               <div className="static-kpi-box">
-                <div style={{ color: '#64748b' }}>Imports / Strings / Xrefs</div>
-                <div style={{ fontWeight: 700, color: '#f8fafc' }}>
+                <div style={{ color: 'var(--text-muted)' }}>Imports / Strings / Xrefs</div>
+                <div style={{ fontWeight: 700, color: 'var(--text-main)' }}>
                   {staticData.imports.length} / {staticData.strings.length} / {staticData.cross_references.length}
                 </div>
-                <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
                   Findings ranked: {staticData.ranked_findings.length}
                 </div>
               </div>

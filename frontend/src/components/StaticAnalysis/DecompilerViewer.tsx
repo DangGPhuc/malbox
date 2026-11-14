@@ -12,9 +12,9 @@ const KIND_COLOR: Record<string, string> = {
   keyword: '#c084fc',
   type: '#38bdf8',
   number: '#f59e0b',
-  comment: '#64748b',
+  comment: 'var(--text-muted)',
   string: '#4ade80',
-  plain: '#e2e8f0',
+  plain: 'var(--text-main)',
 };
 
 export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
@@ -57,7 +57,7 @@ export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <FileCode2 size={18} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: 'var(--text-main)' }}>
             Decompiler Pseudocode Viewer
           </h3>
         </div>
@@ -74,7 +74,7 @@ export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
           backgroundColor: 'rgba(15, 23, 42, 0.8)',
           border: '1px solid #1e293b',
           fontSize: '0.76rem',
-          color: '#94a3b8',
+          color: 'var(--text-muted)',
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'center',
@@ -92,7 +92,7 @@ export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
       </div>
 
       {!selectedFunction ? (
-        <div style={{ padding: '2rem 1rem', textAlign: 'center', color: '#64748b', fontSize: '0.86rem' }}>
+        <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.86rem' }}>
           Select a discovered function from the Function Explorer to inspect recovered Ghidra pseudocode.
         </div>
       ) : (
@@ -107,12 +107,12 @@ export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
               marginBottom: '0.65rem',
             }}
           >
-            <div style={{ fontSize: '0.82rem', color: '#cbd5e1', minWidth: 0 }}>
-              <strong style={{ color: '#f8fafc' }}>{selectedFunction.name}</strong>{' '}
+            <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', minWidth: 0 }}>
+              <strong style={{ color: 'var(--text-main)' }}>{selectedFunction.name}</strong>{' '}
               <span className="mono" style={{ color: '#7dd3fc' }}>
                 ({selectedFunction.entry_address})
               </span>{' '}
-              <span className="mono-wrap" style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
+              <span className="mono-wrap" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
                 {selectedFunction.function_id}
               </span>
             </div>
@@ -152,10 +152,10 @@ export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
               style={{
                 padding: '1rem',
                 borderRadius: '6px',
-                backgroundColor: '#0b1120',
+                backgroundColor: 'var(--bg-surface)',
                 border: '1px solid #1e293b',
                 fontSize: '0.83rem',
-                color: '#94a3b8',
+                color: 'var(--text-muted)',
               }}
             >
               No decompiled pseudocode was stored for <code className="mono">{selectedFunction.name}</code> (selective decompilation prioritizes top-ranked functions cleanly within caps).
@@ -222,7 +222,7 @@ export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
                     <div style={{ position: 'relative', flex: '1 1 220px' }}>
                       <Search
                         size={14}
-                        color="#64748b"
+                        color="var(--text-muted)"
                         aria-hidden="true"
                         style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)' }}
                       />
@@ -301,7 +301,7 @@ export const DecompilerViewer: React.FC<DecompilerViewerProps> = ({
                 </>
               ) : null}
 
-              <div style={{ marginTop: '0.5rem', fontSize: '0.74rem', color: '#64748b' }}>
+              <div style={{ marginTop: '0.5rem', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
                 {decompiled.provenance_note}
               </div>
             </>

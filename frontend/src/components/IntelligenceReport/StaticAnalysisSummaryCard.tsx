@@ -43,7 +43,7 @@ export const StaticAnalysisSummaryCard: React.FC<StaticAnalysisSummaryCardProps>
       >
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.55rem' }}>
           <Cpu size={18} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'var(--text-main)' }}>
             Static Binary Inspection (Ghidra Headless)
           </h3>
           <span className={`badge ${statusMeta.badgeClass}`}>
@@ -67,7 +67,7 @@ export const StaticAnalysisSummaryCard: React.FC<StaticAnalysisSummaryCardProps>
       </div>
 
       {loading && !staticData ? (
-        <div style={{ fontSize: '0.84rem', color: '#94a3b8' }}>
+        <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
           Checking persisted static analysis facts for <code>{analysisId}</code>...
         </div>
       ) : !staticData ? (
@@ -77,17 +77,17 @@ export const StaticAnalysisSummaryCard: React.FC<StaticAnalysisSummaryCardProps>
             alignItems: 'center',
             gap: '0.5rem',
             fontSize: '0.83rem',
-            color: '#94a3b8',
+            color: 'var(--text-muted)',
           }}
         >
-          <Info size={15} color="#64748b" aria-hidden="true" />
+          <Info size={15} color="var(--text-muted)" aria-hidden="true" />
           <span>
             No persisted Ghidra static disassembly metadata is loaded for this report. Static function inspection is optional and remains separated from dynamic replay observations.
           </span>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-          <div style={{ fontSize: '0.83rem', color: '#cbd5e1' }}>
+          <div style={{ fontSize: '0.83rem', color: 'var(--text-secondary)' }}>
             {statusMeta.description}
           </div>
 
@@ -104,14 +104,14 @@ export const StaticAnalysisSummaryCard: React.FC<StaticAnalysisSummaryCardProps>
             }}
           >
             <div>
-              <div style={{ color: '#64748b' }}>Target Binary</div>
-              <div style={{ fontWeight: 600, color: '#f8fafc' }}>
+              <div style={{ color: 'var(--text-muted)' }}>Target Binary</div>
+              <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>
                 {program?.program_name || 'Not extracted'}
               </div>
             </div>
             <div>
-              <div style={{ color: '#64748b' }}>Functions Included</div>
-              <div style={{ fontWeight: 600, color: '#f8fafc' }}>
+              <div style={{ color: 'var(--text-muted)' }}>Functions Included</div>
+              <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>
                 {staticData.functions.length}
                 {trunc && trunc.functions_discovered > staticData.functions.length
                   ? ` / ${trunc.functions_discovered}`
@@ -119,19 +119,19 @@ export const StaticAnalysisSummaryCard: React.FC<StaticAnalysisSummaryCardProps>
               </div>
             </div>
             <div>
-              <div style={{ color: '#64748b' }}>Decompiled</div>
-              <div style={{ fontWeight: 600, color: '#f8fafc' }}>
+              <div style={{ color: 'var(--text-muted)' }}>Decompiled</div>
+              <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>
                 {staticData.decompiled_functions.length}
               </div>
             </div>
             <div>
-              <div style={{ color: '#64748b' }}>Imports / Strings</div>
-              <div style={{ fontWeight: 600, color: '#f8fafc' }}>
+              <div style={{ color: 'var(--text-muted)' }}>Imports / Strings</div>
+              <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>
                 {staticData.imports.length} / {staticData.strings.length}
               </div>
             </div>
             <div>
-              <div style={{ color: '#64748b' }}>Prioritized Signals</div>
+              <div style={{ color: 'var(--text-muted)' }}>Prioritized Signals</div>
               <div style={{ fontWeight: 600, color: '#fcd34d' }}>
                 {staticData.ranked_findings.length}
               </div>
@@ -140,7 +140,7 @@ export const StaticAnalysisSummaryCard: React.FC<StaticAnalysisSummaryCardProps>
 
           {staticData.ranked_findings.length > 0 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', alignItems: 'center', fontSize: '0.77rem' }}>
-              <span style={{ color: '#94a3b8' }}>Top static prioritization candidates:</span>
+              <span style={{ color: 'var(--text-muted)' }}>Top static prioritization candidates:</span>
               {staticData.ranked_findings.slice(0, 3).map((finding) => (
                 <span key={finding.function_id} className="evidence-chip">
                   {finding.name} ({finding.entry_address}) • score {finding.score.toFixed(1)}
@@ -158,7 +158,7 @@ export const StaticAnalysisSummaryCard: React.FC<StaticAnalysisSummaryCardProps>
             </div>
           )}
 
-          <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
             Scope: <code>{prov?.provenance_scope ?? 'unexecuted'}</code> • Binary Executed: <strong>false</strong> • Static functions, API imports, and decompiler pseudocode are structural observations only and do not establish executed dynamic behavior.
           </div>
         </div>

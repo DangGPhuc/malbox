@@ -128,7 +128,7 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
         <div style={{ flex: '1 1 380px', minWidth: 0 }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', marginBottom: '0.45rem' }}>
             <Cpu size={18} color="#38bdf8" aria-hidden="true" />
-            <h2 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: '#f8fafc' }}>
+            <h2 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
               Ghidra Static Provenance & Containment
             </h2>
             <span className={`badge ${meta.badgeClass}`}>{meta.label}</span>
@@ -157,12 +157,12 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
             </span>
           </div>
 
-          <p style={{ margin: '0 0 0.55rem 0', fontSize: '0.84rem', color: '#cbd5e1' }}>
+          <p style={{ margin: '0 0 0.55rem 0', fontSize: '0.84rem', color: 'var(--text-secondary)' }}>
             {meta.description}
           </p>
 
           {prov && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', fontSize: '0.76rem', color: '#94a3b8' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', fontSize: '0.76rem', color: 'var(--text-muted)' }}>
               <span className="badge badge-neutral">
                 Scope: {prov.provenance_scope ?? 'analysis_specific'}
               </span>
@@ -194,10 +194,10 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
                 background: 'rgba(15, 23, 42, 0.85)',
                 border: '1px solid #1e293b',
                 fontSize: '0.79rem',
-                color: prov.provenance_scope === 'sample_fallback' ? '#fde68a' : '#94a3b8',
+                color: prov.provenance_scope === 'sample_fallback' ? '#fde68a' : 'var(--text-muted)',
               }}
             >
-              <strong style={{ color: '#cbd5e1' }}>Provenance Note:</strong> {prov.provenance_note}
+              <strong style={{ color: 'var(--text-secondary)' }}>Provenance Note:</strong> {prov.provenance_note}
               {prov.analysis_id && prov.requested_analysis_id && prov.analysis_id !== prov.requested_analysis_id && (
                 <span> (Origin analysis: <code className="mono">{prov.analysis_id}</code>)</span>
               )}
@@ -263,7 +263,7 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
             backgroundColor: 'rgba(30, 41, 59, 0.7)',
             border: '1px solid #334155',
             fontSize: '0.8rem',
-            color: '#cbd5e1',
+            color: 'var(--text-secondary)',
           }}
         >
           Static disassembly is disabled by default (<code className="mono">MALBOX_GHIDRA_ENABLED=false</code>). Malbox never auto-enables Ghidra from the UI; Replay telemetry and Intelligence Reports remain available.
@@ -318,11 +318,11 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
             border: '1px solid var(--border-light)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.55rem', color: '#e2e8f0', fontSize: '0.84rem', fontWeight: 600 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.55rem', color: 'var(--text-main)', fontSize: '0.84rem', fontWeight: 600 }}>
             <KeyRound size={15} color="#38bdf8" aria-hidden="true" />
             <span>Explicit Authorized Static Analysis Trigger ({analysisId})</span>
           </div>
-          <p style={{ margin: '0 0 0.7rem 0', fontSize: '0.79rem', color: '#94a3b8' }}>
+          <p style={{ margin: '0 0 0.7rem 0', fontSize: '0.79rem', color: 'var(--text-muted)' }}>
             Executes non-executing <code className="mono">analyzeHeadless -readOnly</code> inside Bubblewrap (<code className="mono">--unshare-all</code>) + Linux cgroup memory bounds. Recovered pseudocode remains backend-local and is never sent automatically to external AI providers.
           </p>
 
@@ -330,7 +330,7 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
             <div style={{ flex: '1 1 260px' }}>
               <label
                 htmlFor="static-reporting-token"
-                style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '0.25rem' }}
+                style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.25rem' }}
               >
                 X-Reporting-Token (kept in component memory only)
               </label>
@@ -353,7 +353,7 @@ export const StaticTriggerBar: React.FC<StaticTriggerBarProps> = ({
               {triggering ? 'Queuing...' : 'Queue Ghidra Run'}
             </button>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.45rem', fontSize: '0.73rem', color: '#64748b' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.45rem', fontSize: '0.73rem', color: 'var(--text-muted)' }}>
             <Lock size={12} aria-hidden="true" />
             <span>Token is transmitted strictly in the request header and never stored in localStorage, sessionStorage, or URLs.</span>
           </div>

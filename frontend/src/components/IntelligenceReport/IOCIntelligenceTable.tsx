@@ -36,7 +36,7 @@ export const IOCIntelligenceTable: React.FC<IOCIntelligenceTableProps> = ({
           <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', marginBottom: '0.85rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Globe size={18} color="#38bdf8" aria-hidden="true" />
-              <h2 id="ioc-interpretations-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+              <h2 id="ioc-interpretations-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
                 Contextualized IOC Intelligence ({iocInterpretations.length})
               </h2>
             </div>
@@ -80,7 +80,7 @@ export const IOCIntelligenceTable: React.FC<IOCIntelligenceTableProps> = ({
                             </button>
                           ))
                         ) : (
-                          <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>Unlinked</span>
+                          <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>Unlinked</span>
                         )}
                       </div>
                     </td>
@@ -97,46 +97,46 @@ export const IOCIntelligenceTable: React.FC<IOCIntelligenceTableProps> = ({
         <section className="card" aria-labelledby="raw-iocs-heading">
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.8rem' }}>
             <Database size={17} color="#38bdf8" aria-hidden="true" />
-            <h3 id="raw-iocs-heading" style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+            <h3 id="raw-iocs-heading" style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
               Deterministic Extracted IOCs
             </h3>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', fontSize: '0.84rem' }}>
             <div>
-              <strong style={{ color: '#94a3b8' }}>Domains ({extractedIocs.domains.length}):</strong>{' '}
+              <strong style={{ color: 'var(--text-muted)' }}>Domains ({extractedIocs.domains.length}):</strong>{' '}
               <span className="mono-wrap" style={{ color: '#7dd3fc' }}>
                 {extractedIocs.domains.join(', ') || 'None'}
               </span>
             </div>
             <div>
-              <strong style={{ color: '#94a3b8' }}>IPs ({extractedIocs.ips.length}):</strong>{' '}
+              <strong style={{ color: 'var(--text-muted)' }}>IPs ({extractedIocs.ips.length}):</strong>{' '}
               <span className="mono-wrap" style={{ color: '#7dd3fc' }}>
                 {extractedIocs.ips.join(', ') || 'None'}
               </span>
             </div>
             <div>
-              <strong style={{ color: '#94a3b8' }}>URLs ({extractedIocs.urls.length}):</strong>{' '}
+              <strong style={{ color: 'var(--text-muted)' }}>URLs ({extractedIocs.urls.length}):</strong>{' '}
               <span className="mono-wrap" style={{ color: '#7dd3fc' }}>
                 {extractedIocs.urls.join(', ') || 'None'}
               </span>
             </div>
             <div>
-              <strong style={{ color: '#94a3b8' }}>Registry Keys ({extractedIocs.registry_keys.length}):</strong>{' '}
-              <span className="mono-wrap" style={{ color: '#e2e8f0' }}>
+              <strong style={{ color: 'var(--text-muted)' }}>Registry Keys ({extractedIocs.registry_keys.length}):</strong>{' '}
+              <span className="mono-wrap" style={{ color: 'var(--text-main)' }}>
                 {extractedIocs.registry_keys.join(', ') || 'None'}
               </span>
             </div>
             <div>
-              <strong style={{ color: '#94a3b8' }}>Dropped Files ({dropped.length}):</strong>
+              <strong style={{ color: 'var(--text-muted)' }}>Dropped Files ({dropped.length}):</strong>
               {dropped.length === 0 ? (
-                <span style={{ color: '#64748b' }}> None</span>
+                <span style={{ color: 'var(--text-muted)' }}> None</span>
               ) : (
                 <ul style={{ margin: '0.35rem 0 0 0', paddingLeft: '1.1rem', display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
                   {dropped.map((d, idx) => (
                     <li key={`${d.sha256}-${idx}`}>
-                      <div className="mono-wrap" style={{ color: '#f1f5f9', fontSize: '0.8rem' }}>{d.path}</div>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', alignItems: 'center', fontSize: '0.73rem', color: '#94a3b8' }}>
+                      <div className="mono-wrap" style={{ color: 'var(--text-main)', fontSize: '0.8rem' }}>{d.path}</div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', alignItems: 'center', fontSize: '0.73rem', color: 'var(--text-muted)' }}>
                         <span className="mono-wrap">SHA-256: {d.sha256}</span>
                         <span>({d.size_bytes} B)</span>
                         {d.event_id && (
@@ -162,7 +162,7 @@ export const IOCIntelligenceTable: React.FC<IOCIntelligenceTableProps> = ({
           <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.4rem', marginBottom: '0.8rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <FileWarning size={17} color="#f97316" aria-hidden="true" />
-              <h3 id="artifacts-inventory-heading" style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+              <h3 id="artifacts-inventory-heading" style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
                 Captured Artifacts ({artifactCount})
               </h3>
             </div>
@@ -170,7 +170,7 @@ export const IOCIntelligenceTable: React.FC<IOCIntelligenceTableProps> = ({
           </div>
 
           {artifactCount === 0 ? (
-            <div style={{ fontSize: '0.84rem', color: '#94a3b8' }}>
+            <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
               No PCAP, screenshot, or auxiliary artifact files were recorded for this analysis.
             </div>
           ) : (
@@ -210,12 +210,12 @@ export const IOCIntelligenceTable: React.FC<IOCIntelligenceTableProps> = ({
                   >
                     <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem' }}>
-                        <strong className="mono-wrap" style={{ fontSize: '0.82rem', color: '#f8fafc' }}>{name}</strong>
+                        <strong className="mono-wrap" style={{ fontSize: '0.82rem', color: 'var(--text-main)' }}>{name}</strong>
                         <span className={`badge ${syn ? 'badge-suspicious' : 'badge-clean'}`}>
                           {syn ? 'SYNTHETIC PLACEHOLDER' : 'LIVE CAPTURE'}
                         </span>
                       </div>
-                      <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.2rem' }}>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
                         {art.provenance_note ||
                           (syn
                             ? 'Mock stub artifact generated by Replay backend — not real captured traffic/screen.'

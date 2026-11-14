@@ -52,11 +52,11 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Clock size={18} color="#38bdf8" aria-hidden="true" />
-            <h2 id="attack-story-heading" style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+            <h2 id="attack-story-heading" style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
               Chronological Attack Story &amp; Execution Telemetry
             </h2>
           </div>
-          <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
+          <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
             Derived exclusively from backend timeline interpretations and recorded events. Unrecorded timestamps or causal links are never inferred.
           </p>
         </div>
@@ -132,7 +132,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
                     {isOpen ? (
                       <ChevronDown size={17} color="#38bdf8" style={{ marginTop: '2px', flexShrink: 0 }} aria-hidden="true" />
                     ) : (
-                      <ChevronRight size={17} color="#94a3b8" style={{ marginTop: '2px', flexShrink: 0 }} aria-hidden="true" />
+                      <ChevronRight size={17} color="var(--text-muted)" style={{ marginTop: '2px', flexShrink: 0 }} aria-hidden="true" />
                     )}
                     <div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.45rem', marginBottom: '0.25rem' }}>
@@ -144,7 +144,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
                           </span>
                         )}
                       </div>
-                      <div style={{ fontSize: '0.9rem', color: '#f1f5f9', lineHeight: 1.5 }}>
+                      <div style={{ fontSize: '0.9rem', color: 'var(--text-main)', lineHeight: 1.5 }}>
                         {phaseItem.summary}
                       </div>
                     </div>
@@ -155,7 +155,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
                   <div style={{ marginTop: '0.75rem', paddingLeft: '1.55rem', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
                     {/* Evidence references */}
                     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.35rem' }}>
-                      <span style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600 }}>Evidence Refs:</span>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>Evidence Refs:</span>
                       {phaseItem.supporting_evidence_ids.length > 0 ? (
                         phaseItem.supporting_evidence_ids.map((eid) => (
                           <button
@@ -178,7 +178,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
                     {/* Linked deterministic findings */}
                     {relatedFindings.length > 0 && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.35rem' }}>
-                        <span style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600 }}>Related Findings:</span>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>Related Findings:</span>
                         {relatedFindings.map((f) => (
                           <button
                             key={f.id}
@@ -195,14 +195,14 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
 
                     {/* Context from actual matching execution_timeline rows */}
                     {matchedTelemetry.length > 0 ? (
-                      <div style={{ background: '#070a12', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.65rem 0.75rem' }}>
-                        <div style={{ fontSize: '0.73rem', color: '#94a3b8', marginBottom: '0.4rem', fontWeight: 600 }}>
+                      <div style={{ background: 'var(--bg-main)', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.65rem 0.75rem' }}>
+                        <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginBottom: '0.4rem', fontWeight: 600 }}>
                           Matched Execution Telemetry Records ({matchedTelemetry.length})
                         </div>
-                        <ul style={{ margin: 0, paddingLeft: '1rem', fontSize: '0.8rem', color: '#cbd5e1', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                        <ul style={{ margin: 0, paddingLeft: '1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                           {matchedTelemetry.map((ev, eIdx) => (
                             <li key={ev.event_id || eIdx}>
-                              <span className="mono" style={{ color: '#64748b', fontSize: '0.74rem' }}>
+                              <span className="mono" style={{ color: 'var(--text-muted)', fontSize: '0.74rem' }}>
                                 {ev.timestamp ? formatDateTime(ev.timestamp) : 'Timestamp not recorded'}
                               </span>{' '}
                               {ev.process && (
@@ -216,7 +216,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
                         </ul>
                       </div>
                     ) : (
-                      <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
+                      <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
                         Process/network timeline row details for these IDs can be inspected individually via the Evidence Explorer above.
                       </div>
                     )}
@@ -243,7 +243,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
         {showRawTelemetry && (
           <div style={{ marginTop: '0.75rem' }}>
             {executionTimeline.length === 0 ? (
-              <div style={{ fontSize: '0.84rem', color: '#94a3b8' }}>
+              <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
                 No execution timeline telemetry entries were recorded.
               </div>
             ) : (
@@ -264,7 +264,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
                     }}
                   >
                     <div style={{ flex: '1 1 320px' }}>
-                      <span className="mono" style={{ fontSize: '0.74rem', color: '#94a3b8', marginRight: '0.5rem' }}>
+                      <span className="mono" style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginRight: '0.5rem' }}>
                         {entry.timestamp ? formatDateTime(entry.timestamp) : 'No timestamp'}
                       </span>
                       {entry.category && <span className="badge badge-info" style={{ marginRight: '0.4rem' }}>{entry.category}</span>}
@@ -273,7 +273,7 @@ export const AttackStoryTimeline: React.FC<AttackStoryTimelineProps> = ({
                           {entry.process}{entry.pid !== null && entry.pid !== undefined ? `[${entry.pid}]` : ''}
                         </span>
                       )}
-                      <span style={{ color: '#e2e8f0' }}>{entry.summary}</span>
+                      <span style={{ color: 'var(--text-main)' }}>{entry.summary}</span>
                     </div>
                     {entry.event_id && (
                       <button

@@ -27,7 +27,7 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
     <section className="card" aria-labelledby="confidence-limitations-heading">
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.9rem' }}>
         <Gauge size={18} color="#a78bfa" aria-hidden="true" />
-        <h2 id="confidence-limitations-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+        <h2 id="confidence-limitations-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
           Analytical Confidence, Truncation &amp; Evidence Gaps
         </h2>
       </div>
@@ -44,7 +44,7 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
           }}
         >
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
-            <strong style={{ fontSize: '0.92rem', color: '#f8fafc' }}>
+            <strong style={{ fontSize: '0.92rem', color: 'var(--text-main)' }}>
               Overall Analytical Confidence: {formatConfidencePct(confidenceAssessment.overall_confidence)}
             </strong>
             <span
@@ -59,12 +59,12 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
               Evidence Completeness: {confidenceAssessment.evidence_completeness.toUpperCase()}
             </span>
           </div>
-          <p style={{ margin: 0, fontSize: '0.84rem', color: '#cbd5e1', lineHeight: 1.5 }}>
+          <p style={{ margin: 0, fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
             {confidenceAssessment.rationale}
           </p>
         </div>
       ) : (
-        <div style={{ fontSize: '0.83rem', color: '#94a3b8', marginBottom: '0.8rem' }}>
+        <div style={{ fontSize: '0.83rem', color: 'var(--text-muted)', marginBottom: '0.8rem' }}>
           Legacy baseline report — structured v2.0 confidence assessment not generated yet.
         </div>
       )}
@@ -84,12 +84,12 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
             <span className={`badge ${truncation.truncated ? 'badge-suspicious' : 'badge-clean'}`}>
               {truncation.truncated ? 'EVIDENCE BUNDLE TRUNCATED' : 'FULL TELEMETRY WITHIN BUDGET'}
             </span>
-            <span style={{ fontSize: '0.8rem', color: '#e2e8f0', fontWeight: 600 }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-main)', fontWeight: 600 }}>
               {truncation.events_included} / {truncation.total_events_available} events in bundle
               {truncation.events_omitted > 0 ? ` (${truncation.events_omitted} omitted)` : ''}
             </span>
           </div>
-          <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
+          <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
             Strategy: <code className="mono">{truncation.prioritization_strategy}</code> • Fields truncated:{' '}
             {truncation.fields_truncated_count} • Timeline truncated:{' '}
             {truncation.timeline_truncated ? 'Yes' : 'No'} • Bundle size:{' '}
@@ -100,12 +100,12 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
 
       {/* Contradictions and Missing Telemetry */}
       <div style={{ marginBottom: '0.9rem' }}>
-        <h3 style={{ fontSize: '0.9rem', fontWeight: 700, color: '#f8fafc', margin: '0 0 0.45rem 0', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+        <h3 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)', margin: '0 0 0.45rem 0', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
           <AlertOctagon size={14} color="#f97316" aria-hidden="true" />
           Missing Telemetry, Contradictions &amp; Gaps ({gaps.length})
         </h3>
         {gaps.length === 0 ? (
-          <div style={{ fontSize: '0.81rem', color: '#94a3b8' }}>
+          <div style={{ fontSize: '0.81rem', color: 'var(--text-muted)' }}>
             No explicit telemetry contradictions reported beyond general sandbox limitations below.
           </div>
         ) : (
@@ -122,8 +122,8 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
                 }}
               >
                 <div style={{ fontWeight: 700, color: '#fdba74' }}>{gap.gap_type}</div>
-                <div style={{ color: '#e2e8f0', marginTop: '2px' }}>{gap.description}</div>
-                <div style={{ color: '#94a3b8', fontSize: '0.76rem', marginTop: '2px' }}>
+                <div style={{ color: 'var(--text-main)', marginTop: '2px' }}>{gap.description}</div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.76rem', marginTop: '2px' }}>
                   <strong>Impact:</strong> {gap.impact}
                 </div>
               </div>
@@ -134,11 +134,11 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
 
       {/* Explicit Scope Limitations (Always Kept Visible) */}
       <div>
-        <h3 style={{ fontSize: '0.9rem', fontWeight: 700, color: '#f8fafc', margin: '0 0 0.45rem 0', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+        <h3 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)', margin: '0 0 0.45rem 0', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
           <AlertTriangle size={14} color="#eab308" aria-hidden="true" />
           Analytical Scope Limitations
         </h3>
-        <ul style={{ margin: 0, paddingLeft: '1.15rem', fontSize: '0.81rem', color: '#cbd5e1', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+        <ul style={{ margin: 0, paddingLeft: '1.15rem', fontSize: '0.81rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
           {limitations.map((lim, idx) => (
             <li key={idx}>{lim}</li>
           ))}

@@ -12,10 +12,10 @@ export const ValidationSummaryPanel: React.FC<ValidationSummaryPanelProps> = ({
   if (!validationSummary) {
     return (
       <section className="card" aria-labelledby="validation-summary-heading">
-        <h2 id="validation-summary-heading" style={{ fontSize: '1.05rem', fontWeight: 700, margin: '0 0 0.5rem 0', color: '#f8fafc' }}>
+        <h2 id="validation-summary-heading" style={{ fontSize: '1.05rem', fontWeight: 700, margin: '0 0 0.5rem 0', color: 'var(--text-main)' }}>
           Claim Validation Summary
         </h2>
-        <p style={{ margin: 0, fontSize: '0.83rem', color: '#94a3b8' }}>
+        <p style={{ margin: 0, fontSize: '0.83rem', color: 'var(--text-muted)' }}>
           Validation telemetry unavailable because this report predates the Phase 2A EvidenceValidator schema.
         </p>
       </section>
@@ -31,7 +31,7 @@ export const ValidationSummaryPanel: React.FC<ValidationSummaryPanelProps> = ({
           ) : (
             <ShieldAlert size={18} color="#ef4444" aria-hidden="true" />
           )}
-          <h2 id="validation-summary-heading" style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+          <h2 id="validation-summary-heading" style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
             EvidenceValidator Audit Summary
           </h2>
         </div>
@@ -55,8 +55,8 @@ export const ValidationSummaryPanel: React.FC<ValidationSummaryPanelProps> = ({
         }}
       >
         <div style={{ background: 'var(--bg-surface)', padding: '0.6rem', borderRadius: '6px', border: '1px solid var(--border)' }}>
-          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>TOTAL CLAIMS</div>
-          <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc' }}>{validationSummary.total_claims}</div>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>TOTAL CLAIMS</div>
+          <div style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-main)' }}>{validationSummary.total_claims}</div>
         </div>
         <div style={{ background: 'var(--bg-surface)', padding: '0.6rem', borderRadius: '6px', border: '1px solid var(--border)' }}>
           <div style={{ fontSize: '0.7rem', color: '#86efac' }}>VERIFIED</div>
@@ -76,7 +76,7 @@ export const ValidationSummaryPanel: React.FC<ValidationSummaryPanelProps> = ({
         </div>
       </div>
 
-      <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginBottom: '0.6rem' }}>
+      <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '0.6rem' }}>
         Breakdown: <strong>{validationSummary.deterministic_facts}</strong> verified fact(s),{' '}
         <strong>{validationSummary.analyst_inferences}</strong> analyst inference(s),{' '}
         <strong>{validationSummary.uncertain_hypotheses}</strong> uncertain hypothesis/hypotheses.

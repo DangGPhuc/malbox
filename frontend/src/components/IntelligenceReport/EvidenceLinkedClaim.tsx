@@ -40,16 +40,16 @@ export const EvidenceLinkedClaim: React.FC<EvidenceLinkedClaimProps> = ({
     <section className="card" aria-labelledby="evidence-claims-heading">
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
         <div>
-          <h2 id="evidence-claims-heading" style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+          <h2 id="evidence-claims-heading" style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
             Evidence-Linked Analytical Claims ({filteredClaims.length} / {claims.length})
           </h2>
-          <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
+          <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
             Facts, inferences, and hypotheses are strictly separated. Click any evidence reference to inspect its backing record.
           </p>
         </div>
 
         <div className="no-print" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', alignItems: 'center' }}>
-          <Filter size={14} color="#94a3b8" aria-hidden="true" />
+          <Filter size={14} color="var(--text-muted)" aria-hidden="true" />
           {(['ALL', 'FACT', 'INFERENCE', 'HYPOTHESIS'] as const).map((cls) => (
             <button
               key={cls}
@@ -76,7 +76,7 @@ export const EvidenceLinkedClaim: React.FC<EvidenceLinkedClaimProps> = ({
       </div>
 
       {filteredClaims.length === 0 ? (
-        <div style={{ padding: '1.25rem', textAlign: 'center', color: '#94a3b8', background: 'var(--bg-surface)', borderRadius: '8px' }}>
+        <div style={{ padding: '1.25rem', textAlign: 'center', color: 'var(--text-muted)', background: 'var(--bg-surface)', borderRadius: '8px' }}>
           {claims.length === 0
             ? 'No structured analytical claims available in this report.'
             : 'No analytical claims match the active classification/status filters.'}
@@ -101,7 +101,7 @@ export const EvidenceLinkedClaim: React.FC<EvidenceLinkedClaimProps> = ({
                 }}
               >
                 <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.45rem', marginBottom: '0.55rem' }}>
-                  <span className="mono" style={{ fontSize: '0.75rem', fontWeight: 700, color: '#cbd5e1' }}>
+                  <span className="mono" style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)' }}>
                     {claim.claim_id}
                   </span>
                   <span className={`badge ${clsMeta.badgeClass}`}>{clsMeta.label}</span>
@@ -124,7 +124,7 @@ export const EvidenceLinkedClaim: React.FC<EvidenceLinkedClaimProps> = ({
                   style={{
                     margin: '0 0 0.55rem 0',
                     fontSize: '0.93rem',
-                    color: isRejected ? '#fecaca' : '#f1f5f9',
+                    color: isRejected ? '#fecaca' : 'var(--text-main)',
                     lineHeight: 1.55,
                   }}
                 >
@@ -154,7 +154,7 @@ export const EvidenceLinkedClaim: React.FC<EvidenceLinkedClaimProps> = ({
                 )}
 
                 {claim.caveats && claim.caveats.length > 0 && (
-                  <ul style={{ margin: '0 0 0.55rem 0', paddingLeft: '1.15rem', fontSize: '0.79rem', color: '#cbd5e1' }}>
+                  <ul style={{ margin: '0 0 0.55rem 0', paddingLeft: '1.15rem', fontSize: '0.79rem', color: 'var(--text-secondary)' }}>
                     {claim.caveats.map((cav, idx) => (
                       <li key={idx}>{cav}</li>
                     ))}
@@ -162,7 +162,7 @@ export const EvidenceLinkedClaim: React.FC<EvidenceLinkedClaimProps> = ({
                 )}
 
                 <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem' }}>
-                  <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8' }}>
+                  <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
                     Supporting Evidence IDs:
                   </span>
                   {claim.supporting_evidence_ids && claim.supporting_evidence_ids.length > 0 ? (
@@ -183,7 +183,7 @@ export const EvidenceLinkedClaim: React.FC<EvidenceLinkedClaimProps> = ({
                     </span>
                   )}
                   {claim.evidence_sources && claim.evidence_sources.length > 0 && (
-                    <span className="mono-wrap" style={{ fontSize: '0.72rem', color: '#64748b', marginLeft: 'auto' }}>
+                    <span className="mono-wrap" style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>
                       Sources: {claim.evidence_sources.join(', ')}
                     </span>
                   )}

@@ -12,11 +12,11 @@ export const CorrelationOverview: React.FC<CorrelationOverviewProps> = ({
   const { summary, truncation, provenance } = correlationData;
 
   const kpis = [
-    { label: 'Total Findings', value: summary.total_findings, color: '#f8fafc' },
+    { label: 'Total Findings', value: summary.total_findings, color: 'var(--text-main)' },
     { label: 'Directly Observed', value: summary.directly_observed_count, color: '#86efac' },
     { label: 'Consistent With', value: summary.consistent_with_count, color: '#7dd3fc' },
     { label: 'Contradictory', value: summary.contradictory_count, color: '#fdba74' },
-    { label: 'Insufficient Evidence', value: summary.insufficient_evidence_count, color: '#cbd5e1' },
+    { label: 'Insufficient Evidence', value: summary.insufficient_evidence_count, color: 'var(--text-secondary)' },
     { label: 'Synthetic Scenario Only', value: summary.synthetic_scenario_only_count, color: '#fcd34d' },
   ];
 
@@ -34,11 +34,11 @@ export const CorrelationOverview: React.FC<CorrelationOverviewProps> = ({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <ShieldCheck size={18} color="#38bdf8" aria-hidden="true" />
-          <h2 style={{ margin: 0, fontSize: '1.05rem', color: '#f8fafc' }}>
+          <h2 style={{ margin: 0, fontSize: '1.05rem', color: 'var(--text-main)' }}>
             Correlation Summary &amp; Coverage Bounds
           </h2>
         </div>
-        <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
           Events scanned: <strong>{truncation.events_scanned}</strong>/{truncation.total_events_in_analysis} ·
           Functions scanned: <strong>{truncation.functions_scanned}</strong>/{truncation.functions_available} ·
           Bytes: <strong>{truncation.serialized_bytes}</strong>/{truncation.max_serialized_bytes}
@@ -48,7 +48,7 @@ export const CorrelationOverview: React.FC<CorrelationOverviewProps> = ({
       <div className="corr-kpi-grid">
         {kpis.map((item) => (
           <div key={item.label} className="corr-kpi-card">
-            <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>{item.label}</div>
+            <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>{item.label}</div>
             <div style={{ fontSize: '1.35rem', fontWeight: 800, color: item.color }}>
               {item.value}
             </div>
@@ -65,7 +65,7 @@ export const CorrelationOverview: React.FC<CorrelationOverviewProps> = ({
           backgroundColor: 'rgba(15, 23, 42, 0.7)',
           border: '1px solid #1e293b',
           fontSize: '0.79rem',
-          color: '#cbd5e1',
+          color: 'var(--text-secondary)',
         }}
       >
         <strong>Authority Boundary:</strong> Correlation confidence reflects static-to-dynamic linkage evidence strength —{' '}

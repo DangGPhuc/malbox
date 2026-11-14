@@ -61,12 +61,12 @@ export const CorrelationStatusBar: React.FC<CorrelationStatusBarProps> = ({
           )}
         </div>
 
-        <span className="mono" style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+        <span className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
           rules: {prov.engine_version} · external AI: disabled
         </span>
       </div>
 
-      <div style={{ fontSize: '0.84rem', color: '#cbd5e1' }}>
+      <div style={{ fontSize: '0.84rem', color: 'var(--text-secondary)' }}>
         {statusMeta.description} {traceMeta.summary}
       </div>
 
@@ -146,14 +146,14 @@ export const CorrelationStatusBar: React.FC<CorrelationStatusBarProps> = ({
             borderRadius: '6px',
             border: '1px solid rgba(148, 163, 184, 0.35)',
             backgroundColor: 'rgba(30, 41, 59, 0.5)',
-            color: '#e2e8f0',
+            color: 'var(--text-main)',
             fontSize: '0.82rem',
             display: 'flex',
             alignItems: 'center',
             gap: '0.45rem',
           }}
         >
-          <AlertTriangle size={15} color="#94a3b8" aria-hidden="true" />
+          <AlertTriangle size={15} color="var(--text-muted)" aria-hidden="true" />
           <span>
             Static Ghidra disassembly is currently unavailable (`{prov.static_status}`). Correlation Explorer does not spawn Ghidra automatically; run static disassembly first if needed.
           </span>

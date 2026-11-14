@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Shield, AlertTriangle, CheckCircle, XCircle, ArrowUpRight, Zap, RefreshCw } from 'lucide-react';
+import { Shield, AlertTriangle, CheckCircle, XCircle, ArrowUpRight, Zap, RefreshCw, Cpu, Layers } from 'lucide-react';
 import { api } from '../api/client';
 import { AnalysisDetail } from '../types';
 
@@ -33,73 +33,97 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
   const total = analyses.length;
   const completed = analyses.filter((a) => a.status === 'COMPLETED').length;
-  const failed = analyses.filter((a) => a.status === 'FAILED' || a.status === 'TIMED_OUT').length;
-  const malicious = analyses.filter((a) => a.risk_level === 'Malicious').length;
-  const suspicious = analyses.filter((a) => a.risk_level === 'Suspicious').length;
+  const failed = analyses.filter((a) => a.status === 'FAILED' || a.status === 'TIMED_OUT' || a.status === 'CANCELLED').length;
+  const malicious = analyses.filter((a) => a.risk_level === 'Malicious' || a.risk_level === 'Critical' || (a.risk_score && a.risk_score >= 60)).length;
+  const suspicious = analyses.filter((a) => a.risk_level === 'Suspicious' || (a.risk_score && a.risk_score >= 20 && a.risk_score < 60)).length;
 
   return (
     <div className="container">
-      {/* Header Banner */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+      {/* Editorial Header Banner (DESIGN.md) */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem', marginBottom: '2rem' }}>
         <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 800, margin: '0 0 0.25rem 0', color: '#f8fafc' }}>
-            Behavioral Intelligence Dashboard
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem' }}>
+            <span className="pill-tag badge-info" style={{ textTransform: 'none', fontSize: '0.75rem' }}>
+              Forensic Analysis Workspace
+            </span>
+          </div>
+          <h1 style={{ fontSize: '2rem', fontWeight: 700, margin: '0 0 0.5rem 0', color: 'var(--text-main)', letterSpacing: '-0.5px' }}>
+            Behavioral Intelligence & Evidence <span className="hero-pill-blue">Provenance</span>
           </h1>
-          <p style={{ margin: 0, color: '#94a3b8', fontSize: '0.9rem' }}>
-            AI-orchestrated dynamic execution monitoring and evidence provenance engine.
+          <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.95rem', maxWidth: '720px' }}>
+            Grounded static-dynamic correlation, deterministic scenario replays, and verifiable MITRE ATT&CK observations without speculative execution claims.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
-          <button onClick={fetchAnalyses} className="btn btn-secondary" title="Refresh">
-            <RefreshCw size={16} />
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          <button onClick={fetchAnalyses} className="btn btn-secondary" title="Refresh Dashboard">
+            <RefreshCw size={15} />
             Refresh
           </button>
           <button onClick={onNavigateSubmit} className="btn btn-primary">
-            <Zap size={16} />
+            <Zap size={15} />
             Submit Executable
           </button>
         </div>
       </div>
 
-      {/* Metrics Row */}
+      {/* System Readiness Strip */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'var(--bg-surface)', border: '1px solid var(--border)', padding: '6px 14px', borderRadius: '8px', fontSize: '0.8rem' }}>
+          <CheckCircle size={14} color="#15803d" />
+          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Deterministic Replay:</span>
+          <span style={{ color: 'var(--text-secondary)' }}>Ready (WannaCry & RedLine fixtures)</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'var(--bg-surface)', border: '1px solid var(--border)', padding: '6px 14px', borderRadius: '8px', fontSize: '0.8rem' }}>
+          <Layers size={14} color="var(--primary)" />
+          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Evidence Correlation:</span>
+          <span style={{ color: 'var(--text-secondary)' }}>HMAC-isolated trace verification</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'var(--bg-surface)', border: '1px solid var(--border)', padding: '6px 14px', borderRadius: '8px', fontSize: '0.8rem' }}>
+          <Cpu size={14} color="var(--amber)" />
+          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Telemetry Contract:</span>
+          <span style={{ color: 'var(--text-secondary)' }}>Strict quality gates (COMPLETE / PARTIAL / INCOMPLETE)</span>
+        </div>
+      </div>
+
+      {/* 4 Metric Cards */}
       <div className="grid-4" style={{ marginBottom: '1.5rem' }}>
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <div style={{ background: 'rgba(56, 189, 248, 0.1)', padding: '12px', borderRadius: '8px' }}>
-            <Shield size={24} color="#38bdf8" />
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '18px 20px' }}>
+          <div style={{ background: 'var(--color-sky-tint)', padding: '12px', borderRadius: '10px' }}>
+            <Shield size={22} color="var(--color-notion-blue)" />
           </div>
           <div>
-            <div style={{ color: '#94a3b8', fontSize: '0.8rem', fontWeight: 600 }}>TOTAL SUBMISSIONS</div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800 }}>{total}</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600, letterSpacing: '0.3px', textTransform: 'uppercase' }}>Submissions</div>
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-main)' }}>{total}</div>
           </div>
         </div>
 
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <div style={{ background: 'rgba(34, 197, 94, 0.1)', padding: '12px', borderRadius: '8px' }}>
-            <CheckCircle size={24} color="#22c55e" />
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '18px 20px' }}>
+          <div style={{ background: 'rgba(21, 128, 61, 0.1)', padding: '12px', borderRadius: '10px' }}>
+            <CheckCircle size={22} color="#15803d" />
           </div>
           <div>
-            <div style={{ color: '#94a3b8', fontSize: '0.8rem', fontWeight: 600 }}>COMPLETED RUNS</div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#4ade80' }}>{completed}</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600, letterSpacing: '0.3px', textTransform: 'uppercase' }}>Completed</div>
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#15803d' }}>{completed}</div>
           </div>
         </div>
 
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <div style={{ background: 'rgba(239, 68, 68, 0.1)', padding: '12px', borderRadius: '8px' }}>
-            <AlertTriangle size={24} color="#ef4444" />
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '18px 20px' }}>
+          <div style={{ background: 'rgba(246, 73, 50, 0.1)', padding: '12px', borderRadius: '10px' }}>
+            <AlertTriangle size={22} color="var(--danger)" />
           </div>
           <div>
-            <div style={{ color: '#94a3b8', fontSize: '0.8rem', fontWeight: 600 }}>CONFIRMED MALICIOUS</div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#f87171' }}>{malicious}</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600, letterSpacing: '0.3px', textTransform: 'uppercase' }}>Confirmed Malicious</div>
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--danger)' }}>{malicious}</div>
           </div>
         </div>
 
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <div style={{ background: 'rgba(249, 115, 22, 0.1)', padding: '12px', borderRadius: '8px' }}>
-            <XCircle size={24} color="#f97316" />
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '18px 20px' }}>
+          <div style={{ background: 'rgba(255, 177, 16, 0.15)', padding: '12px', borderRadius: '10px' }}>
+            <XCircle size={22} color="#b45309" />
           </div>
           <div>
-            <div style={{ color: '#94a3b8', fontSize: '0.8rem', fontWeight: 600 }}>FAILED / TIMED OUT</div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800 }}>{failed}</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600, letterSpacing: '0.3px', textTransform: 'uppercase' }}>Suspicious / Failed</div>
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#b45309' }}>{suspicious + failed}</div>
           </div>
         </div>
       </div>
@@ -107,74 +131,94 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
       {/* Main Content Split */}
       <div className="grid-2">
         {/* Left: Recent Analyses Table */}
-        <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#e2e8f0' }}>Recent Analysis Jobs</h2>
-            <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Showing latest {analyses.length}</span>
+        <div className="card" style={{ padding: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+            <div>
+              <h2 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>Recent Forensic Analyses</h2>
+              <p style={{ margin: '2px 0 0 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>Latest execution records with mode and telemetry status</p>
+            </div>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{analyses.length} record(s)</span>
           </div>
 
           {loading ? (
-            <div style={{ textAlign: 'center', padding: '2rem', color: '#94a3b8' }}>Loading analyses...</div>
+            <div style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--text-muted)' }}>Loading analyses...</div>
           ) : analyses.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '2.5rem', color: '#64748b' }}>
-              <p>No analyses found in local database.</p>
-              <button onClick={onNavigateSubmit} className="btn btn-primary" style={{ marginTop: '0.5rem' }}>
+            <div style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--text-muted)' }}>
+              <Shield size={36} color="var(--border-light)" style={{ marginBottom: '0.75rem' }} />
+              <p style={{ margin: '0 0 0.5rem 0', fontWeight: 500 }}>No analyses found in local database.</p>
+              <p style={{ margin: '0 0 1rem 0', fontSize: '0.85rem' }}>Submit a PE sample or launch a deterministic synthetic replay scenario.</p>
+              <button onClick={onNavigateSubmit} className="btn btn-primary">
                 Run First Replay Analysis
               </button>
             </div>
           ) : (
-            <div style={{ overflowX: 'auto' }}>
+            <div className="table-scroll">
               <table className="table">
                 <thead>
                   <tr>
                     <th>Sample</th>
+                    <th>Mode</th>
                     <th>Status</th>
-                    <th>Risk</th>
-                    <th>Profile</th>
+                    <th>Assessment</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {analyses.map((a) => {
-                    const badgeClass =
-                      a.risk_level === 'Malicious'
-                        ? 'badge-malicious'
-                        : a.risk_level === 'Suspicious'
-                        ? 'badge-suspicious'
-                        : a.risk_level === 'Low'
-                        ? 'badge-low'
-                        : 'badge-info';
+                    const isMalicious = a.risk_level === 'Malicious' || a.risk_level === 'Critical' || (a.risk_score && a.risk_score >= 60);
+                    const isSuspicious = a.risk_level === 'Suspicious' || (a.risk_score && a.risk_score >= 20 && a.risk_score < 60);
+                    const badgeClass = isMalicious
+                      ? 'badge-malicious'
+                      : isSuspicious
+                      ? 'badge-suspicious'
+                      : a.risk_level?.includes('Incomplete')
+                      ? 'badge-incomplete'
+                      : 'badge-clean';
+
+                    const isLive = a.backend_type === 'cape';
 
                     return (
                       <tr key={a.id}>
                         <td>
-                          <div style={{ fontWeight: 600, color: '#f8fafc' }}>{a.sample_file_name}</div>
-                          <div className="mono" style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                            {a.sample_sha256 ? `${a.sample_sha256.slice(0, 12)}...` : 'N/A'}
+                          <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>{a.sample_file_name || 'sample.exe'}</div>
+                          <div className="mono" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            {a.sample_sha256 ? `${a.sample_sha256.slice(0, 14)}...` : 'N/A'}
                           </div>
                         </td>
                         <td>
-                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: a.status === 'COMPLETED' ? '#4ade80' : '#38bdf8' }}>
+                          {isLive ? (
+                            <span className="pill-tag badge-warning" style={{ fontSize: '0.7rem' }}>
+                              CAPE Live
+                            </span>
+                          ) : (
+                            <span className="pill-tag badge-info" style={{ fontSize: '0.7rem' }}>
+                              Replay
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span style={{
+                            fontSize: '0.75rem',
+                            fontWeight: 600,
+                            color: a.status === 'COMPLETED' ? '#15803d' : a.status === 'FAILED' ? 'var(--danger)' : 'var(--primary)',
+                          }}>
                             {a.status}
                           </span>
                         </td>
                         <td>
                           {a.risk_level ? (
-                            <span className={`badge ${badgeClass}`}>
-                              {a.risk_level} ({a.risk_score})
+                            <span className={`badge ${badgeClass}`} style={{ fontSize: '0.7rem' }}>
+                              {a.risk_level} {a.risk_score !== undefined ? `(${a.risk_score})` : ''}
                             </span>
                           ) : (
-                            <span style={{ color: '#64748b', fontSize: '0.8rem' }}>Pending</span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>Pending</span>
                           )}
-                        </td>
-                        <td>
-                          <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>{a.profile}</span>
                         </td>
                         <td>
                           <button
                             onClick={() => onSelectAnalysis(a.id, 'workspace')}
-                            className="btn btn-secondary"
-                            style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
+                            className="btn btn-secondary btn-sm"
+                            style={{ gap: '0.25rem' }}
                           >
                             Workspace <ArrowUpRight size={12} />
                           </button>
@@ -188,49 +232,58 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           )}
         </div>
 
-        {/* Right: Security Posture & Engine Overview */}
-        <div>
-          <div className="card">
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 700, margin: '0 0 1rem 0', color: '#e2e8f0' }}>
+        {/* Right: Security Posture & Engine Architecture */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          <div className="card" style={{ padding: '24px' }}>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, margin: '0 0 1rem 0', color: 'var(--text-main)' }}>
               Execution Isolation Architecture
             </h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', fontSize: '0.85rem' }}>
-              <div style={{ background: '#0b1120', padding: '10px 14px', borderRadius: '6px', borderLeft: '4px solid #38bdf8' }}>
-                <div style={{ fontWeight: 600, color: '#38bdf8' }}>Deterministic Replay Mode Active</div>
-                <div style={{ color: '#94a3b8', marginTop: '2px' }}>
-                  Executes synthetic multi-stage attack scenarios with zero live binary detonation on host.
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem', fontSize: '0.85rem' }}>
+              <div style={{ background: 'var(--bg-main)', padding: '12px 16px', borderRadius: '8px', borderLeft: '3px solid var(--primary)' }}>
+                <div style={{ fontWeight: 600, color: 'var(--primary)' }}>Deterministic Replay Mode</div>
+                <div style={{ color: 'var(--text-secondary)', marginTop: '3px', fontSize: '0.82rem' }}>
+                  Executes synthetic multi-stage attack scenarios without host compromise. Grounded in signed replay fixtures.
                 </div>
               </div>
 
-              <div style={{ background: '#0b1120', padding: '10px 14px', borderRadius: '6px', borderLeft: '4px solid #22c55e' }}>
-                <div style={{ fontWeight: 600, color: '#22c55e' }}>AI Decision Allowlist Enforcement</div>
-                <div style={{ color: '#94a3b8', marginTop: '2px' }}>
-                  Rule-based policy engine acts as immutable authority. Host command injection is strictly rejected.
+              <div style={{ background: 'var(--bg-main)', padding: '12px 16px', borderRadius: '8px', borderLeft: '3px solid #15803d' }}>
+                <div style={{ fontWeight: 600, color: '#15803d' }}>Telemetry Completeness Quality Gate</div>
+                <div style={{ color: 'var(--text-secondary)', marginTop: '3px', fontSize: '0.82rem' }}>
+                  Distinguishes verified benign execution from unmonitored crash states. Never declares 0/100 Clean on incomplete telemetry.
                 </div>
               </div>
 
-              <div style={{ background: '#0b1120', padding: '10px 14px', borderRadius: '6px', borderLeft: '4px solid #f97316' }}>
-                <div style={{ fontWeight: 600, color: '#fb923c' }}>Live Sandbox Boundary</div>
-                <div style={{ color: '#94a3b8', marginTop: '2px' }}>
-                  Live detonation requires active CAPE adapter, isolated snapshot verification, and explicit analyst authorization.
+              <div style={{ background: 'var(--bg-main)', padding: '12px 16px', borderRadius: '8px', borderLeft: '3px solid var(--amber)' }}>
+                <div style={{ fontWeight: 600, color: 'var(--amber)' }}>Live Sandbox Boundary</div>
+                <div style={{ color: 'var(--text-secondary)', marginTop: '3px', fontSize: '0.82rem' }}>
+                  Requires active CAPE backend, isolated guest VM, and explicit high-entropy operator token authorization.
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="card">
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 700, margin: '0 0 0.75rem 0', color: '#e2e8f0' }}>
+          <div className="card" style={{ padding: '24px' }}>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, margin: '0 0 0.85rem 0', color: 'var(--text-main)' }}>
               Threat Severity Distribution
             </h2>
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', height: '14px', borderRadius: '4px', overflow: 'hidden' }}>
-              <div style={{ width: `${total ? (malicious / total) * 100 : 0}%`, background: '#ef4444' }} title="Malicious" />
-              <div style={{ width: `${total ? (suspicious / total) * 100 : 0}%`, background: '#f97316' }} title="Suspicious" />
-              <div style={{ width: `${total ? ((completed - malicious - suspicious) / total) * 100 : 100}%`, background: '#22c55e' }} title="Clean/Low" />
+            <div style={{ display: 'flex', gap: '3px', marginBottom: '1rem', height: '10px', borderRadius: '9999px', overflow: 'hidden', background: 'var(--bg-main)' }}>
+              <div style={{ width: `${total ? (malicious / total) * 100 : 0}%`, background: 'var(--danger)' }} title="Malicious" />
+              <div style={{ width: `${total ? (suspicious / total) * 100 : 0}%`, background: 'var(--amber)' }} title="Suspicious" />
+              <div style={{ width: `${total ? ((completed - malicious - suspicious) / total) * 100 : 100}%`, background: '#15803d' }} title="Clean/Low" />
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#94a3b8' }}>
-              <span>Malicious: {malicious}</span>
-              <span>Suspicious: {suspicious}</span>
-              <span>Clean / Low: {Math.max(0, completed - malicious - suspicious)}</span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--danger)' }} />
+                Malicious: {malicious}
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--amber)' }} />
+                Suspicious: {suspicious}
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#15803d' }} />
+                Clean / Low: {Math.max(0, completed - malicious - suspicious)}
+              </span>
             </div>
           </div>
         </div>
@@ -238,4 +291,3 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
     </div>
   );
 };
-

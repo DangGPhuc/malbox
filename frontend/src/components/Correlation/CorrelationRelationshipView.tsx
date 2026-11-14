@@ -63,7 +63,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
               selector: 'node',
               style: {
                 label: 'data(label)',
-                color: '#f8fafc',
+                color: 'var(--text-main)',
                 'font-size': '10px',
                 'text-valign': 'bottom',
                 'text-margin-y': 5,
@@ -71,7 +71,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
                 height: 28,
                 'border-width': 2,
                 'border-color': 'data(relationshipColor)',
-                'background-color': '#0f172a',
+                'background-color': 'var(--bg-card)',
               },
             },
             {
@@ -99,7 +99,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
                 'line-style': 'solid',
                 label: 'data(relationship)',
                 'font-size': '8px',
-                color: '#cbd5e1',
+                color: 'var(--text-secondary)',
               },
             },
             {
@@ -193,7 +193,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <Network size={17} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '1rem', color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-main)' }}>
             Bounded Static-to-Dynamic Relationship Graph
           </h3>
           <span className="badge badge-neutral mono">
@@ -274,7 +274,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
         }}
       >
         {bounded.nodes.length === 0 && (
-          <div style={{ padding: '2.2rem 1rem', textAlign: 'center', fontSize: '0.82rem', color: '#64748b' }}>
+          <div style={{ padding: '2.2rem 1rem', textAlign: 'center', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
             No static-to-dynamic correlation edges available to render.
           </div>
         )}
@@ -282,11 +282,11 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
 
       {/* Accessible Textual Adjacency Equivalent */}
       <div>
-        <div style={{ fontSize: '0.79rem', fontWeight: 700, color: '#cbd5e1', marginBottom: '0.35rem' }}>
+        <div style={{ fontSize: '0.79rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
           Accessible Relationship Mapping ({bounded.edges.length} grounded links)
         </div>
         {bounded.edges.length === 0 ? (
-          <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
             No edges grounded in CorrelationFinding records.
           </div>
         ) : (

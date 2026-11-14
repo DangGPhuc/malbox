@@ -31,7 +31,7 @@ export const CorrelationProvenancePanel: React.FC<CorrelationProvenancePanelProp
     <section className="card" aria-label="Correlation Provenance Details">
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
         <Fingerprint size={17} color="#38bdf8" aria-hidden="true" />
-        <h3 style={{ margin: 0, fontSize: '1rem', color: '#f8fafc' }}>
+        <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-main)' }}>
           Correlation Provenance &amp; Integrity Fingerprint
         </h3>
       </div>
@@ -39,10 +39,10 @@ export const CorrelationProvenancePanel: React.FC<CorrelationProvenancePanelProp
       <dl className="corr-kv-list">
         {rows.map((r) => (
           <div key={r.label} className="corr-kv-row">
-            <dt style={{ color: '#94a3b8', fontSize: '0.78rem' }}>{r.label}</dt>
+            <dt style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>{r.label}</dt>
             <dd
               className={r.mono ? 'mono-wrap' : undefined}
-              style={{ margin: 0, color: '#e2e8f0', fontSize: '0.8rem', wordBreak: 'break-word' }}
+              style={{ margin: 0, color: 'var(--text-main)', fontSize: '0.8rem', wordBreak: 'break-word' }}
             >
               {r.value}
             </dd>

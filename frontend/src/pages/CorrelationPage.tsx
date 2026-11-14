@@ -329,7 +329,7 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
 
   if (loading && !correlationData) {
     return (
-      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
         Loading persisted static/dynamic evidence correlation...
       </div>
     );
@@ -343,7 +343,7 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
             <AlertTriangle size={18} color="#ef4444" aria-hidden="true" />
             <strong>Failed to Load Correlation Data</strong>
           </div>
-          <div style={{ fontSize: '0.88rem', color: '#cbd5e1', marginBottom: '0.85rem' }}>
+          <div style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '0.85rem' }}>
             {loadError}
           </div>
           <button
@@ -387,11 +387,11 @@ export const CorrelationPage: React.FC<CorrelationPageProps> = ({
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
             <GitCompareArrows size={22} color="#38bdf8" aria-hidden="true" />
-            <h1 style={{ margin: 0, fontSize: '1.45rem', color: '#f8fafc' }}>
+            <h1 style={{ margin: 0, fontSize: '1.45rem', color: 'var(--text-main)' }}>
               Static / Dynamic Correlation Explorer
             </h1>
           </div>
-          <div style={{ fontSize: '0.82rem', color: '#94a3b8', marginTop: '0.2rem' }}>
+          <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
             Analysis <code className="mono">{analysisId}</code> · Deterministic verification across Ghidra static disassembly &amp; sandbox telemetry
           </div>
         </div>

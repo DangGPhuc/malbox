@@ -65,7 +65,7 @@ export function getRelationshipMeta(rel: CorrelationRelationship): RelationshipD
         relationship: 'INSUFFICIENT_EVIDENCE',
         label: 'INSUFFICIENT_EVIDENCE',
         badgeClass: 'badge-neutral',
-        color: '#cbd5e1',
+        color: 'var(--text-secondary)',
         borderColor: 'rgba(148, 163, 184, 0.4)',
         description:
           'Static code surface lacks matching dynamic events or missing trace prevents stronger attribution.',

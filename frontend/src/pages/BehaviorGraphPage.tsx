@@ -66,7 +66,7 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
             label: 'data(label)',
             'font-size': '11px',
             'font-family': 'Inter, sans-serif',
-            color: '#f8fafc',
+            color: 'var(--text-main)',
             'text-valign': 'bottom',
             'text-margin-y': 6,
             'background-color': '#0284c7',
@@ -147,12 +147,12 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
             label: 'data(label)',
             'font-size': '8px',
             'font-family': 'Inter, sans-serif',
-            color: '#94a3b8',
+            color: 'var(--text-muted)',
             'text-rotation': 'autorotate',
             'curve-style': 'bezier',
             'target-arrow-shape': 'triangle',
-            'line-color': '#334155',
-            'target-arrow-color': '#334155',
+            'line-color': 'var(--border-light)',
+            'target-arrow-color': 'var(--border-light)',
             width: 2,
             'arrow-scale': 0.8,
           },
@@ -205,10 +205,10 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
       {/* Header Controls */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <div>
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 800, margin: 0, color: '#f8fafc' }}>
+          <h1 style={{ fontSize: '1.5rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
             Behavior Relationship Graph
           </h1>
-          <p style={{ margin: '2px 0 0 0', color: '#94a3b8', fontSize: '0.85rem' }}>
+          <p style={{ margin: '2px 0 0 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
             Interactive Cytoscape.js correlation network linking processes, files, network, and findings.
           </p>
         </div>
@@ -231,8 +231,8 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
       {/* Filter and Zoom Toolbar */}
       <div className="card" style={{ padding: '0.6rem 1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          <Filter size={14} color="#94a3b8" />
-          <span style={{ fontSize: '0.8rem', color: '#94a3b8', marginRight: '4px' }}>Filter:</span>
+          <Filter size={14} color="var(--text-muted)" />
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginRight: '4px' }}>Filter:</span>
           {nodeTypes.map((t) => (
             <button
               key={t}
@@ -242,8 +242,8 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
                 fontSize: '0.75rem',
                 borderRadius: '4px',
                 border: '1px solid #334155',
-                backgroundColor: filterType === t ? '#38bdf8' : '#0b1120',
-                color: filterType === t ? '#030712' : '#cbd5e1',
+                backgroundColor: filterType === t ? '#38bdf8' : 'var(--bg-surface)',
+                color: filterType === t ? '#030712' : 'var(--text-secondary)',
                 fontWeight: 600,
                 cursor: 'pointer',
               }}
@@ -273,7 +273,7 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
           ref={containerRef}
           style={{
             height: '620px',
-            backgroundColor: '#070a12',
+            backgroundColor: 'var(--bg-main)',
             border: '1px solid #1e293b',
             borderRadius: '10px',
             position: 'relative',
@@ -291,19 +291,19 @@ export const BehaviorGraphPage: React.FC<BehaviorGraphPageProps> = ({ analysisId
             </div>
 
             <div style={{ marginBottom: '1rem' }}>
-              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>ENTITY LABEL</div>
-              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#f8fafc', wordBreak: 'break-all' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ENTITY LABEL</div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)', wordBreak: 'break-all' }}>
                 {selectedNode.label}
               </div>
             </div>
 
             <div style={{ fontSize: '0.85rem' }}>
-              <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>STRUCTURED ATTRIBUTES</div>
-              <div style={{ background: '#0b1120', padding: '0.75rem', borderRadius: '6px', border: '1px solid #1e293b' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>STRUCTURED ATTRIBUTES</div>
+              <div style={{ background: 'var(--bg-surface)', padding: '0.75rem', borderRadius: '6px', border: '1px solid #1e293b' }}>
                 {Object.entries(selectedNode.details || {}).map(([k, v]) => (
                   <div key={k} style={{ marginBottom: '6px' }}>
-                    <span style={{ color: '#94a3b8', fontSize: '0.75rem', textTransform: 'capitalize' }}>{k}: </span>
-                    <span className="mono" style={{ fontSize: '0.8rem', color: '#cbd5e1', wordBreak: 'break-all' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'capitalize' }}>{k}: </span>
+                    <span className="mono" style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', wordBreak: 'break-all' }}>
                       {typeof v === 'object' ? JSON.stringify(v) : String(v)}
                     </span>
                   </div>

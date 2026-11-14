@@ -65,7 +65,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
             selector: 'node',
             style: {
               label: 'data(label)',
-              color: '#f8fafc',
+              color: 'var(--text-main)',
               'font-size': '10px',
               'text-valign': 'bottom',
               'text-margin-y': 5,
@@ -87,7 +87,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
               'background-color': '#475569',
               'border-style': 'dashed',
               'border-width': 2,
-              'border-color': '#cbd5e1',
+              'border-color': 'var(--text-secondary)',
             },
           },
           {
@@ -108,7 +108,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
               'curve-style': 'bezier',
               label: 'data(label)',
               'font-size': '8px',
-              color: '#94a3b8',
+              color: 'var(--text-muted)',
             },
           },
           {
@@ -174,7 +174,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <Network size={18} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: 'var(--text-main)' }}>
             Static Call Relationships Graph
           </h3>
         </div>
@@ -216,7 +216,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
           alignItems: 'center',
           gap: '0.5rem',
           fontSize: '0.76rem',
-          color: '#94a3b8',
+          color: 'var(--text-muted)',
           marginBottom: '0.6rem',
         }}
       >
@@ -226,7 +226,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
         <div style={{ display: 'flex', gap: '0.5rem', fontSize: '0.72rem' }}>
           <span style={{ color: '#38bdf8' }}>● Internal</span>
           <span style={{ color: '#c084fc' }}>◆ External Import</span>
-          <span style={{ color: '#94a3b8' }}>◌ Missing / Omitted Target</span>
+          <span style={{ color: 'var(--text-muted)' }}>◌ Missing / Omitted Target</span>
         </div>
       </div>
 
@@ -267,7 +267,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
             textAlign: 'center',
             borderRadius: '8px',
             border: '1px dashed #334155',
-            color: '#94a3b8',
+            color: 'var(--text-muted)',
             fontSize: '0.84rem',
           }}
         >
@@ -297,7 +297,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
               overflowY: 'auto',
             }}
           >
-            <div style={{ fontSize: '0.76rem', fontWeight: 700, color: '#e2e8f0', marginBottom: '0.45rem' }}>
+            <div style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-main)', marginBottom: '0.45rem' }}>
               Graph Nodes ({bounded.nodes.length}) & Edges ({bounded.edges.length})
             </div>
 
@@ -320,8 +320,8 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
                       node.data.nodeType === 'external'
                         ? '#e9d5ff'
                         : node.data.nodeType === 'missing'
-                          ? '#94a3b8'
-                          : '#e2e8f0',
+                          ? 'var(--text-muted)'
+                          : 'var(--text-main)',
                   }}
                 >
                   {node.data.label}
@@ -329,15 +329,15 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
               ))}
             </div>
 
-            <div style={{ fontSize: '0.74rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.35rem' }}>
+            <div style={{ fontSize: '0.74rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.35rem' }}>
               Call Edges ({bounded.edges.length})
             </div>
             {bounded.edges.length === 0 ? (
-              <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                 No call edges within current bounded view.
               </div>
             ) : (
-              <ul style={{ margin: 0, paddingLeft: '1rem', fontSize: '0.75rem', color: '#cbd5e1', lineHeight: 1.55 }}>
+              <ul style={{ margin: 0, paddingLeft: '1rem', fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
                 {bounded.edges.map((edge) => (
                   <li key={edge.data.id}>
                     <code>{edge.data.source}</code> → <code>{edge.data.target}</code>{' '}

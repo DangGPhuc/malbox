@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, Activity, UploadCloud, Network, FileText, AlertCircle, Cpu, GitCompareArrows } from 'lucide-react';
+import { Shield, Activity, UploadCloud, Network, FileText, AlertCircle, Cpu, GitCompareArrows, Sun, Moon } from 'lucide-react';
 import { HealthStatus } from '../types';
 
 interface NavbarProps {
@@ -7,6 +7,8 @@ interface NavbarProps {
   setCurrentTab: (tab: string) => void;
   health: HealthStatus | null;
   activeAnalysisId: string | null;
+  theme?: 'light' | 'dark';
+  onToggleTheme?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -14,6 +16,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   setCurrentTab,
   health,
   activeAnalysisId,
+  theme = 'light',
+  onToggleTheme,
 }) => {
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
@@ -27,12 +31,13 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <nav style={{
-      backgroundColor: '#0a0f1d',
-      borderBottom: '1px solid #1e293b',
+      backgroundColor: 'var(--bg-surface)',
+      borderBottom: '1px solid var(--border)',
       position: 'sticky',
       top: 0,
       zIndex: 50,
-      backdropFilter: 'blur(8px)',
+      boxShadow: 'var(--shadow-nav)',
+      transition: 'background-color 200ms ease, border-color 200ms ease',
     }}>
       <div className="container" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', padding: '0.75rem 2rem' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '1.5rem' }}>
@@ -50,19 +55,20 @@ export const Navbar: React.FC<NavbarProps> = ({
             }}
           >
             <div style={{
-              background: 'linear-gradient(135deg, #0284c7, #38bdf8)',
+              background: 'var(--color-sky-tint)',
               padding: '6px',
               borderRadius: '8px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
+              border: '1px solid rgba(0, 117, 222, 0.2)',
             }}>
-              <Shield size={22} color="#030712" aria-hidden="true" />
+              <Shield size={20} color="var(--primary)" aria-hidden="true" />
             </div>
             <div>
-              <span style={{ fontSize: '1.2rem', fontWeight: 800, letterSpacing: '-0.5px', color: '#f8fafc' }}>malbox</span>
-              <span style={{ fontSize: '1.2rem', fontWeight: 800, color: '#38bdf8' }}>-ai</span>
-              <span style={{ fontSize: '0.65rem', marginLeft: '6px', background: '#1e293b', padding: '2px 6px', borderRadius: '4px', color: '#94a3b8' }}>v0.2</span>
+              <span style={{ fontSize: '1.15rem', fontWeight: 700, letterSpacing: '-0.3px', color: 'var(--text-main)' }}>malbox</span>
+              <span style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--primary)' }}>-ai</span>
+              <span style={{ fontSize: '0.7rem', marginLeft: '6px', background: 'var(--bg-main)', border: '1px solid var(--border)', padding: '2px 6px', borderRadius: '9999px', color: 'var(--text-muted)' }}>v0.2</span>
             </div>
           </button>
 
@@ -79,20 +85,20 @@ export const Navbar: React.FC<NavbarProps> = ({
                   style={{
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '0.4rem',
+                    gap: '0.45rem',
                     padding: '0.45rem 0.85rem',
                     fontSize: '0.85rem',
-                    fontWeight: 600,
-                    borderRadius: '6px',
+                    fontWeight: 500,
+                    borderRadius: '8px',
                     border: 'none',
                     cursor: tab.disabled ? 'not-allowed' : 'pointer',
                     opacity: tab.disabled ? 0.35 : 1,
-                    backgroundColor: isActive ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-                    color: isActive ? '#38bdf8' : '#94a3b8',
-                    transition: 'all 0.15s ease',
+                    backgroundColor: isActive ? 'var(--color-sky-tint)' : 'transparent',
+                    color: isActive ? 'var(--primary)' : 'var(--text-secondary)',
+                    transition: 'all 200ms ease',
                   }}
                 >
-                  <Icon size={16} aria-hidden="true" />
+                  <Icon size={15} aria-hidden="true" />
                   <span>{tab.label}</span>
                 </button>
               );
@@ -102,16 +108,33 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           {health ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: '#94a3b8' }}>
-              <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#22c55e', display: 'inline-block' }} />
-              <span>Replay Mode Ready</span>
-              <span style={{ background: '#1e293b', padding: '2px 6px', borderRadius: '4px', color: '#f87171' }}>Live: Isolated</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+              <span className="pill-tag badge-clean" style={{ fontSize: '0.7rem', textTransform: 'none' }}>
+                <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#15803d', display: 'inline-block' }} />
+                Replay Safe
+              </span>
+              <span className="pill-tag badge-neutral" style={{ fontSize: '0.7rem', textTransform: 'none' }}>
+                {health.live_mode_enabled ? 'Live: Active' : 'Live: Isolated'}
+              </span>
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: '#f87171' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: 'var(--danger)' }}>
               <AlertCircle size={14} aria-hidden="true" />
               <span>Offline</span>
             </div>
+          )}
+
+          {onToggleTheme && (
+            <button
+              type="button"
+              onClick={onToggleTheme}
+              title={`Switch to ${theme === 'light' ? 'Dark' : 'Light'} Mode`}
+              className="btn-outline btn-sm"
+              style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '4px 8px', borderRadius: '8px', cursor: 'pointer' }}
+            >
+              {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
+              <span style={{ fontSize: '0.75rem' }}>{theme === 'light' ? 'Dark' : 'Light'}</span>
+            </button>
           )}
         </div>
       </div>

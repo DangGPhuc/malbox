@@ -61,7 +61,7 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
         <div style={{ minWidth: 0, flex: '1 1 380px' }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.6rem', marginBottom: '0.45rem' }}>
             <FileText size={22} color="#38bdf8" aria-hidden="true" />
-            <h1 style={{ fontSize: '1.5rem', fontWeight: 800, margin: 0, color: '#f8fafc' }}>
+            <h1 style={{ fontSize: '1.5rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
               Malware Forensic Intelligence Report
             </h1>
             <span className={`badge ${isReplay ? 'badge-violet' : 'badge-clean'}`}>
@@ -72,24 +72,24 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', fontSize: '0.82rem', color: '#94a3b8' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
             <div>
-              <strong style={{ color: '#cbd5e1' }}>Sample:</strong>{' '}
-              <span className="mono-wrap" style={{ color: '#f8fafc', fontWeight: 600 }}>
+              <strong style={{ color: 'var(--text-secondary)' }}>Sample:</strong>{' '}
+              <span className="mono-wrap" style={{ color: 'var(--text-main)', fontWeight: 600 }}>
                 {sampleMeta.file_name || 'Unknown'}
               </span>{' '}
-              <span style={{ color: '#64748b' }}>({sampleMeta.file_size ?? 0} bytes)</span>
+              <span style={{ color: 'var(--text-muted)' }}>({sampleMeta.file_size ?? 0} bytes)</span>
             </div>
             <div>
-              <strong style={{ color: '#cbd5e1' }}>SHA-256:</strong>{' '}
+              <strong style={{ color: 'var(--text-secondary)' }}>SHA-256:</strong>{' '}
               <span className="mono-wrap" style={{ color: '#7dd3fc' }}>
                 {sampleMeta.sha256 || 'N/A'}
               </span>
             </div>
             <div>
-              <strong style={{ color: '#cbd5e1' }}>Analysis ID:</strong>{' '}
+              <strong style={{ color: 'var(--text-secondary)' }}>Analysis ID:</strong>{' '}
               <span className="mono-wrap">{analysisId}</span>{' '}
-              <span style={{ color: '#64748b' }}>• Generated {formatDateTime(full_report.generated_at)}</span>
+              <span style={{ color: 'var(--text-muted)' }}>• Generated {formatDateTime(full_report.generated_at)}</span>
             </div>
           </div>
 
@@ -146,16 +146,16 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
-            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
+            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
               Deterministic Risk Verdict
             </span>
             <Shield size={15} color="#38bdf8" aria-hidden="true" />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '1.5rem', fontWeight: 800, color: '#f8fafc' }}>{risk_score}/100</span>
+            <span style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--text-main)' }}>{risk_score}/100</span>
             <span className={`badge ${riskBadgeClass}`}>{risk_level}</span>
           </div>
-          <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.35rem' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
             Authoritative detection engine verdict (AI cannot alter risk score).
           </div>
         </div>
@@ -169,13 +169,13 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
-            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
+            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
               AI Analytical Confidence
             </span>
             <Gauge size={15} color="#a78bfa" aria-hidden="true" />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '1.5rem', fontWeight: 800, color: '#f8fafc' }}>{confidencePct}</span>
+            <span style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--text-main)' }}>{confidencePct}</span>
             {intel ? (
               <span className="badge badge-neutral">
                 {intel.confidence_assessment.evidence_completeness.toUpperCase()} COMPLETENESS
@@ -184,7 +184,7 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
               <span className="badge badge-neutral">NOT GENERATED</span>
             )}
           </div>
-          <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.35rem' }}>
+          <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
             Separate from risk severity — measures telemetry sufficiency &amp; claim support.
           </div>
         </div>
@@ -198,7 +198,7 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
-            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
+            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
               AI Reporting Mode &amp; Provider
             </span>
             {providerMeta.isExternalActive ? (
@@ -211,7 +211,7 @@ export const IntelligenceReportHeader: React.FC<IntelligenceReportHeaderProps> =
             <span className={`badge ${providerMeta.badgeClass}`}>{providerMeta.badgeLabel}</span>
             <span className="badge badge-neutral mono-wrap">{reportingMode}</span>
           </div>
-          <div className="mono-wrap" style={{ fontSize: '0.76rem', color: '#cbd5e1' }}>
+          <div className="mono-wrap" style={{ fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
             {providerMeta.providerSummary}
             {intel ? ` • ${intel.provider_metadata.tokens_used} tokens` : ''}
           </div>

@@ -147,23 +147,23 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
             ) : (
               <Cpu size={18} color="#22c55e" aria-hidden="true" />
             )}
-            <h2 id="ai-provider-status-heading" style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+            <h2 id="ai-provider-status-heading" style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
               AI Provider Status &amp; Controlled Enrichment
             </h2>
             <span className={`badge ${metaDisplay.badgeClass}`}>{metaDisplay.badgeLabel}</span>
           </div>
 
           {providerMetadata ? (
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.4rem' }}>
-              Mode: <strong style={{ color: '#e2e8f0' }}>{providerMetadata.mode}</strong> | Provider:{' '}
-              <strong style={{ color: '#e2e8f0' }}>{providerMetadata.provider}</strong> (
-              <span className="mono-wrap" style={{ color: '#cbd5e1' }}>{providerMetadata.model}</span>) | Tokens:{' '}
-              <strong style={{ color: '#e2e8f0' }}>{providerMetadata.tokens_used}</strong> | Rules{' '}
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>
+              Mode: <strong style={{ color: 'var(--text-main)' }}>{providerMetadata.mode}</strong> | Provider:{' '}
+              <strong style={{ color: 'var(--text-main)' }}>{providerMetadata.provider}</strong> (
+              <span className="mono-wrap" style={{ color: 'var(--text-secondary)' }}>{providerMetadata.model}</span>) | Tokens:{' '}
+              <strong style={{ color: 'var(--text-main)' }}>{providerMetadata.tokens_used}</strong> | Rules{' '}
               <strong>v{providerMetadata.rules_version}</strong> | Generated{' '}
               {formatDateTime(providerMetadata.generated_at)}
             </div>
           ) : (
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.4rem' }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.4rem' }}>
               Legacy baseline report without Phase 2A/2B structured intelligence. External providers are never called automatically on page load.
             </div>
           )}
@@ -216,7 +216,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
             borderRadius: '8px',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.75rem', color: '#cbd5e1', fontSize: '0.82rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
             <Lock size={14} color="#38bdf8" aria-hidden="true" />
             <span>
               Viewing reports never invokes external AI. Enrichment requires server-configured{' '}
@@ -226,7 +226,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
 
           <div className="grid-2" style={{ gap: '0.9rem', marginBottom: '0.85rem' }}>
             <div>
-              <label htmlFor="enrich-mode-select" style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.35rem' }}>
+              <label htmlFor="enrich-mode-select" style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.35rem' }}>
                 Enrichment Mode
               </label>
               <select
@@ -244,7 +244,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
             </div>
 
             <div>
-              <label htmlFor="reporting-token-input" style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.35rem' }}>
+              <label htmlFor="reporting-token-input" style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.35rem' }}>
                 X-Reporting-Token (In-Memory Only, Never Saved)
               </label>
               <div style={{ display: 'flex', gap: '0.4rem' }}>
@@ -283,7 +283,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
                 padding: '0.75rem',
                 marginBottom: '0.85rem',
                 fontSize: '0.8rem',
-                color: '#e2e8f0',
+                color: 'var(--text-main)',
               }}
             >
               <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.55rem', cursor: 'pointer' }}>
@@ -358,7 +358,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
           )}
 
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
-            <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
               <KeyRound size={12} style={{ verticalAlign: 'middle', marginRight: '4px' }} aria-hidden="true" />
               Existing report stays visible on failure or timeout.
             </div>

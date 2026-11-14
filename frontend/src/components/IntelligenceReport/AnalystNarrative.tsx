@@ -23,13 +23,13 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
           <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <BookOpen size={18} color="#38bdf8" aria-hidden="true" />
-              <h2 id="behavioral-narrative-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+              <h2 id="behavioral-narrative-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
                 AI Behavioral Narrative
               </h2>
             </div>
             <span className="badge badge-violet">AI Interpretation — Cross-Check Evidence Below</span>
           </div>
-          <p style={{ margin: 0, color: '#e2e8f0', fontSize: '0.94rem', lineHeight: 1.68, whiteSpace: 'pre-line' }}>
+          <p style={{ margin: 0, color: 'var(--text-main)', fontSize: '0.94rem', lineHeight: 1.68, whiteSpace: 'pre-line' }}>
             {narrative}
           </p>
         </section>
@@ -40,7 +40,7 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
         <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', marginBottom: '0.9rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Shield size={18} color="#22c55e" aria-hidden="true" />
-            <h2 id="deterministic-findings-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+            <h2 id="deterministic-findings-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
               Deterministic Behavioral Findings ({findings.length})
             </h2>
           </div>
@@ -48,7 +48,7 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
         </div>
 
         {findings.length === 0 ? (
-          <div style={{ fontSize: '0.86rem', color: '#94a3b8' }}>
+          <div style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>
             No deterministic behavioral detection rules triggered during this run.
           </div>
         ) : (
@@ -70,8 +70,8 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
                       <span className={`badge ${getSeverityBadgeClass(f.severity)}`}>{f.severity}</span>
                     </td>
                     <td>
-                      <div style={{ fontWeight: 700, color: '#f8fafc' }}>{f.title}</div>
-                      <div className="mono-wrap" style={{ fontSize: '0.73rem', color: '#64748b' }}>
+                      <div style={{ fontWeight: 700, color: 'var(--text-main)' }}>{f.title}</div>
+                      <div className="mono-wrap" style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
                         {f.rule_id}
                       </div>
                     </td>
@@ -80,7 +80,7 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
                       {f.mitre_attack_id ? (
                         <span className="badge badge-info mono-wrap">{f.mitre_attack_id}</span>
                       ) : (
-                        <span style={{ color: '#64748b' }}>N/A</span>
+                        <span style={{ color: 'var(--text-muted)' }}>N/A</span>
                       )}
                     </td>
                     <td>
@@ -105,7 +105,7 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
                           </button>
                         ))}
                         {(f.supporting_event_ids?.length || 0) > 4 && (
-                          <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                             +{(f.supporting_event_ids?.length || 0) - 4} more
                           </span>
                         )}
@@ -122,14 +122,14 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
       {/* MITRE ATT&CK Mappings */}
       <section className="card" aria-labelledby="mitre-matrix-heading">
         <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', marginBottom: '0.9rem' }}>
-          <h2 id="mitre-matrix-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+          <h2 id="mitre-matrix-heading" style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
             Deterministic MITRE ATT&amp;CK Mappings ({mitreMappings.length})
           </h2>
           <span className="badge badge-neutral">Rule-Derived Mappings</span>
         </div>
 
         {mitreMappings.length === 0 ? (
-          <div style={{ fontSize: '0.86rem', color: '#94a3b8' }}>
+          <div style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>
             No MITRE ATT&amp;CK techniques were mapped by deterministic findings.
           </div>
         ) : (
@@ -151,12 +151,12 @@ export const AnalystNarrative: React.FC<AnalystNarrativeProps> = ({
                   </strong>
                   <span className="badge badge-info">{m.tactic}</span>
                 </div>
-                <p style={{ margin: '0.45rem 0 0.55rem 0', fontSize: '0.83rem', color: '#cbd5e1', lineHeight: 1.5 }}>
+                <p style={{ margin: '0.45rem 0 0.55rem 0', fontSize: '0.83rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                   {m.description}
                 </p>
                 {m.supporting_event_ids && m.supporting_event_ids.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center' }}>
-                    <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Events:</span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Events:</span>
                     {m.supporting_event_ids.slice(0, 5).map((eid) => (
                       <button
                         key={eid}

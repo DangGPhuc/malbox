@@ -268,7 +268,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
 
   if (loading && !reportData) {
     return (
-      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#94a3b8' }}>
+      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
         Loading forensic intelligence report...
       </div>
     );
@@ -282,7 +282,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
             <AlertTriangle size={18} color="#ef4444" aria-hidden="true" />
             <strong>Failed to Retrieve Report</strong>
           </div>
-          <div style={{ fontSize: '0.88rem', color: '#cbd5e1', marginBottom: '0.85rem' }}>{loadError}</div>
+          <div style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '0.85rem' }}>{loadError}</div>
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => void fetchReport()}>
             Retry Load
           </button>
@@ -293,7 +293,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
 
   if (!reportData) {
     return (
-      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: '#64748b' }}>
+      <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
         Report not yet generated for this analysis task.
       </div>
     );
@@ -414,10 +414,10 @@ export const ReportPage: React.FC<ReportPageProps> = ({
             />
           ) : (
             <section className="card">
-              <h2 style={{ fontSize: '1.05rem', margin: '0 0 0.45rem 0', color: '#f8fafc' }}>
+              <h2 style={{ fontSize: '1.05rem', margin: '0 0 0.45rem 0', color: 'var(--text-main)' }}>
                 Evidence-Linked AI Claims
               </h2>
-              <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8' }}>
+              <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                 This report was generated before Phase 2A structured intelligence claims. Use “Run / Re-Generate Intelligence” above with a valid <code className="mono">X-Reporting-Token</code> to build grounded claims without executing any external calls unless opted in.
               </p>
             </section>

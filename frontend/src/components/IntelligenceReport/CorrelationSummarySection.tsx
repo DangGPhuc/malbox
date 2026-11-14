@@ -97,7 +97,7 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
       >
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }}>
           <GitCompareArrows size={18} color="#38bdf8" aria-hidden="true" />
-          <h2 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: '#f8fafc' }}>
+          <h2 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
             Static / Dynamic Correlation Assessment
           </h2>
           <span className={`badge ${statusMeta.badgeClass}`}>
@@ -214,10 +214,10 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
             alignItems: 'center',
             gap: '0.5rem',
             fontSize: '0.83rem',
-            color: '#94a3b8',
+            color: 'var(--text-muted)',
           }}
         >
-          <Info size={15} color="#64748b" aria-hidden="true" />
+          <Info size={15} color="var(--text-muted)" aria-hidden="true" />
           <span>
             No static/dynamic correlation section is embedded in this report yet (Ghidra static analysis unavailable or legacy pre-Phase 4A report for{' '}
             <code className="mono">{analysisId}</code>). Deterministic risk score and AI analytical confidence remain unchanged.
@@ -226,7 +226,7 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
           {summaryCounts && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', fontSize: '0.8rem', color: '#cbd5e1' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
               <span className="badge badge-neutral">Total: {summaryCounts.total_findings}</span>
               <span className="badge badge-clean">Directly Observed: {summaryCounts.directly_observed_count}</span>
               <span className="badge badge-info">Consistent With: {summaryCounts.consistent_with_count}</span>
@@ -237,7 +237,7 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
           )}
 
           {effectiveFp && (
-            <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
+            <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
               Provenance Fingerprint: <code className="mono-wrap">{effectiveFp}</code> · Source:{' '}
               <code className="mono">{coherent.sourceKind}</code> · Trace Status:{' '}
               <code className="mono">{traceMode}</code>
@@ -252,7 +252,7 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
                 border: '1px solid #1e293b',
                 backgroundColor: 'rgba(15, 23, 42, 0.45)',
                 fontSize: '0.82rem',
-                color: '#94a3b8',
+                color: 'var(--text-muted)',
               }}
             >
               No correlated static/dynamic relationships recorded for this coherent assessment snapshot.
@@ -291,17 +291,17 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
                         <span className="badge badge-neutral mono">{pf.rule_id}</span>
                         <span className={`badge ${relMeta.badgeClass}`}>{relMeta.label}</span>
                       </div>
-                      <span style={{ fontSize: '0.77rem', color: '#cbd5e1' }}>
+                      <span style={{ fontSize: '0.77rem', color: 'var(--text-secondary)' }}>
                         Link Confidence: <strong style={{ color: relMeta.color }}>{confPct}%</strong> ({pf.confidence_level}) ·{' '}
                         {pf.behavioral_execution_directly_observed ? 'Trace Verified' : 'Execution Not Proven'}
                       </span>
                     </div>
 
-                    <div style={{ fontSize: '0.83rem', color: '#f8fafc' }}>
+                    <div style={{ fontSize: '0.83rem', color: 'var(--text-main)' }}>
                       {pf.relationship_summary}
                     </div>
 
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', alignItems: 'center', fontSize: '0.75rem', color: '#94a3b8' }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', alignItems: 'center', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                       <span>Static Refs:</span>
                       {pf.static_ref_ids.map((sid) =>
                         sid.startsWith('func:') && onOpenStaticFunction ? (
@@ -344,7 +344,7 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
           )}
 
           {coherent.limitations.length > 0 && (
-            <ul style={{ margin: '0.1rem 0 0 1.1rem', padding: 0, fontSize: '0.77rem', color: '#94a3b8', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+            <ul style={{ margin: '0.1rem 0 0 1.1rem', padding: 0, fontSize: '0.77rem', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
               {coherent.limitations.slice(0, 4).map((lim, idx) => (
                 <li key={idx}>{lim}</li>
               ))}
@@ -358,7 +358,7 @@ export const CorrelationSummarySection: React.FC<CorrelationSummarySectionProps>
               backgroundColor: 'rgba(15, 23, 42, 0.75)',
               border: '1px solid #1e293b',
               fontSize: '0.78rem',
-              color: '#94a3b8',
+              color: 'var(--text-muted)',
               display: 'flex',
               alignItems: 'center',
               gap: '0.45rem',

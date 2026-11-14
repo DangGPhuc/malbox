@@ -118,7 +118,7 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <Cpu size={18} color="#38bdf8" aria-hidden="true" />
-          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: 'var(--text-main)' }}>
             Function Explorer ({filteredAndSorted.length} / {functions.length})
           </h3>
         </div>
@@ -165,7 +165,7 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
           <Search
             size={14}
             aria-hidden="true"
-            style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', color: '#64748b' }}
+            style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}
           />
           <input
             type="text"
@@ -179,8 +179,8 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <ArrowDownUp size={13} color="#94a3b8" aria-hidden="true" />
-          <label htmlFor="static-fn-sort" style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+          <ArrowDownUp size={13} color="var(--text-muted)" aria-hidden="true" />
+          <label htmlFor="static-fn-sort" style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
             Sort:
           </label>
           <select
@@ -206,8 +206,8 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
           </button>
         </div>
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.65rem', fontSize: '0.76rem', color: '#cbd5e1' }}>
-          <Filter size={13} color="#94a3b8" aria-hidden="true" />
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.65rem', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+          <Filter size={13} color="var(--text-muted)" aria-hidden="true" />
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', cursor: 'pointer' }}>
             <input
               type="checkbox"
@@ -242,12 +242,12 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
             borderRadius: '8px',
             border: '1px dashed #334155',
             textAlign: 'center',
-            color: '#94a3b8',
+            color: 'var(--text-muted)',
             fontSize: '0.85rem',
           }}
         >
-          <Info size={18} color="#64748b" style={{ marginBottom: '0.35rem' }} aria-hidden="true" />
-          <div style={{ fontWeight: 600, color: '#e2e8f0', marginBottom: '0.2rem' }}>
+          <Info size={18} color="var(--text-muted)" style={{ marginBottom: '0.35rem' }} aria-hidden="true" />
+          <div style={{ fontWeight: 600, color: 'var(--text-main)', marginBottom: '0.2rem' }}>
             Zero discovered functions in this static result
           </div>
           <div>
@@ -263,7 +263,7 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
             borderRadius: '8px',
             border: '1px dashed #334155',
             textAlign: 'center',
-            color: '#94a3b8',
+            color: 'var(--text-muted)',
             fontSize: '0.84rem',
           }}
         >
@@ -312,7 +312,7 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
                           background: 'none',
                           border: 'none',
                           padding: 0,
-                          color: isSelected ? '#38bdf8' : '#f8fafc',
+                          color: isSelected ? '#38bdf8' : 'var(--text-main)',
                           fontWeight: isSelected ? 700 : 600,
                           cursor: 'pointer',
                           textAlign: 'left',
@@ -328,7 +328,7 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
                     </td>
                     <td className="mono-cell">{fn.entry_address}</td>
                     <td>
-                      <code style={{ fontSize: '0.73rem', color: '#94a3b8' }}>{fn.function_id}</code>
+                      <code style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>{fn.function_id}</code>
                     </td>
                     <td>{fn.size_bytes} B</td>
                     <td>
@@ -339,12 +339,12 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
                         {fn.rank_score.toFixed(1)}
                       </span>
                     </td>
-                    <td style={{ fontSize: '0.76rem', color: '#cbd5e1' }}>
+                    <td style={{ fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
                       {fn.imported_api_calls.length > 0
                         ? `${fn.imported_api_calls.slice(0, 2).join(', ')}${fn.imported_api_calls.length > 2 ? ` (+${fn.imported_api_calls.length - 2})` : ''}`
                         : '—'}
                     </td>
-                    <td style={{ fontSize: '0.78rem', color: '#cbd5e1' }}>
+                    <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
                       {fn.xref_in_count} / {fn.xref_out_count}
                     </td>
                     <td>
@@ -382,10 +382,10 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
             }}
           >
             <div>
-              <div style={{ fontSize: '0.72rem', textTransform: 'uppercase', color: '#94a3b8', letterSpacing: '0.05em' }}>
+              <div style={{ fontSize: '0.72rem', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
                 Selected Function Metadata
               </div>
-              <div style={{ fontSize: '1rem', fontWeight: 700, color: '#f8fafc' }}>
+              <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-main)' }}>
                 {selectedFunction.name}{' '}
                 <span className="mono-cell" style={{ fontSize: '0.84rem', color: '#38bdf8' }}>
                   @ {selectedFunction.entry_address}
@@ -412,23 +412,23 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
               gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
               gap: '0.5rem',
               fontSize: '0.78rem',
-              color: '#cbd5e1',
+              color: 'var(--text-secondary)',
               marginBottom: '0.75rem',
             }}
           >
             <div>
-              <span style={{ color: '#64748b' }}>ID:</span> <code>{selectedFunction.function_id}</code>
+              <span style={{ color: 'var(--text-muted)' }}>ID:</span> <code>{selectedFunction.function_id}</code>
             </div>
             <div>
-              <span style={{ color: '#64748b' }}>Size / Blocks:</span> {selectedFunction.size_bytes} B /{' '}
+              <span style={{ color: 'var(--text-muted)' }}>Size / Blocks:</span> {selectedFunction.size_bytes} B /{' '}
               {selectedFunction.basic_block_count ?? 'N/A'}
             </div>
             <div>
-              <span style={{ color: '#64748b' }}>Calling Convention:</span>{' '}
+              <span style={{ color: 'var(--text-muted)' }}>Calling Convention:</span>{' '}
               {selectedFunction.calling_convention || 'unknown'}
             </div>
             <div>
-              <span style={{ color: '#64748b' }}>Flags:</span>{' '}
+              <span style={{ color: 'var(--text-muted)' }}>Flags:</span>{' '}
               {selectedFunction.is_thunk ? 'thunk' : 'non-thunk'},{' '}
               {selectedFunction.is_external ? 'external' : 'internal'}
             </div>
@@ -436,14 +436,14 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
 
           {selectedFunction.signature && (
             <div style={{ marginBottom: '0.65rem', fontSize: '0.78rem' }}>
-              <span style={{ color: '#64748b', display: 'block', marginBottom: '0.2rem' }}>Recovered Signature:</span>
+              <span style={{ color: 'var(--text-muted)', display: 'block', marginBottom: '0.2rem' }}>Recovered Signature:</span>
               <code
                 style={{
                   display: 'block',
                   padding: '0.35rem 0.55rem',
                   borderRadius: '4px',
                   backgroundColor: '#020617',
-                  color: '#e2e8f0',
+                  color: 'var(--text-main)',
                   overflowX: 'auto',
                 }}
               >
@@ -454,7 +454,7 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
 
           {selectedFunction.rank_reasons.length > 0 && (
             <div style={{ marginBottom: '0.65rem' }}>
-              <span style={{ color: '#94a3b8', fontSize: '0.75rem', fontWeight: 600 }}>
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600 }}>
                 Advisory Prioritization Signals:
               </span>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.3rem' }}>
@@ -469,11 +469,11 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
 
           <div className="grid-2" style={{ gap: '0.75rem', marginTop: '0.6rem' }}>
             <div>
-              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.3rem' }}>
+              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.3rem' }}>
                 Direct Callers ({selectedFunction.caller_function_ids.length})
               </div>
               {selectedFunction.caller_function_ids.length === 0 ? (
-                <div style={{ fontSize: '0.76rem', color: '#64748b' }}>No recorded internal callers.</div>
+                <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>No recorded internal callers.</div>
               ) : (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
                   {selectedFunction.caller_function_ids.map((cid) => {
@@ -495,11 +495,11 @@ export const FunctionExplorerPanel: React.FC<FunctionExplorerPanelProps> = ({
             </div>
 
             <div>
-              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '0.3rem' }}>
+              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.3rem' }}>
                 Called Targets ({selectedFunction.called_function_ids.length})
               </div>
               {selectedFunction.called_function_ids.length === 0 ? (
-                <div style={{ fontSize: '0.76rem', color: '#64748b' }}>No recorded internal callees.</div>
+                <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>No recorded internal callees.</div>
               ) : (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
                   {selectedFunction.called_function_ids.map((cid) => {

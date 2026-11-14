@@ -75,10 +75,10 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
         }}
       >
         <div>
-          <h3 style={{ margin: 0, fontSize: '1.02rem', color: '#f8fafc' }}>
+          <h3 style={{ margin: 0, fontSize: '1.02rem', color: 'var(--text-main)' }}>
             Correlated Static / Dynamic Relationships ({filtered.length} of {findings.length})
           </h3>
-          <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '0.15rem' }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
             Click a correlation row to inspect evidence, click a <code className="mono">func:</code> reference to jump to Ghidra Function Explorer, or click a dynamic event ID to fetch the raw telemetry record.
           </div>
         </div>
@@ -108,7 +108,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
         <div>
           <label
             htmlFor="corr-search-input"
-            style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.74rem', color: '#94a3b8', marginBottom: '0.25rem' }}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}
           >
             <Search size={12} aria-hidden="true" /> Search function, API, rule, ID
           </label>
@@ -124,7 +124,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
               borderRadius: '6px',
               border: '1px solid #334155',
               backgroundColor: '#020617',
-              color: '#f8fafc',
+              color: 'var(--text-main)',
               fontSize: '0.82rem',
             }}
           />
@@ -133,7 +133,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
         <div>
           <label
             htmlFor="corr-rel-filter"
-            style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.74rem', color: '#94a3b8', marginBottom: '0.25rem' }}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}
           >
             <Filter size={12} aria-hidden="true" /> Relationship
           </label>
@@ -152,7 +152,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
               borderRadius: '6px',
               border: '1px solid #334155',
               backgroundColor: '#020617',
-              color: '#f8fafc',
+              color: 'var(--text-main)',
               fontSize: '0.82rem',
             }}
           >
@@ -167,7 +167,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
         <div>
           <label
             htmlFor="corr-rule-filter"
-            style={{ display: 'block', fontSize: '0.74rem', color: '#94a3b8', marginBottom: '0.25rem' }}
+            style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}
           >
             Rule ID
           </label>
@@ -181,7 +181,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
               borderRadius: '6px',
               border: '1px solid #334155',
               backgroundColor: '#020617',
-              color: '#f8fafc',
+              color: 'var(--text-main)',
               fontSize: '0.82rem',
             }}
           >
@@ -196,7 +196,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
         <div>
           <label
             htmlFor="corr-conf-filter"
-            style={{ display: 'block', fontSize: '0.74rem', color: '#94a3b8', marginBottom: '0.25rem' }}
+            style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}
           >
             Min Link Confidence ({filters.minConfidencePct}%)
           </label>
@@ -212,7 +212,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
               borderRadius: '6px',
               border: '1px solid #334155',
               backgroundColor: '#020617',
-              color: '#f8fafc',
+              color: 'var(--text-main)',
               fontSize: '0.82rem',
             }}
           >
@@ -231,7 +231,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
             textAlign: 'center',
             borderRadius: '8px',
             border: '1px dashed #334155',
-            color: '#94a3b8',
+            color: 'var(--text-muted)',
             fontSize: '0.86rem',
           }}
         >
@@ -305,11 +305,11 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
                     )}
                   </div>
 
-                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', fontSize: '0.78rem', color: '#cbd5e1' }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
                     <span>
                       Link Confidence: <strong style={{ color: relMeta.color }}>{confPct}%</strong> ({finding.confidence.level})
                     </span>
-                    <span className="mono" style={{ color: '#94a3b8' }}>
+                    <span className="mono" style={{ color: 'var(--text-muted)' }}>
                       {supportCount} evidence refs
                     </span>
                   </div>
@@ -336,13 +336,13 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
                   </div>
                 )}
 
-                <div style={{ fontSize: '0.88rem', fontWeight: 600, color: '#f8fafc' }}>
+                <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>
                   {finding.relationship_summary}
                 </div>
-                <div style={{ fontSize: '0.82rem', color: '#cbd5e1', lineHeight: 1.5 }}>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                   {finding.explanation}
                 </div>
-                <div style={{ fontSize: '0.77rem', color: '#94a3b8' }}>
+                <div style={{ fontSize: '0.77rem', color: 'var(--text-muted)' }}>
                   <strong>Confidence Rationale (Non-Risk):</strong> {finding.confidence.rationale}
                 </div>
 
@@ -357,13 +357,13 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
                   }}
                 >
                   <div>
-                    <div style={{ fontSize: '0.74rem', color: '#94a3b8', marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                       <Cpu size={12} color="#38bdf8" aria-hidden="true" />
                       <span>Static Evidence References ({finding.static_references.length})</span>
                     </div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
                       {finding.static_references.length === 0 ? (
-                        <span style={{ fontSize: '0.76rem', color: '#64748b' }}>None recorded</span>
+                        <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>None recorded</span>
                       ) : (
                         finding.static_references.map((sr) =>
                           sr.evidence_kind === 'static_function' ? (
@@ -391,13 +391,13 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
                   </div>
 
                   <div>
-                    <div style={{ fontSize: '0.74rem', color: '#94a3b8', marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                       <Terminal size={12} color="#a78bfa" aria-hidden="true" />
                       <span>Dynamic Evidence References ({finding.dynamic_references.length})</span>
                     </div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
                       {finding.dynamic_references.length === 0 ? (
-                        <span style={{ fontSize: '0.76rem', color: '#64748b' }}>
+                        <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
                           No dynamic telemetry observed
                         </span>
                       ) : (
@@ -419,7 +419,7 @@ export const CorrelationFindingsTable: React.FC<CorrelationFindingsTableProps> =
                 </div>
 
                 {finding.known_limitations.length > 0 && (
-                  <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
+                  <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
                     <strong>Finding Limitations:</strong> {finding.known_limitations.join(' · ')}
                   </div>
                 )}

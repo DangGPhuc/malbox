@@ -17,7 +17,7 @@ export const ExecutiveAssessment: React.FC<ExecutiveAssessmentProps> = ({ fullRe
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', marginBottom: '0.8rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <Sparkles size={18} color="#38bdf8" aria-hidden="true" />
-          <h2 id="executive-assessment-heading" style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: '#f8fafc' }}>
+          <h2 id="executive-assessment-heading" style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>
             Executive Threat Assessment
           </h2>
         </div>
@@ -26,7 +26,7 @@ export const ExecutiveAssessment: React.FC<ExecutiveAssessmentProps> = ({ fullRe
         </span>
       </div>
 
-      <p style={{ fontSize: '0.96rem', color: '#e2e8f0', lineHeight: 1.65, margin: '0 0 1rem 0' }}>
+      <p style={{ fontSize: '0.96rem', color: 'var(--text-main)', lineHeight: 1.65, margin: '0 0 1rem 0' }}>
         {intel?.executive_assessment || fullReport.executive_summary}
       </p>
 
@@ -41,16 +41,16 @@ export const ExecutiveAssessment: React.FC<ExecutiveAssessmentProps> = ({ fullRe
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.55rem' }}>
             <ShieldAlert size={15} color="#f97316" aria-hidden="true" />
-            <strong style={{ fontSize: '0.84rem', color: '#f8fafc' }}>
+            <strong style={{ fontSize: '0.84rem', color: 'var(--text-main)' }}>
               Deterministic Rule Scoring Basis ({fullReport.findings.length} Findings)
             </strong>
           </div>
           {rules.length === 0 && fullReport.findings.length === 0 ? (
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
               No deterministic behavioral rules crossed detection thresholds.
             </div>
           ) : (
-            <ul style={{ margin: 0, paddingLeft: '1.1rem', fontSize: '0.8rem', color: '#cbd5e1', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+            <ul style={{ margin: 0, paddingLeft: '1.1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
               {rules.length > 0
                 ? rules.slice(0, 6).map((r, idx) => (
                     <li key={r.rule_id || idx}>
@@ -78,20 +78,20 @@ export const ExecutiveAssessment: React.FC<ExecutiveAssessmentProps> = ({ fullRe
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.55rem' }}>
             <CheckCircle2 size={15} color="#38bdf8" aria-hidden="true" />
-            <strong style={{ fontSize: '0.84rem', color: '#f8fafc' }}>
+            <strong style={{ fontSize: '0.84rem', color: 'var(--text-main)' }}>
               Static Sample Intake Triage
             </strong>
           </div>
-          <div style={{ fontSize: '0.8rem', color: '#cbd5e1', display: 'grid', gap: '0.28rem' }}>
-            <div><span style={{ color: '#94a3b8' }}>SHA-1:</span> <span className="mono-wrap">{sampleMeta.sha1 || 'N/A'}</span></div>
-            <div><span style={{ color: '#94a3b8' }}>MD5:</span> <span className="mono-wrap">{sampleMeta.md5 || 'N/A'}</span></div>
-            <div><span style={{ color: '#94a3b8' }}>PE Status:</span> {sampleMeta.is_pe ? 'Valid PE Executable' : 'Non-PE / Unclassified'}</div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'grid', gap: '0.28rem' }}>
+            <div><span style={{ color: 'var(--text-muted)' }}>SHA-1:</span> <span className="mono-wrap">{sampleMeta.sha1 || 'N/A'}</span></div>
+            <div><span style={{ color: 'var(--text-muted)' }}>MD5:</span> <span className="mono-wrap">{sampleMeta.md5 || 'N/A'}</span></div>
+            <div><span style={{ color: 'var(--text-muted)' }}>PE Status:</span> {sampleMeta.is_pe ? 'Valid PE Executable' : 'Non-PE / Unclassified'}</div>
             <div>
-              <span style={{ color: '#94a3b8' }}>Entropy / Subsystem:</span>{' '}
+              <span style={{ color: 'var(--text-muted)' }}>Entropy / Subsystem:</span>{' '}
               {typeof pe?.overall_entropy === 'number' ? pe.overall_entropy.toFixed(2) : pe?.overall_entropy ?? 'N/A'} / {pe?.subsystem || 'N/A'}
             </div>
             <div>
-              <span style={{ color: '#94a3b8' }}>Sandbox Guest OS:</span> {fullReport.analysis_environment?.guest_os || 'Not reported'}
+              <span style={{ color: 'var(--text-muted)' }}>Sandbox Guest OS:</span> {fullReport.analysis_environment?.guest_os || 'Not reported'}
             </div>
           </div>
         </div>
