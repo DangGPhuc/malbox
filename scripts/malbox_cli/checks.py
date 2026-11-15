@@ -873,10 +873,16 @@ def _probe_cape_readiness(cape_url: str, token: Optional[str] = None) -> Dict[st
                 body = resp.read()
                 data = json.loads(body.decode("utf-8", errors="replace"))
                 cuckoo_data = data.get("data", {}) if isinstance(data, dict) else {}
+                machines = cuckoo_data.get("machines", {}) if isinstance(cuckoo_data, dict) else {}
+                avail_vms = machines.get("available", 0) if isinstance(machines, dict) else 0
+                total_vms = machines.get("total", 0) if isinstance(machines, dict) else 0
                 return {
                     "classification": "READY",
                     "version": cuckoo_data.get("version", "2.x"),
                     "tasks": cuckoo_data.get("tasks", {}),
+                    "guest_vms_total": total_vms,
+                    "guest_vms_available": avail_vms,
+                    "confinement_verified": False,
                     "code": code,
                 }
             return {

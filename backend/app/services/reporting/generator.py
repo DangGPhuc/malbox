@@ -137,6 +137,10 @@ class ReportGenerator:
             scenario_id = None
             fixture_ver = None
 
+        # Live analysis must not silently default unknown telemetry quality to COMPLETE (B3)
+        default_completeness = "COMPLETE" if analysis.backend_type == "replay" else "UNVERIFIED"
+        resolved_completeness = env_meta.get("telemetry_completeness") or default_completeness
+
         analysis_env = {
             "backend": analysis.backend_type,
             "profile": analysis.profile,
@@ -146,7 +150,7 @@ class ReportGenerator:
             "confinement": confinement_str,
             "replay_scenario_id": scenario_id,
             "fixture_version": fixture_ver,
-            "telemetry_completeness": env_meta.get("telemetry_completeness", "COMPLETE"),
+            "telemetry_completeness": resolved_completeness,
             "telemetry_notes": env_meta.get("telemetry_notes", []),
         }
 
@@ -177,7 +181,7 @@ class ReportGenerator:
             "sandbox_evasion_risk": "Dormant payloads, anti-VM checks, or delayed execution loops may limit observable dynamic behavior.",
             "network_confinement": "Simulated or isolated network egress was enforced to prevent real-world malicious propagation.",
             "overall_entropy": sample.pe_metadata.get("overall_entropy", 0.0) if sample and sample.pe_metadata else 0.0,
-            "telemetry_completeness": env_meta.get("telemetry_completeness", "COMPLETE"),
+            "telemetry_completeness": resolved_completeness,
             "telemetry_notes": env_meta.get("telemetry_notes", []),
         }
 

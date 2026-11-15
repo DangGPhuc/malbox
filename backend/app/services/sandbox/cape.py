@@ -589,11 +589,22 @@ class CapeSandboxBackend(SandboxBackend):
                 )
             target_sha256_verified = True
 
-        # 1. Process activity & monitored API calls
+        # 1. Process activity & monitored API calls (Bounded - B4)
+        MAX_PROCESSES = 100
+        MAX_CALLS_PER_PROC = 500
+        MAX_TOTAL_API_CALLS = 2000
+        MAX_FS_EVENTS = 500
+        MAX_REG_EVENTS = 500
+        MAX_NET_EVENTS = 200
+
+        omitted_counts: Dict[str, int] = {}
         processes = []
         all_monitored_calls: List[Dict[str, Any]] = []
 
-        for p in processes_raw:
+        if len(processes_raw) > MAX_PROCESSES:
+            omitted_counts["processes"] = len(processes_raw) - MAX_PROCESSES
+
+        for p in processes_raw[:MAX_PROCESSES]:
             pid = p.get("process_id")
             pname = p.get("process_name")
             processes.append({
@@ -605,10 +616,14 @@ class CapeSandboxBackend(SandboxBackend):
                 "end_time": None,
             })
 
-            # Bounded extraction of monitored API calls (A5)
             calls = p.get("calls", [])
             if isinstance(calls, list):
-                for call in calls[:500]:  # Cap at 500 API calls per process
+                if len(calls) > MAX_CALLS_PER_PROC:
+                    omitted_counts["api_calls_per_proc"] = omitted_counts.get("api_calls_per_proc", 0) + (len(calls) - MAX_CALLS_PER_PROC)
+                for call in calls[:MAX_CALLS_PER_PROC]:
+                    if len(all_monitored_calls) >= MAX_TOTAL_API_CALLS:
+                        omitted_counts["api_calls_total"] = omitted_counts.get("api_calls_total", 0) + 1
+                        continue
                     api_name = call.get("api")
                     if api_name:
                         all_monitored_calls.append({
@@ -617,7 +632,7 @@ class CapeSandboxBackend(SandboxBackend):
                             "api": api_name,
                             "status": call.get("status"),
                             "return_value": call.get("return_value"),
-                            "arguments": call.get("arguments", {}),
+                            "arguments": call.get("arguments", {}) if isinstance(call.get("arguments"), dict) else {},
                             "timestamp": call.get("timestamp"),
                         })
 
@@ -640,11 +655,10 @@ class CapeSandboxBackend(SandboxBackend):
                     "is_dropped_binary": False,
                 })
 
-        # Supplement with behavior.summary.write_files / delete_files if generic was sparse
         for w_file in summary.get("write_files", []):
             if isinstance(w_file, str) and w_file.lower() not in seen_file_paths:
                 seen_file_paths.add(w_file.lower())
-                is_bin = any(w_file.lower().endswith(ext) for ext in [".exe", ".dll", ".bin", ".sys", ".scr", ".bat", ".cmd"])
+                is_bin = any(w_file.lower().endswith(ext) for ext in [".exe", ".dll", ".sys", ".scr", ".bat", ".cmd"])
                 filesystem.append({
                     "action": "write",
                     "pid": None,
@@ -655,7 +669,6 @@ class CapeSandboxBackend(SandboxBackend):
                     "is_dropped_binary": is_bin,
                 })
 
-        # Supplement with dropped files section from CAPE report
         dropped_files = cape_json.get("dropped", [])
         if isinstance(dropped_files, list):
             for drop in dropped_files:
@@ -663,7 +676,9 @@ class CapeSandboxBackend(SandboxBackend):
                     d_path = drop.get("path") or drop.get("name") or "dropped_file.bin"
                     if d_path.lower() not in seen_file_paths:
                         seen_file_paths.add(d_path.lower())
-                        is_bin = any(d_path.lower().endswith(ext) for ext in [".exe", ".dll", ".bin", ".sys", ".scr", ".bat", ".cmd", ".vbs", ".ps1"])
+                        drop_type = str(drop.get("type", "")).lower()
+                        is_bin = any(d_path.lower().endswith(ext) for ext in [".exe", ".dll", ".sys", ".scr", ".bat", ".cmd", ".vbs", ".ps1"]) or \
+                                 ("pe" in drop_type or "executable" in drop_type)
                         filesystem.append({
                             "action": "write",
                             "pid": drop.get("pid"),
@@ -672,7 +687,9 @@ class CapeSandboxBackend(SandboxBackend):
                             "timestamp": None,
                             "size_bytes": drop.get("size", 0),
                             "sha256": drop.get("sha256"),
+                            "file_type": drop.get("type"),
                             "is_dropped_binary": is_bin,
+                            "is_verified_pe": ("pe" in drop_type or "executable" in drop_type),
                         })
 
         for d_file in summary.get("delete_files", []):
@@ -688,7 +705,10 @@ class CapeSandboxBackend(SandboxBackend):
                     "is_dropped_binary": False,
                 })
 
-        # Ingest extracted in-memory / dumped payloads from CAPE (A5)
+        # Forensic memory-dump payloads preserved as artifact evidence, NOT manufactured filesystem writes (B2)
+        extracted_artifacts: List[Dict[str, Any]] = [
+            {"name": "traffic.pcap", "type": "pcap", "description": "CAPE captured network traffic"}
+        ]
         payloads = cape_json.get("payloads", [])
         if not payloads and isinstance(cape_json.get("CAPE"), dict):
             payloads = cape_json.get("CAPE", {}).get("payloads", [])
@@ -697,16 +717,23 @@ class CapeSandboxBackend(SandboxBackend):
             for payload in payloads:
                 if isinstance(payload, dict):
                     p_name = payload.get("name") or payload.get("path") or "MEM_DUMP_PAYLOAD.bin"
-                    filesystem.append({
-                        "action": "write",
-                        "pid": payload.get("pid"),
-                        "process_name": payload.get("process_name"),
-                        "path": p_name,
-                        "timestamp": None,
+                    p_type = payload.get("type") or payload.get("cape_type") or "memory_dump"
+                    extracted_artifacts.append({
+                        "name": p_name,
+                        "type": "memory_dump_payload",
                         "size_bytes": payload.get("size", 0),
                         "sha256": payload.get("sha256"),
-                        "is_dropped_binary": True,
+                        "pid": payload.get("pid"),
+                        "process_name": payload.get("process_name"),
+                        "extraction_method": payload.get("extraction_type", "cape_yara_or_dump"),
+                        "description": f"Forensic memory dump extracted by CAPE ({p_type})",
+                        "is_extracted_memory_payload": True,
                     })
+
+        # Cap filesystem events
+        if len(filesystem) > MAX_FS_EVENTS:
+            omitted_counts["filesystem"] = len(filesystem) - MAX_FS_EVENTS
+            filesystem = filesystem[:MAX_FS_EVENTS]
 
         # 3. Registry activity (combine generic + summary)
         registry: List[Dict[str, Any]] = []
@@ -742,9 +769,13 @@ class CapeSandboxBackend(SandboxBackend):
                     "persistence": "run" in w_key.lower(),
                 })
 
-        # 4. Network activity
+        if len(registry) > MAX_REG_EVENTS:
+            omitted_counts["registry"] = len(registry) - MAX_REG_EVENTS
+            registry = registry[:MAX_REG_EVENTS]
+
+        # 4. Network activity (Bounded)
         dns_list = []
-        for d in network.get("dns", []):
+        for d in network.get("dns", [])[:MAX_NET_EVENTS]:
             dns_list.append({
                 "query": d.get("request"),
                 "record_type": d.get("type", "A"),
@@ -753,7 +784,7 @@ class CapeSandboxBackend(SandboxBackend):
             })
 
         connections = []
-        for tcp in network.get("tcp", []):
+        for tcp in network.get("tcp", [])[:MAX_NET_EVENTS]:
             connections.append({
                 "protocol": "TCP",
                 "dest_ip": tcp.get("dst"),
@@ -761,7 +792,7 @@ class CapeSandboxBackend(SandboxBackend):
                 "timestamp": None,
             })
 
-        for udp in network.get("udp", []):
+        for udp in network.get("udp", [])[:MAX_NET_EVENTS]:
             connections.append({
                 "protocol": "UDP",
                 "dest_ip": udp.get("dst"),
@@ -770,7 +801,7 @@ class CapeSandboxBackend(SandboxBackend):
             })
 
         http_list = []
-        for h in network.get("http", []):
+        for h in network.get("http", [])[:MAX_NET_EVENTS]:
             http_list.append({
                 "method": h.get("method", "GET"),
                 "url": h.get("uri"),
@@ -810,6 +841,9 @@ class CapeSandboxBackend(SandboxBackend):
             telemetry_completeness = "UNVERIFIED"
             telemetry_notes.append("Zero processes or behaviors were recorded by the sandbox.")
 
+        if omitted_counts:
+            telemetry_notes.append(f"Telemetry capped by safety limits: {omitted_counts}")
+
         return {
             "metadata": {
                 "cape_id": verified_task_id,
@@ -824,10 +858,14 @@ class CapeSandboxBackend(SandboxBackend):
                 },
                 "telemetry_completeness": telemetry_completeness,
                 "telemetry_notes": telemetry_notes,
+                "telemetry_truncated": bool(omitted_counts),
+                "omitted_counts": omitted_counts,
                 "analyzer_crashed": analyzer_crashed,
             },
             "telemetry_completeness": telemetry_completeness,
             "telemetry_notes": telemetry_notes,
+            "telemetry_truncated": bool(omitted_counts),
+            "omitted_counts": omitted_counts,
             "processes": processes,
             "api_calls": all_monitored_calls,
             "filesystem": filesystem,
@@ -837,7 +875,5 @@ class CapeSandboxBackend(SandboxBackend):
                 "connections": connections,
                 "http": http_list,
             },
-            "artifacts": [
-                {"name": "traffic.pcap", "type": "pcap", "description": "CAPE captured network traffic"}
-            ],
+            "artifacts": extracted_artifacts,
         }
