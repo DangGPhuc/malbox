@@ -47,6 +47,13 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
       return;
     }
 
+    const isDark =
+      typeof document !== 'undefined' &&
+      document.documentElement.getAttribute('data-theme') === 'dark';
+    const labelColor = isDark ? '#f3f4f6' : '#111111';
+    const edgeLabelColor = isDark ? '#94a3b8' : '#615d59';
+    const cardBg = isDark ? '#171f2c' : '#ffffff';
+
     let cancelled = false;
     import('cytoscape')
       .then((mod) => {
@@ -63,7 +70,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
               selector: 'node',
               style: {
                 label: 'data(label)',
-                color: 'var(--text-main)',
+                color: labelColor,
                 'font-size': '10px',
                 'text-valign': 'bottom',
                 'text-margin-y': 5,
@@ -71,7 +78,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
                 height: 28,
                 'border-width': 2,
                 'border-color': 'data(relationshipColor)',
-                'background-color': 'var(--bg-card)',
+                'background-color': cardBg,
               },
             },
             {
@@ -99,7 +106,7 @@ export const CorrelationRelationshipView: React.FC<CorrelationRelationshipViewPr
                 'line-style': 'solid',
                 label: 'data(relationship)',
                 'font-size': '8px',
-                color: 'var(--text-secondary)',
+                color: edgeLabelColor,
               },
             },
             {

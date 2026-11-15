@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700;800&family=Source+Serif+Pro:ital,wght@0,400;0,600;1,400&display=swap');
+/* System Font Stacks - Zero External Dependencies (C1) */
 
 /* ==========================================================================
    MALBOX-AI — NOTION-INSPIRED FORENSIC DESIGN SYSTEM (DESIGN.md)
@@ -498,6 +498,119 @@ select:focus-visible {
   .grid-2, .grid-3, .grid-4 {
     grid-template-columns: 1fr;
   }
+}
+
+/* ==========================================================================
+   APPLICATION SHELL: SIDEBAR & COMPACT HEADER (C2)
+   ========================================================================== */
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+  background-color: var(--bg-main);
+  position: relative;
+}
+
+.app-sidebar {
+  width: 250px;
+  background-color: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1), transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 40;
+  box-shadow: var(--shadow-nav);
+  flex-shrink: 0;
+}
+
+.app-sidebar.collapsed {
+  width: 68px;
+}
+
+.app-sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .app-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    transform: translateX(-100%);
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.25);
+    z-index: 60;
+  }
+  .app-sidebar.mobile-open {
+    transform: translateX(0);
+  }
+  .app-sidebar-backdrop.mobile-open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 55;
+    backdrop-filter: blur(2px);
+  }
+}
+
+.app-header {
+  height: 58px;
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.5rem;
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  box-shadow: var(--shadow-nav);
+  transition: background-color 200ms ease, border-color 200ms ease;
+}
+
+.nav-item-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-radius: 8px;
+  border: none;
+  background-color: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: all 150ms ease;
+}
+
+.nav-item-btn:hover:not(:disabled) {
+  background-color: var(--bg-card-hover);
+  color: var(--text-main);
+}
+
+.nav-item-btn.active {
+  background-color: var(--color-sky-tint);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.nav-item-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.breadcrumb-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
 }
 
 /* Reduced Motion Support (DESIGN.md section 184) */

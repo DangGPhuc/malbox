@@ -347,13 +347,17 @@ def test_cape_extended_telemetry_extraction(monkeypatch):
     assert res["api_calls"][0]["api"] == "VirtualAllocEx"
     assert res["api_calls"][2]["api"] == "CreateRemoteThread"
 
-    # Dropped binaries flagged
+    # Dropped binaries flagged in filesystem
     dropped_bins = [f for f in res["filesystem"] if f.get("is_dropped_binary")]
-    assert len(dropped_bins) == 3
+    assert len(dropped_bins) == 2
     paths = [d["path"] for d in dropped_bins]
     assert any("dropped_payload.exe" in p for p in paths)
     assert any("extracted_miner.exe" in p for p in paths)
-    assert any("unpacked_core.dll" in p for p in paths)
+
+    # In-memory extracted payloads preserved as artifacts (not forged filesystem writes, B2)
+    memory_payloads = [a for a in res["artifacts"] if a.get("is_extracted_memory_payload")]
+    assert len(memory_payloads) == 1
+    assert memory_payloads[0]["name"] == "unpacked_core.dll"
 
     # Telemetry completeness contract
     assert res["telemetry_completeness"] == "COMPLETE"

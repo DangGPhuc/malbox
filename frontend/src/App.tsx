@@ -32,6 +32,9 @@ function readInitialHashRoute(): {
   const [rawPath, rawQuery] = window.location.hash.split('?');
   const match = rawPath.match(/^#(workspace|graph|report|static|correlation)\/([a-zA-Z0-9_-]{4,80})$/);
   if (!match || !SAFE_ANALYSIS_ID_RE.test(match[2])) {
+    if (rawPath === '#submit') {
+      return { tab: 'submit', analysisId: null, functionId: null, correlationId: null };
+    }
     return { tab: 'dashboard', analysisId: null, functionId: null, correlationId: null };
   }
   let functionId: string | null = null;
@@ -56,6 +59,9 @@ export default function App() {
 
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const urlTheme = params.get('theme');
+      if (urlTheme === 'dark' || urlTheme === 'light') return urlTheme;
       const stored = localStorage.getItem('malbox_theme');
       if (stored === 'dark' || stored === 'light') return stored;
     }
@@ -70,7 +76,7 @@ export default function App() {
   }, [theme]);
 
   const toggleTheme = () => {
-    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   };
 
   useEffect(() => {
@@ -79,6 +85,44 @@ export default function App() {
       .then(setHealth)
       .catch((err) => console.error('Health check failed', err));
   }, []);
+
+  // Listen for browser Back/Forward navigation (C2)
+  useEffect(() => {
+    const handleHashChange = () => {
+      const route = readInitialHashRoute();
+      if (route.tab) setCurrentTab(route.tab);
+      if (route.analysisId) setActiveAnalysisId(route.analysisId);
+      if (route.functionId) setRequestedFunctionId(route.functionId);
+      if (route.correlationId) setRequestedCorrelationId(route.correlationId);
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  // Sync state to URL hash (C2)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (
+      activeAnalysisId &&
+      ['workspace', 'graph', 'report', 'static', 'correlation'].includes(currentTab)
+    ) {
+      let hash = `#${currentTab}/${activeAnalysisId}`;
+      if (requestedFunctionId) hash += `?functionId=${encodeURIComponent(requestedFunctionId)}`;
+      else if (requestedCorrelationId) hash += `?correlationId=${encodeURIComponent(requestedCorrelationId)}`;
+      if (window.location.hash !== hash) {
+        window.history.replaceState(null, '', hash);
+      }
+    } else if (currentTab === 'dashboard') {
+      if (window.location.hash && window.location.hash !== '#dashboard') {
+        window.history.replaceState(null, '', '#dashboard');
+      }
+    } else if (currentTab === 'submit') {
+      if (window.location.hash !== '#submit') {
+        window.history.replaceState(null, '', '#submit');
+      }
+    }
+  }, [currentTab, activeAnalysisId, requestedFunctionId, requestedCorrelationId]);
 
   const handleSelectAnalysis = (analysisId: string, tab: string = 'workspace') => {
     setActiveAnalysisId(analysisId);
@@ -120,27 +164,34 @@ export default function App() {
     handleNavigateTab(tab);
   };
 
-  return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <Navbar
-        currentTab={currentTab}
-        setCurrentTab={handleNavbarTabChange}
-        health={health}
-        activeAnalysisId={activeAnalysisId}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-      />
+  const handleClearActiveAnalysis = () => {
+    setActiveAnalysisId(null);
+    setRequestedFunctionId(null);
+    setRequestedCorrelationId(null);
+    setCurrentTab('dashboard');
+  };
 
-      <main style={{ flex: 1, paddingBottom: '3rem' }}>
+  return (
+    <Navbar
+      currentTab={currentTab}
+      setCurrentTab={handleNavbarTabChange}
+      health={health}
+      activeAnalysisId={activeAnalysisId}
+      onClearActiveAnalysis={handleClearActiveAnalysis}
+      theme={theme}
+      onToggleTheme={toggleTheme}
+    >
+      <main style={{ flex: 1, padding: '1.5rem 2rem 3rem' }}>
         {currentTab === 'dashboard' && (
           <DashboardPage
             onSelectAnalysis={handleSelectAnalysis}
             onNavigateSubmit={() => handleNavigateTab('submit')}
+            health={health}
           />
         )}
 
         {currentTab === 'submit' && (
-          <SubmitPage onAnalysisStarted={handleAnalysisStarted} />
+          <SubmitPage onAnalysisStarted={handleAnalysisStarted} health={health} />
         )}
 
         {currentTab === 'workspace' && activeAnalysisId && (
@@ -153,12 +204,15 @@ export default function App() {
         {currentTab === 'graph' && activeAnalysisId && (
           <Suspense
             fallback={
-              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
+              <div
+                className="container"
+                style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}
+              >
                 Loading interactive behavior graph...
               </div>
             }
           >
-            <BehaviorGraphPage analysisId={activeAnalysisId} />
+            <BehaviorGraphPage analysisId={activeAnalysisId} onNavigateTab={handleNavigateTab} />
           </Suspense>
         )}
 
@@ -172,7 +226,10 @@ export default function App() {
         {currentTab === 'static' && activeAnalysisId && (
           <Suspense
             fallback={
-              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
+              <div
+                className="container"
+                style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}
+              >
                 Loading Ghidra static function explorer...
               </div>
             }
@@ -188,7 +245,10 @@ export default function App() {
         {currentTab === 'correlation' && activeAnalysisId && (
           <Suspense
             fallback={
-              <div className="container" style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
+              <div
+                className="container"
+                style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}
+              >
                 Loading static/dynamic correlation explorer...
               </div>
             }
@@ -201,6 +261,6 @@ export default function App() {
           </Suspense>
         )}
       </main>
-    </div>
+    </Navbar>
   );
 }

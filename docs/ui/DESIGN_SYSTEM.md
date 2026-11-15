@@ -1,8 +1,9 @@
 # Malbox-AI — Notion-Inspired Forensic Design System
 
 **Document Reference:** `docs/ui/DESIGN_SYSTEM.md`  
-**Applies to:** Frontend Workspace, Intelligence Reports, and Navigation Components  
-**Specification Source:** `DESIGN.md` (Notion Warm Paper Notebook Reference)
+**Applies to:** Frontend Workspace, Application Shell, Intelligence Reports, and Navigation Components  
+**Specification Source:** `DESIGN.md` (Notion Warm Paper Notebook Reference)  
+**Version:** v0.2.2  
 
 ---
 
@@ -13,6 +14,7 @@ Malbox-AI transitions from a high-fatigue dark cyberpunk aesthetic to a warm, ed
 - **Pure White Cards:** `#ffffff` (`--color-pure-white`) floating on the warm canvas with 1px hairline borders (`rgba(0, 0, 0, 0.08)`) and 12px corners — zero heavy drop shadows.
 - **Chromatic Economy:** Notion Blue (`#0075de`) anchors the single primary conversion/action commitment. Secondary actions defer to Sky Tint (`#e6f3fe`) or ghost styles.
 - **Typographic Hierarchy via Alpha:** Headings and body text leverage `#111111` / `#000000` with calibrated opacity and warm graphite (`#615d59`) and stone (`#757575`) tones.
+- **Zero External Dependencies:** Built with zero Google Fonts network requests; uses high-performance system font stacks (`-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`).
 
 ---
 
@@ -43,36 +45,32 @@ Malbox-AI transitions from a high-fatigue dark cyberpunk aesthetic to a warm, ed
 
 ---
 
-## 3. Core Component Library
+## 3. Application Shell Architecture (C2)
 
-### 3.1 Primary CTA Button (`.btn-primary` / `.btn-notion-primary`)
-- Fill: `#0075de`
-- Text: `#ffffff`
-- Typography: 14px, weight 500
-- Radius: 8px
-- Padding: 6px 15px
+The application shell provides unified desktop and mobile navigation:
 
-### 3.2 Ghost Secondary Button (`.btn-secondary` / `.btn-notion-ghost`)
-- Fill: `#e6f3fe` (Sky Tint)
-- Text: `#0075de`
-- Border: `1px solid rgba(0, 117, 222, 0.15)`
-- Radius: 8px
-
-### 3.3 Signature Hero Highlight Pill (`.hero-pill` / `.hero-pill-blue`)
-- Applied inline inside headlines to emphasize forensic keywords (`Provenance`, `Executable`, `Correlation`).
-- Border Radius: `9999px`
-- Padding: `2px 14px`
-
-### 3.4 Telemetry Quality Pills (`.pill-tag`)
-- `badge-clean` / `badge-complete`: `#15803d` text on `rgba(21, 128, 61, 0.1)`
-- `badge-incomplete` / `badge-warning`: `#c2410c` text on `rgba(232, 157, 1, 0.12)`
-- `badge-malicious`: `#b91c1c` text on `rgba(246, 73, 50, 0.12)`
+1. **Collapsible Sidebar:**
+   - Width: `250px` (expanded) to `68px` (collapsed).
+   - Global group: `Dashboard`, `Analyses / Cases`, `Submit Sample`.
+   - Active analysis group (when investigation active): `Workspace`, `Behavior / Timeline`, `Behavior Graph`, `Static Analysis`, `Correlation Explorer`, `Analysis Report`.
+   - Responsive off-canvas drawer on mobile (`< 900px`) with blurred backdrop overlay.
+2. **Compact Top Header:**
+   - Height: `58px`.
+   - Hamburger sidebar toggle for desktop/mobile.
+   - Breadcrumbs navigation (`Malbox / Cases / [ID] / [Tab]`).
+   - Persistent active case pill with single-click exit.
+   - Live backend health indicator (`Replay Safe`, `Live: Active / Isolated`).
+   - Accessible theme toggle (`Sun` / `Moon` icon).
+3. **Deep Linking & Hash Synchronization:**
+   - Synchronizes URL hash (`#workspace/[ID]`, `#graph/[ID]`, `#static/[ID]`, `#correlation/[ID]`, `#report/[ID]`).
+   - Fully supports browser Back and Forward navigation via `hashchange` event listeners.
 
 ---
 
 ## 4. Theme Support & Accessibility
 
 - **Default Theme:** Light theme (`data-theme="light"`).
-- **Dark Theme Toggle:** Accessible via top navigation bar (`Sun` / `Moon` icon), persisted in `localStorage('malbox_theme')`.
+- **Dark Theme Toggle:** Accessible via top navigation bar (`Sun` / `Moon` icon), persisted in `localStorage('malbox_theme')` with optional query parameter override (`?theme=dark`).
+- **Canvas Color Resolution:** Cytoscape.js HTML5 canvas rendering in `BehaviorGraphPage`, `StaticCallGraphPanel`, and `CorrelationRelationshipView` resolves concrete theme colors (`#111111` vs `#f3f4f6`) to prevent broken rendering of CSS variables.
 - **Motion Reduction:** Fully honors `@media (prefers-reduced-motion: reduce)` by clamping transition durations to `0.01ms`.
 - **High-Fidelity PDF Export:** Includes dedicated `@media print` rules enforcing pure white background, desaturated typography, and avoiding awkward page breaks across forensic tables.

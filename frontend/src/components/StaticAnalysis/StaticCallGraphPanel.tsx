@@ -52,6 +52,12 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
       return;
     }
 
+    const isDark =
+      typeof document !== 'undefined' &&
+      document.documentElement.getAttribute('data-theme') === 'dark';
+    const labelColor = isDark ? '#f3f4f6' : '#111111';
+    const borderMuted = isDark ? '#94a3b8' : '#757575';
+
     let cy: Core | null = null;
     try {
       cy = cytoscape({
@@ -65,7 +71,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
             selector: 'node',
             style: {
               label: 'data(label)',
-              color: 'var(--text-main)',
+              color: labelColor,
               'font-size': '10px',
               'text-valign': 'bottom',
               'text-margin-y': 5,
@@ -87,7 +93,7 @@ export const StaticCallGraphPanel: React.FC<StaticCallGraphPanelProps> = ({
               'background-color': '#475569',
               'border-style': 'dashed',
               'border-width': 2,
-              'border-color': 'var(--text-secondary)',
+              'border-color': borderMuted,
             },
           },
           {
