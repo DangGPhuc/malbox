@@ -359,3 +359,367 @@ def test_cape_extended_telemetry_extraction(monkeypatch):
     assert res["telemetry_completeness"] == "COMPLETE"
 
 
+def test_cape_planning_fields_rejected_as_options(tmp_path):
+    """Verifies that internal orchestration planning fields cannot be injected as CAPE transport options (A1)."""
+    import pytest
+    backend = CapeSandboxBackend(api_url="http://mock-cape.local")
+    sample = tmp_path / "sample.exe"
+    sample.write_bytes(b"MZ_DUMMY")
+
+    with pytest.raises(ValueError, match="Disallowed CAPE submission option: requested_artifacts"):
+        backend.submit_sample(
+            sample,
+            profile="standard",
+            timeout_seconds=60,
+            options={"requested_artifacts": ["pcap", "memory_dump"]},
+        )
+
+    with pytest.raises(ValueError, match="Disallowed CAPE submission option: telemetry_focus"):
+        backend.submit_sample(
+            sample,
+            profile="standard",
+            timeout_seconds=60,
+            options={"telemetry_focus": ["process", "network"]},
+        )
+
+
+def test_cape_submission_options_value_validation(tmp_path):
+    """Verifies strict value validation on all allowed submission options (A1)."""
+    import pytest
+    backend = CapeSandboxBackend(api_url="http://mock-cape.local")
+    sample = tmp_path / "sample.exe"
+    sample.write_bytes(b"MZ_DUMMY")
+
+    # Invalid timeout values
+    with pytest.raises(ValueError, match="Invalid timeout option value"):
+        backend.submit_sample(sample, profile="standard", timeout_seconds=60, options={"timeout": -5})
+    with pytest.raises(ValueError, match="Invalid timeout option value"):
+        backend.submit_sample(sample, profile="standard", timeout_seconds=60, options={"timeout": 5000})
+
+    # Invalid enforce_timeout
+    with pytest.raises(ValueError, match="Invalid enforce_timeout option value"):
+        backend.submit_sample(sample, profile="standard", timeout_seconds=60, options={"enforce_timeout": "maybe"})
+
+    # Invalid machine / package identifier
+    with pytest.raises(ValueError, match="Invalid CAPE machine identifier"):
+        backend.submit_sample(sample, profile="standard", timeout_seconds=60, options={"machine": "win10; reboot"})
+
+    # Invalid priority
+    with pytest.raises(ValueError, match="Invalid priority option value"):
+        backend.submit_sample(sample, profile="standard", timeout_seconds=60, options={"priority": 5})
+
+    # Invalid options string
+    with pytest.raises(ValueError, match="Invalid CAPE options parameter string"):
+        backend.submit_sample(sample, profile="standard", timeout_seconds=60, options={"options": "route=none\nmalicious_param=1"})
+
+
+def test_cape_profile_tag_mapping_empty_by_default(monkeypatch, tmp_path):
+    """Verifies that no implicit machine tags are injected for any profile by default (A2)."""
+    sample = tmp_path / "sample.exe"
+    sample.write_bytes(b"MZ_DUMMY")
+
+    posted_data = {}
+    class MockSubmitResp:
+        status_code = 200
+        def json(self):
+            return {"error": False, "data": {"task_ids": [1001]}}
+
+    def mock_post(*args, **kwargs):
+        nonlocal posted_data
+        posted_data = kwargs.get("data") or {}
+        return MockSubmitResp()
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    # 1. Default backend instance has empty profile_tag_map
+    backend_default = CapeSandboxBackend(api_url="http://mock-cape.local")
+    assert backend_default.profile_tag_map == {}
+
+    # 2. Submitting ransomware_focus with default mapping sends NO tags
+    backend_default.submit_sample(sample, profile="ransomware_focus", timeout_seconds=60)
+    assert "tags" not in posted_data
+    assert posted_data.get("enforce_timeout") == "1"
+
+    # 3. Explicit operator mapping is respected
+    backend_custom = CapeSandboxBackend(
+        api_url="http://mock-cape.local",
+        profile_tag_map={"ransomware_focus": "win10_isolated"}
+    )
+    backend_custom.submit_sample(sample, profile="ransomware_focus", timeout_seconds=60)
+    assert posted_data.get("tags") == "win10_isolated"
+
+
+def test_cape_task_id_and_sha256_mismatch_rejection(monkeypatch):
+    """Verifies that mismatched task ID or sample SHA-256 in CAPE report raises ValueError (A3)."""
+    import pytest
+    backend = CapeSandboxBackend(api_url="http://mock-cape.local")
+
+    class MockResp:
+        def __init__(self, data):
+            self.status_code = 200
+            self._data = data
+        def json(self):
+            return self._data
+
+    # 1. Task ID mismatch: requested task 100, report is for task 200
+    report_task_200 = {
+        "info": {"id": 200, "duration": 15},
+        "target": {"file": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+        "behavior": {"processes": [], "generic": []},
+        "network": {}
+    }
+    monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: MockResp(report_task_200))
+    with pytest.raises(ValueError, match="CAPE report task ID mismatch: requested task 100 but report returned task 200"):
+        backend.collect_results("100")
+
+    # 2. SHA-256 mismatch: expected sha aaa, report target has sha bbb
+    report_matching_task_wrong_sha = {
+        "info": {"id": 100, "duration": 15},
+        "target": {"file": {"sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+        "behavior": {"processes": [], "generic": []},
+        "network": {}
+    }
+    monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: MockResp(report_matching_task_wrong_sha))
+    with pytest.raises(ValueError, match="CAPE report sample SHA-256 mismatch"):
+        backend.collect_results("100", expected_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+
+def test_cape_missing_report_identity_marked_unverified(monkeypatch):
+    """Verifies that missing report identity is marked unverified rather than substituting requested ID (A3)."""
+    backend = CapeSandboxBackend(api_url="http://mock-cape.local")
+
+    report_without_id = {
+        "info": {"duration": 20},  # No "id"
+        "target": {},
+        "behavior": {"processes": [], "generic": []},
+        "network": {}
+    }
+
+    class MockResp:
+        status_code = 200
+        def json(self):
+            return report_without_id
+
+    monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: MockResp())
+    res = backend.collect_results("7777")
+    assert res["metadata"]["cape_id"] is None
+    assert res["metadata"]["cape_id_verified"] is False
+
+
+def test_cape_readiness_rejects_malformed_and_error_envelope(monkeypatch):
+    """Verifies that CAPE check_readiness rejects error envelopes and malformed JSON with HTTP 200 (A4)."""
+    backend = CapeSandboxBackend(api_url="http://mock-cape.local")
+
+    class MockResp:
+        def __init__(self, data):
+            self.status_code = 200
+            self._data = data
+        def json(self):
+            return self._data
+
+    # Error envelope with HTTP 200
+    monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: MockResp({"error": True, "error_value": "Database connection offline"}))
+    r1 = backend.check_readiness()
+    assert r1["ready"] is False
+    assert r1["status"] == "error"
+    assert "Database connection offline" in r1["error"]
+
+    # Non-dict data
+    monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: MockResp(["not", "a", "dict"]))
+    r2 = backend.check_readiness()
+    assert r2["ready"] is False
+    assert r2["status"] == "malformed"
+
+
+def test_cape_collect_results_does_not_retry_auth_failure(monkeypatch):
+    """Verifies that collect_results fails immediately on 401/403 without retrying (A4)."""
+    import pytest
+    backend = CapeSandboxBackend(api_url="http://mock-cape.local")
+    attempts = {"count": 0}
+
+    class MockAuthFail:
+        status_code = 401
+        text = "Unauthorized"
+        def json(self):
+            return {"error": True}
+
+    def mock_get(*args, **kwargs):
+        attempts["count"] += 1
+        return MockAuthFail()
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    with pytest.raises(PermissionError, match="authentication failed"):
+        backend.collect_results("5001", max_retries=4)
+
+    # Must fail on the first attempt without retrying
+    assert attempts["count"] == 1
+
+
+def test_cape_pipeline_worker_e2e_regression_mocked_http(client, monkeypatch, tmp_path):
+    """
+    Mandatory Regression Test (A1):
+    Executes actual PipelineWorker through full API request lifecycle with real CapeSandboxBackend
+    and mocked HTTP transport.
+    Verifies:
+    API analysis request -> planner -> worker -> readiness -> CAPE submission ->
+    status polling -> report retrieval -> normalization -> detection -> report persistence -> COMPLETED.
+    Ensures internal planning fields (requested_artifacts, telemetry_focus) are NEVER forwarded to CAPE.
+    """
+    import io
+    from app.core.config import settings
+    from app.core.database import SessionLocal
+    from app.models.analysis import Analysis, AnalysisStatus
+    from app.models.audit import OrchestrationRecord
+
+    monkeypatch.setattr(settings, "LIVE_MODE_ENABLED", True)
+    monkeypatch.setattr(settings, "OPERATOR_TOKEN", "e2e-op-token-secret")
+
+    # 1. Upload benign test sample
+    sample_bytes = b"MZ_SYNTHETIC_BENIGN_PE_FOR_E2E"
+    res_upload = client.post("/api/v1/samples", files={"file": ("e2e_sample.exe", io.BytesIO(sample_bytes))})
+    assert res_upload.status_code == 201
+    sample_data = res_upload.json()
+    sample_id = sample_data["id"]
+    sample_sha256 = sample_data["sha256"]
+
+    # Track requests sent to mock HTTP transport
+    cape_posts: list = []
+    cape_gets: list = []
+
+    class MockHttpResponse:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._json = json_data
+            self.text = "OK" if status_code == 200 else "Error"
+            self.content = b""
+
+        def json(self):
+            return self._json
+
+    orig_get = httpx.Client.get
+    orig_post = httpx.Client.post
+
+    def mock_post(self_client, url, *args, **kwargs):
+        url_str = str(url)
+        if "apiv2" in url_str:
+            cape_posts.append({
+                "url": url_str,
+                "data": kwargs.get("data", {}),
+                "files": kwargs.get("files", {}),
+            })
+            if "tasks/create/file" in url_str:
+                return MockHttpResponse(200, {"error": False, "data": {"task_ids": [4455]}})
+            return MockHttpResponse(400, {"error": True})
+        return orig_post(self_client, url, *args, **kwargs)
+
+    poll_count = {"count": 0}
+
+    def mock_get(self_client, url, *args, **kwargs):
+        url_str = str(url)
+        if "apiv2" in url_str:
+            cape_gets.append(url_str)
+            if "cuckoo/status" in url_str:
+                return MockHttpResponse(200, {
+                    "error": False,
+                    "data": {
+                        "version": "2.4.0",
+                        "machines": {"total": 2, "available": 2},
+                        "tasks": {"total": 10}
+                    }
+                })
+            elif "tasks/view/4455" in url_str:
+                poll_count["count"] += 1
+                return MockHttpResponse(200, {
+                    "error": False,
+                    "data": {"id": 4455, "status": "reported"}
+                })
+            elif "tasks/get/report/4455" in url_str:
+                return MockHttpResponse(200, {
+                    "info": {"id": 4455, "duration": 25},
+                    "target": {"file": {"sha256": sample_sha256}},
+                    "behavior": {
+                        "processes": [
+                            {
+                                "process_id": 3001,
+                                "parent_id": 4,
+                                "process_name": "e2e_sample.exe",
+                                "command_line": "e2e_sample.exe",
+                                "first_seen": "2026-11-15T00:00:00Z"
+                            }
+                        ],
+                        "generic": [
+                            {
+                                "category": "file",
+                                "path": "C:\\Windows\\Temp\\benign.log",
+                                "status": "write",
+                                "time": "2026-11-15T00:00:01Z",
+                                "pid": 3001,
+                                "process_name": "e2e_sample.exe"
+                            }
+                        ]
+                    },
+                    "network": {"dns": []},
+                    "debug": {"errors": []}
+                })
+            elif "tasks/get/pcap/4455" in url_str:
+                return MockHttpResponse(200, {})
+            return MockHttpResponse(404, {"error": True})
+        return orig_get(self_client, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    # 2. Trigger synchronous analysis creation through API
+    payload = {
+        "sample_id": sample_id,
+        "backend_type": "cape",
+        "profile": "standard",
+        "timeout_seconds": 60,
+        "live_mode": True,
+        "approved_by_user": True,
+    }
+
+    res_analysis = client.post(
+        "/api/v1/analyses?run_sync=true",
+        json=payload,
+        headers={"X-Operator-Token": "e2e-op-token-secret"},
+    )
+    assert res_analysis.status_code == 201
+    analysis_id = res_analysis.json()["id"]
+
+    # 3. Verify CAPE transport request correctness
+    assert len(cape_posts) == 1
+    post_data = cape_posts[0]["data"]
+
+    # MANDATORY ASSERTION (A1): Internal planning fields must NEVER be sent to CAPE
+    assert "requested_artifacts" not in post_data
+    assert "telemetry_focus" not in post_data
+    assert post_data.get("timeout") == "60"
+
+    # 4. Verify Analysis in Database reached COMPLETED
+    db = SessionLocal()
+    try:
+        db_analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+        assert db_analysis is not None
+        assert db_analysis.status == AnalysisStatus.COMPLETED.value
+        assert db_analysis.external_task_id == "4455"
+        assert db_analysis.error_message is None
+
+        # Verify Report was generated and persisted
+        assert db_analysis.report is not None
+        assert db_analysis.report.risk_score is not None
+
+        # Verify planning metadata was safely stored in OrchestrationRecord
+        records = db.query(OrchestrationRecord).filter(OrchestrationRecord.analysis_id == analysis_id).all()
+        assert len(records) >= 1
+        preflight_record = [r for r in records if r.stage == "preflight_planning"]
+        assert len(preflight_record) == 1
+        final_action = preflight_record[0].final_action
+        assert "requested_artifacts" in final_action
+        assert "telemetry_focus" in final_action
+    finally:
+        db.close()
+
+
+

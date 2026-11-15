@@ -21,12 +21,13 @@ ALLOWED_SUBMISSION_OPTIONS = {
 }
 
 SAFE_TAG_REGEX = re.compile(r"^[a-zA-Z0-9_,-]{1,128}$")
+SAFE_IDENTIFIER_REGEX = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+SAFE_OPTIONS_REGEX = re.compile(r"^[a-zA-Z0-9_=,.-]{1,512}$")
+SAFE_CUSTOM_REGEX = re.compile(r"^[a-zA-Z0-9_., -]{1,256}$")
 
-DEFAULT_PROFILE_TAG_MAP = {
-    "ransomware_focus": "ransomware_focus",
-    "infostealer_focus": "infostealer_focus",
-    "evasion_focus": "evasion_focus",
-}
+# Operator-configured profile-to-tag mapping defaults to empty (A2)
+# No implicit machine tag for any analysis profile.
+DEFAULT_PROFILE_TAG_MAP: Dict[str, str] = {}
 
 
 class CapeSandboxBackend(SandboxBackend):
@@ -46,7 +47,10 @@ class CapeSandboxBackend(SandboxBackend):
         self.api_url = (api_url or settings.CAPE_API_URL).rstrip("/")
         self.api_token = api_token or settings.CAPE_API_TOKEN
         self.timeout = timeout_seconds or settings.CAPE_TIMEOUT_SECONDS
-        self.profile_tag_map = profile_tag_map or DEFAULT_PROFILE_TAG_MAP
+        if profile_tag_map is not None:
+            self.profile_tag_map = dict(profile_tag_map)
+        else:
+            self.profile_tag_map = dict(getattr(settings, "CAPE_PROFILE_TAG_MAP", {}) or {})
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -57,20 +61,58 @@ class CapeSandboxBackend(SandboxBackend):
     def check_readiness(self) -> Dict[str, Any]:
         """
         Verifies connectivity and service health against the CAPE v2 REST API endpoint.
+        Distinguishes API connectivity from actual guest availability and verified confinement.
         """
         endpoint = f"{self.api_url}/apiv2/cuckoo/status/"
         try:
             with httpx.Client(timeout=5.0, headers=self._get_headers()) as client:
                 resp = client.get(endpoint)
                 if resp.status_code == 200:
-                    data = resp.json()
+                    try:
+                        data = resp.json()
+                    except Exception as e:
+                        return {
+                            "backend": "cape",
+                            "ready": False,
+                            "status": "malformed",
+                            "api_url": self.api_url,
+                            "error": f"Malformed JSON from CAPE status endpoint: {str(e)}",
+                        }
+
+                    if not isinstance(data, dict):
+                        return {
+                            "backend": "cape",
+                            "ready": False,
+                            "status": "malformed",
+                            "api_url": self.api_url,
+                            "error": f"Unexpected data type from CAPE status: {type(data).__name__}",
+                        }
+
+                    # Reject error=true envelopes even with HTTP 200
+                    if data.get("error") is True:
+                        err_val = data.get("error_value") or data.get("errors") or "CAPE status error"
+                        return {
+                            "backend": "cape",
+                            "ready": False,
+                            "status": "error",
+                            "api_url": self.api_url,
+                            "error": f"CAPE status reported error: {err_val}",
+                        }
+
                     cuckoo_data = data.get("data", {}) if isinstance(data, dict) else {}
+                    machines_info = cuckoo_data.get("machines", {}) if isinstance(cuckoo_data, dict) else {}
+                    total_machines = machines_info.get("total", 0) if isinstance(machines_info, dict) else 0
+                    avail_machines = machines_info.get("available", 0) if isinstance(machines_info, dict) else 0
+
                     return {
                         "backend": "cape",
                         "ready": True,
                         "status": "ready",
-                        "version": cuckoo_data.get("version", "2.x"),
-                        "tasks_summary": cuckoo_data.get("tasks", {}),
+                        "version": cuckoo_data.get("version", "2.x") if isinstance(cuckoo_data, dict) else "2.x",
+                        "tasks_summary": cuckoo_data.get("tasks", {}) if isinstance(cuckoo_data, dict) else {},
+                        "guest_vms_total": total_machines,
+                        "guest_vms_available": avail_machines,
+                        "confinement_verified": False,  # API connectivity does not equal verified network confinement
                         "api_url": self.api_url,
                         "error": None,
                     }
@@ -114,19 +156,69 @@ class CapeSandboxBackend(SandboxBackend):
     ) -> str:
         """
         Submits a quarantined sample to the CAPE Sandbox task queue.
-        Enforces strict option allowlist and graceful machine tag mapping.
+        Enforces strict option allowlist, value validation, and graceful machine tag mapping.
         """
         endpoint = f"{self.api_url}/apiv2/tasks/create/file/"
         if not sample_path.exists():
             raise FileNotFoundError(f"Quarantined sample file not found: {sample_path}")
 
-        # Validate options against strict allowlist
+        # Validate options and values against strict allowlist (A1)
         validated_options: Dict[str, Any] = {}
         if options:
             for k, v in options.items():
                 if k not in ALLOWED_SUBMISSION_OPTIONS:
                     raise ValueError(f"Disallowed CAPE submission option: {k}")
-                validated_options[k] = v
+                # Value validation
+                if k == "timeout":
+                    try:
+                        val = int(v)
+                        if val <= 0 or val > 3600:
+                            raise ValueError()
+                        validated_options[k] = str(val)
+                    except Exception:
+                        raise ValueError(f"Invalid timeout option value: {v}. Must be an integer between 1 and 3600.")
+                elif k == "enforce_timeout":
+                    if v in (1, "1", True, "true", "True"):
+                        validated_options[k] = "1"
+                    elif v in (0, "0", False, "false", "False"):
+                        validated_options[k] = "0"
+                    else:
+                        raise ValueError(f"Invalid enforce_timeout option value: {v}. Must be 0 or 1.")
+                elif k == "tags":
+                    tag_str = str(v).strip()
+                    if not SAFE_TAG_REGEX.match(tag_str):
+                        raise ValueError(f"Invalid CAPE machine tag format: {tag_str}")
+                    validated_options[k] = tag_str
+                elif k in ("machine", "package"):
+                    id_str = str(v).strip()
+                    if not SAFE_IDENTIFIER_REGEX.match(id_str):
+                        raise ValueError(f"Invalid CAPE {k} identifier: {id_str}")
+                    validated_options[k] = id_str
+                elif k == "priority":
+                    try:
+                        val = int(v)
+                        if val < 1 or val > 3:
+                            raise ValueError()
+                        validated_options[k] = str(val)
+                    except Exception:
+                        raise ValueError(f"Invalid priority option value: {v}. Must be 1, 2, or 3.")
+                elif k == "options":
+                    opt_str = str(v).strip()
+                    if not SAFE_OPTIONS_REGEX.match(opt_str):
+                        raise ValueError(f"Invalid CAPE options parameter string: {opt_str}")
+                    validated_options[k] = opt_str
+                elif k == "custom":
+                    cust_str = str(v).strip()
+                    if not SAFE_CUSTOM_REGEX.match(cust_str):
+                        raise ValueError(f"Invalid custom parameter string: {cust_str}")
+                    validated_options[k] = cust_str
+                elif k == "clock":
+                    clock_str = str(v).strip()
+                    if len(clock_str) > 64 or any(c in clock_str for c in "\r\n;$\\'\"`"):
+                        raise ValueError(f"Invalid clock parameter string: {clock_str}")
+                    validated_options[k] = clock_str
+                else:
+                    validated_options[k] = str(v)
 
         # Build form data
         data: Dict[str, str] = {
@@ -135,21 +227,18 @@ class CapeSandboxBackend(SandboxBackend):
         }
 
         # Resolve machine tags gracefully (A2)
-        # Standard profile should not require an explicit machine tag.
+        # Default is NO tags unless explicitly mapped by operator or provided in options.
         explicit_tags = validated_options.get("tags")
         if explicit_tags:
-            tag_str = str(explicit_tags).strip()
-            if not SAFE_TAG_REGEX.match(tag_str):
-                raise ValueError(f"Invalid CAPE machine tag format: {tag_str}")
-            data["tags"] = tag_str
-        elif profile and profile != "standard":
+            data["tags"] = explicit_tags
+        elif profile:
             mapped_tag = self.profile_tag_map.get(profile)
             if mapped_tag:
                 if not SAFE_TAG_REGEX.match(mapped_tag):
                     raise ValueError(f"Invalid mapped CAPE machine tag format: {mapped_tag}")
                 data["tags"] = mapped_tag
 
-        # Forward other allowed options
+        # Forward other allowed options (machine, package, options, etc.)
         for k, v in validated_options.items():
             if k != "tags":
                 data[k] = str(v)
@@ -181,11 +270,21 @@ class CapeSandboxBackend(SandboxBackend):
                     if single_id is not None:
                         task_ids = [single_id]
 
-                if not task_ids:
-                    raise ValueError(f"CAPE API returned no task IDs: {resp_data}")
+                if not task_ids or not isinstance(task_ids, list):
+                    raise ValueError(f"CAPE API returned no valid task IDs: {resp_data}")
 
-                return str(task_ids[0])
+                valid_ids = []
+                for tid in task_ids:
+                    tid_str = str(tid).strip()
+                    if tid_str and (tid_str.isdigit() or SAFE_IDENTIFIER_REGEX.match(tid_str)):
+                        valid_ids.append(tid_str)
+
+                if not valid_ids:
+                    raise ValueError(f"CAPE API returned malformed task IDs: {task_ids}")
+
+                return valid_ids[0]
         except (httpx.ConnectError, httpx.TimeoutException) as e:
+            # Do NOT blindly retry ambiguous sample POST failures (prevents duplicate remote tasks)
             raise ConnectionError(f"CAPE Sandbox unreachable during submission: {str(e)}")
 
     def get_task_status(self, backend_task_id: str) -> Dict[str, Any]:
@@ -329,19 +428,39 @@ class CapeSandboxBackend(SandboxBackend):
     def collect_results(
         self,
         backend_task_id: str,
+        expected_sha256: Optional[str] = None,
         max_retries: int = 4,
         retry_delay_seconds: float = 2.0,
+        max_timeout: Optional[float] = None,
+        is_cancelled_fn: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Retrieves and normalizes the full JSON report from CAPE Sandbox.
-        Implements bounded retry for completed-before-reported race conditions.
+        Implements bounded retry for completed-before-reported race conditions,
+        strict task/report identity verification, and cancellation checks.
         """
         endpoint = f"{self.api_url}/apiv2/tasks/get/report/{backend_task_id}/"
+        deadline = time.monotonic() + (max_timeout if max_timeout is not None else 60.0)
 
         for attempt in range(max_retries):
+            if is_cancelled_fn and is_cancelled_fn():
+                raise RuntimeError(f"Report collection cancelled for task {backend_task_id}")
+
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Monotonic deadline exceeded waiting for CAPE report for task {backend_task_id}")
+
+            timeout_per_request = min(30.0, max(5.0, deadline - time.monotonic()))
+
             try:
-                with httpx.Client(timeout=60.0, headers=self._get_headers()) as client:
+                with httpx.Client(timeout=timeout_per_request, headers=self._get_headers()) as client:
                     resp = client.get(endpoint)
+
+                    # Do NOT retry authentication failures as if they were temporary processing failures
+                    if resp.status_code in (401, 403):
+                        raise PermissionError(
+                            f"CAPE API authentication failed fetching report for task {backend_task_id} (HTTP {resp.status_code})"
+                        )
+
                     if resp.status_code == 200:
                         try:
                             cape_report = resp.json()
@@ -353,28 +472,41 @@ class CapeSandboxBackend(SandboxBackend):
                             err_val = cape_report.get("error_value") or cape_report.get("message") or "Unknown report error"
                             err_str = str(err_val).lower()
                             if ("no report" in err_str or "processing" in err_str or "not ready" in err_str) and attempt < max_retries - 1:
-                                time.sleep(retry_delay_seconds)
-                                continue
+                                if time.monotonic() + retry_delay_seconds < deadline:
+                                    time.sleep(retry_delay_seconds)
+                                    continue
                             raise RuntimeError(f"CAPE report unavailable for task {backend_task_id}: {err_val}")
 
                         if not isinstance(cape_report, dict):
                             raise RuntimeError(f"CAPE report payload must be a JSON object, got {type(cape_report).__name__}")
 
-                        return self._transform_cape_report(cape_report, backend_task_id=backend_task_id)
+                        if is_cancelled_fn and is_cancelled_fn():
+                            raise RuntimeError(f"Report collection cancelled for task {backend_task_id}")
+
+                        return self._transform_cape_report(
+                            cape_report,
+                            backend_task_id=backend_task_id,
+                            expected_sha256=expected_sha256,
+                        )
 
                     elif resp.status_code in (404, 500) and attempt < max_retries - 1:
                         # Report might still be rendering on disk
-                        time.sleep(retry_delay_seconds)
-                        continue
+                        if time.monotonic() + retry_delay_seconds < deadline:
+                            time.sleep(retry_delay_seconds)
+                            continue
+                        else:
+                            break
+                    elif resp.status_code == 404:
+                        raise LookupError(f"CAPE task {backend_task_id} not found on server (HTTP 404)")
                     else:
                         raise RuntimeError(f"Failed to fetch CAPE report (HTTP {resp.status_code}): {resp.text[:200]}")
             except (httpx.ConnectError, httpx.TimeoutException) as e:
-                if attempt < max_retries - 1:
+                if attempt < max_retries - 1 and (time.monotonic() + retry_delay_seconds < deadline):
                     time.sleep(retry_delay_seconds)
                     continue
                 raise ConnectionError(f"CAPE report retrieval failed after retries: {str(e)}")
 
-        raise RuntimeError(f"CAPE report retrieval timed out waiting for report generation for task {backend_task_id}")
+        raise TimeoutError(f"CAPE report retrieval timed out waiting for report generation for task {backend_task_id}")
 
     def cancel_task(self, backend_task_id: str) -> bool:
         endpoint = f"{self.api_url}/apiv2/tasks/delete/{backend_task_id}/"
@@ -411,10 +543,16 @@ class CapeSandboxBackend(SandboxBackend):
 
         return artifacts
 
-    def _transform_cape_report(self, cape_json: Dict[str, Any], backend_task_id: Optional[str] = None) -> Dict[str, Any]:
+    def _transform_cape_report(
+        self,
+        cape_json: Dict[str, Any],
+        backend_task_id: Optional[str] = None,
+        expected_sha256: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Translates native CAPE v2 JSON schema into malbox-ai raw telemetry format.
         Validates telemetry completeness, extracts payload dumps and API events conservatively.
+        Enforces task ID and sample SHA-256 integrity checks.
         """
         behavior = cape_json.get("behavior", {}) if isinstance(cape_json.get("behavior"), dict) else {}
         processes_raw = behavior.get("processes", []) if isinstance(behavior.get("processes"), list) else []
@@ -423,6 +561,33 @@ class CapeSandboxBackend(SandboxBackend):
         network = cape_json.get("network", {}) if isinstance(cape_json.get("network"), dict) else {}
         info = cape_json.get("info", {}) if isinstance(cape_json.get("info"), dict) else {}
         debug = cape_json.get("debug", {}) if isinstance(cape_json.get("debug"), dict) else {}
+        target = cape_json.get("target", {}) if isinstance(cape_json.get("target"), dict) else {}
+
+        # 0. Task identity and sample SHA-256 verification (A3)
+        returned_id = info.get("id")
+        if returned_id is not None and backend_task_id is not None:
+            if str(returned_id) != str(backend_task_id):
+                raise ValueError(
+                    f"CAPE report task ID mismatch: requested task {backend_task_id} but report returned task {returned_id}. Possible cross-task contamination."
+                )
+            verified_task_id = returned_id
+            cape_id_verified = True
+        elif returned_id is not None:
+            verified_task_id = returned_id
+            cape_id_verified = True
+        else:
+            verified_task_id = None
+            cape_id_verified = False
+
+        target_file = target.get("file", {}) if isinstance(target.get("file"), dict) else {}
+        report_sha256 = target_file.get("sha256") or target.get("sha256") or info.get("sha256")
+        target_sha256_verified = False
+        if expected_sha256 and report_sha256:
+            if report_sha256.lower() != expected_sha256.lower():
+                raise ValueError(
+                    f"CAPE report sample SHA-256 mismatch: expected {expected_sha256} but report target is {report_sha256}. Possible cross-sample contamination."
+                )
+            target_sha256_verified = True
 
         # 1. Process activity & monitored API calls
         processes = []
@@ -647,7 +812,10 @@ class CapeSandboxBackend(SandboxBackend):
 
         return {
             "metadata": {
-                "cape_id": info.get("id") or backend_task_id,
+                "cape_id": verified_task_id,
+                "cape_id_verified": cape_id_verified,
+                "target_sha256": report_sha256,
+                "target_sha256_verified": target_sha256_verified,
                 "duration_seconds": duration,
                 "environment": {
                     "guest_os": guest_os,

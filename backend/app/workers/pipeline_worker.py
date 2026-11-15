@@ -141,24 +141,29 @@ class PipelineWorker:
                     self.db.commit()
                     return analysis
 
-                sandbox_options = {
-                    "requested_artifacts": plan.requested_artifacts,
-                    "telemetry_focus": plan.telemetry_focus,
-                } if plan else None
+                # Translate only explicitly supported, operator-controlled parameters to CAPE request (A1)
+                # Never blindly forward internal planning fields (requested_artifacts, telemetry_focus)
+                cape_transport_options: Dict[str, Any] = {}
+                if getattr(settings, "CAPE_DEFAULT_MACHINE", ""):
+                    cape_transport_options["machine"] = settings.CAPE_DEFAULT_MACHINE
+                if getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", ""):
+                    cape_transport_options["options"] = f"route={settings.CAPE_DEFAULT_NETWORK_ROUTE}"
+                if analysis.profile == "ransomware_focus":
+                    cape_transport_options["enforce_timeout"] = "1"
 
                 backend_task_id = sandbox.submit_sample(
                     sample_path=sample_quarantine_path,
                     profile=analysis.profile,
                     timeout_seconds=analysis.timeout_seconds,
-                    options=sandbox_options,
+                    options=cape_transport_options if cape_transport_options else None,
                 )
                 analysis.external_task_id = backend_task_id
                 self.db.commit()
 
-                # Poll status until report is ready or timeout
-                poll_deadline = time.time() + analysis.timeout_seconds + 30
+                # Poll status until report is ready or timeout (A4 - Monotonic deadline)
+                poll_deadline = time.monotonic() + analysis.timeout_seconds + 30
                 cape_ready = False
-                while time.time() < poll_deadline:
+                while time.monotonic() < poll_deadline:
                     if self._is_cancelled():
                         sandbox.cancel_task(backend_task_id)
                         safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
@@ -179,9 +184,21 @@ class PipelineWorker:
                         analysis.completed_at = datetime.now(timezone.utc)
                         self.db.commit()
                         return analysis
-                    elif curr_status in ["cancelled", "not_found"]:
+                    elif curr_status == "unauthorized":
+                        safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                        analysis.error_message = f"CAPE API authentication failed: {status_info.get('error')}"
+                        analysis.completed_at = datetime.now(timezone.utc)
+                        self.db.commit()
+                        return analysis
+                    elif curr_status == "not_found":
+                        safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                        analysis.error_message = f"CAPE task not found: {status_info.get('error') or curr_status}"
+                        analysis.completed_at = datetime.now(timezone.utc)
+                        self.db.commit()
+                        return analysis
+                    elif curr_status == "cancelled":
                         safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
-                        analysis.error_message = f"CAPE task terminated: {status_info.get('error') or curr_status}"
+                        analysis.error_message = f"CAPE task cancelled: {status_info.get('error') or curr_status}"
                         analysis.completed_at = datetime.now(timezone.utc)
                         self.db.commit()
                         return analysis
@@ -222,7 +239,16 @@ class PipelineWorker:
 
             # 4. COLLECTING
             safe_update_status(analysis, self.db, AnalysisStatus.COLLECTING)
-            raw_results = sandbox.collect_results(backend_task_id)
+            if analysis.backend_type == SandboxBackendType.CAPE.value:
+                remaining_time = max(10.0, poll_deadline - time.monotonic())
+                raw_results = sandbox.collect_results(
+                    backend_task_id,
+                    expected_sha256=sample.sha256,
+                    max_timeout=remaining_time,
+                    is_cancelled_fn=self._is_cancelled,
+                )
+            else:
+                raw_results = sandbox.collect_results(backend_task_id)
 
             if analysis.backend_type == SandboxBackendType.REPLAY.value:
                 resolved_scen = raw_results.get("metadata", {}).get("scenario_id")

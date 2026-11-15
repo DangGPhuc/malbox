@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Optional, Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     CAPE_API_TOKEN: str = ""
     CAPE_TIMEOUT_SECONDS: int = 300
     CAPE_POLL_INTERVAL_SECONDS: int = 5
+    # Operator-configured profile-to-tag mapping for CAPE Sandbox (empty by default; no implicit tags)
+    CAPE_PROFILE_TAG_MAP: Dict[str, str] = Field(default_factory=dict)
+    CAPE_DEFAULT_MACHINE: str = ""
+    CAPE_DEFAULT_NETWORK_ROUTE: str = ""
 
     def get_database_url(self) -> str:
         if self.DATABASE_URL:

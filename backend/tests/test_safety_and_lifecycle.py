@@ -251,7 +251,7 @@ def test_cape_polling_lifecycle_mocked(monkeypatch):
                 mock_resp.json.return_value = {"data": {"task": {"status": "reported"}}}
         elif "tasks/get/report" in endpoint:
             mock_resp.json.return_value = {
-                "info": {"id": 1, "duration": 30},
+                "info": {"id": 123, "duration": 30},
                 "behavior": {"processes": [], "generic": []},
                 "network": {},
             }
@@ -269,7 +269,8 @@ def test_cape_polling_lifecycle_mocked(monkeypatch):
 
         report = cape.collect_results("123")
         assert "metadata" in report
-        assert report["metadata"]["cape_id"] == 1
+        assert report["metadata"]["cape_id"] == 123
+        assert report["metadata"]["cape_id_verified"] is True
 
 
 def test_operator_token_fail_closed_when_empty(client, monkeypatch):
