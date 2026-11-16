@@ -336,6 +336,43 @@ def test_process_injection_rule_positive_and_negative(db_session):
     assert assessment_inj.score >= 40
 
 
+def test_remote_alloc_and_write_without_thread_is_staging_not_injection(db_session):
+    """Remote memory allocation and write alone without remote thread creation is memory staging, NOT confirmed injection execution."""
+    sample = Sample(
+        sha256="inj" + "3" * 61, md5="j" * 32, sha1="j" * 40,
+        file_name="stager.exe", file_size=50, quarantine_path="/tmp/j.exe"
+    )
+    db_session.add(sample)
+    db_session.commit()
+
+    analysis = Analysis(
+        sample_id=sample.id, backend_type=SandboxBackendType.REPLAY.value,
+        profile="standard", status=AnalysisStatus.SCORING.value
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    now = datetime.now(timezone.utc)
+    ev_alloc_remote = AnalysisEvent(
+        analysis_id=analysis.id, category="process", action="virtualallocex",
+        timestamp=now, process_id=803,
+        target_path=None,
+        attributes={"target_pid": 1001, "arguments": {"protect": "PAGE_EXECUTE_READWRITE", "flProtect": "0x40", "target_pid": 1001}}
+    )
+    ev_write_remote = AnalysisEvent(
+        analysis_id=analysis.id, category="process", action="writeprocessmemory",
+        timestamp=now, process_id=803,
+        target_path=None,
+        attributes={"target_pid": 1001, "arguments": {"nSize": 4096, "target_pid": 1001}}
+    )
+    db_session.add_all([ev_alloc_remote, ev_write_remote])
+    db_session.commit()
+
+    engine = DetectionEngine(db_session)
+    findings, _ = engine.evaluate_behavior(analysis.id)
+    assert "RULE_PROCESS_INJECTION_TECHNIQUE" not in [f.rule_id for f in findings]
+
+
 def test_incomplete_telemetry_quality_contract_prevents_false_clean(db_session):
     """When telemetry is INCOMPLETE (e.g. analyzer crashed), assessment level must NOT be Clean or No Suspicious Behavior."""
     sample = Sample(

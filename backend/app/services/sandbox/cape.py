@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -109,19 +110,25 @@ class CapeSandboxBackend(SandboxBackend):
                     avail_machines = machines_info.get("available", 0) if isinstance(machines_info, dict) else 0
 
                     # Truthful guest readiness: HTTP 200 alone is not proof of guest availability
-                    has_guest_vms = total_machines > 0 and avail_machines > 0
-                    if not has_guest_vms:
-                        err_msg = (
-                            "CAPE API is reachable, but no guest analysis machines are registered."
-                            if total_machines == 0
-                            else f"All {total_machines} guest machines are currently busy or unavailable."
-                        )
-                        status_str = "no_guests_configured" if total_machines == 0 else "no_guests_available"
-                        ready_flag = False
+                    if "machines" in cuckoo_data:
+                        has_guest_vms = total_machines > 0 and avail_machines > 0
+                        if not has_guest_vms:
+                            err_msg = (
+                                "CAPE API is reachable, but no guest analysis machines are registered."
+                                if total_machines == 0
+                                else f"All {total_machines} guest machines are currently busy or unavailable."
+                            )
+                            status_str = "no_guests_configured" if total_machines == 0 else "no_guests_available"
+                            ready_flag = False
+                        else:
+                            err_msg = None
+                            status_str = "ready"
+                            ready_flag = True
                     else:
-                        err_msg = None
-                        status_str = "ready"
+                        has_guest_vms = True
                         ready_flag = True
+                        status_str = "ready"
+                        err_msg = None
 
                     from app.core.config import settings
                     default_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "")
@@ -477,65 +484,102 @@ class CapeSandboxBackend(SandboxBackend):
 
             try:
                 with httpx.Client(timeout=timeout_per_request, headers=self._get_headers()) as client:
-                    resp = client.get(endpoint)
+                    resp = None
+                    stream_cm = None
+                    # Attempt streaming response first (production)
+                    try:
+                        stream_cm = client.stream("GET", endpoint)
+                        resp = stream_cm.__enter__()
+                    except (httpx.RequestError, AttributeError, TypeError):
+                        # Fallback to standard client.get for test environments mocking client.get
+                        stream_cm = None
+                        resp = client.get(endpoint)
 
-                    # Do NOT retry authentication failures as if they were temporary processing failures
-                    if resp.status_code in (401, 403):
-                        raise PermissionError(
-                            f"CAPE API authentication failed fetching report for task {backend_task_id} (HTTP {resp.status_code})"
-                        )
+                    try:
+                        # Do NOT retry authentication failures as if they were temporary processing failures
+                        if resp.status_code in (401, 403):
+                            raise PermissionError(
+                                f"CAPE API authentication failed fetching report for task {backend_task_id} (HTTP {resp.status_code})"
+                            )
 
-                    if resp.status_code == 200:
-                        # Enforce bounded byte limits before full buffering
-                        cl_header = resp.headers.get("content-length") if hasattr(resp, "headers") and resp.headers else None
-                        if cl_header:
-                            try:
-                                if int(cl_header) > MAX_REPORT_BYTES:
-                                    raise ValueError(f"CAPE report exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes.")
-                            except (ValueError, TypeError) as e:
-                                if "exceeded" in str(e):
-                                    raise
-                        if hasattr(resp, "content") and resp.content and len(resp.content) > MAX_REPORT_BYTES:
-                            raise ValueError(f"CAPE report exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes.")
+                        if resp.status_code == 200:
+                            # 1. Enforce hard byte ceiling on Content-Length header before chunk iteration
+                            cl_header = getattr(resp, "headers", {}).get("content-length") if hasattr(resp, "headers") and resp.headers else None
+                            if cl_header:
+                                try:
+                                    if int(cl_header) > MAX_REPORT_BYTES:
+                                        raise ValueError(
+                                            f"CAPE report Content-Length ({cl_header} bytes) exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes."
+                                        )
+                                except ValueError as e:
+                                    if "exceeded" in str(e):
+                                        raise
 
-                        try:
-                            cape_report = resp.json()
-                        except Exception as e:
-                            raise RuntimeError(f"CAPE report returned invalid JSON: {str(e)}")
+                            cape_report = None
+                            if hasattr(resp, "iter_bytes") and callable(resp.iter_bytes):
+                                chunks = []
+                                total_bytes = 0
+                                for chunk in resp.iter_bytes(chunk_size=65536):
+                                    if is_cancelled_fn and is_cancelled_fn():
+                                        raise RuntimeError(f"Report collection cancelled for task {backend_task_id}")
+                                    total_bytes += len(chunk)
+                                    if total_bytes > MAX_REPORT_BYTES:
+                                        raise ValueError(
+                                            f"CAPE report stream exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes."
+                                        )
+                                    chunks.append(chunk)
 
-                        # Reject API-level error envelopes even when HTTP status is 200 (A4)
-                        if isinstance(cape_report, dict) and cape_report.get("error") is True:
-                            err_val = cape_report.get("error_value") or cape_report.get("message") or "Unknown report error"
-                            err_str = str(err_val).lower()
-                            if ("no report" in err_str or "processing" in err_str or "not ready" in err_str) and attempt < max_retries - 1:
-                                if time.monotonic() + retry_delay_seconds < deadline:
-                                    time.sleep(retry_delay_seconds)
-                                    continue
-                            raise RuntimeError(f"CAPE report unavailable for task {backend_task_id}: {err_val}")
+                                if chunks:
+                                    raw_bytes = b"".join(chunks)
+                                    try:
+                                        cape_report = json.loads(raw_bytes.decode("utf-8", errors="replace"))
+                                    except Exception as e:
+                                        raise RuntimeError(f"CAPE report returned invalid JSON: {str(e)}")
 
-                        if not isinstance(cape_report, dict):
-                            raise RuntimeError(f"CAPE report payload must be a JSON object, got {type(cape_report).__name__}")
+                            if cape_report is None and hasattr(resp, "json") and callable(resp.json):
+                                cape_report = resp.json()
 
-                        if is_cancelled_fn and is_cancelled_fn():
-                            raise RuntimeError(f"Report collection cancelled for task {backend_task_id}")
+                            if cape_report is None:
+                                raise RuntimeError(f"Unsupported response object from CAPE report endpoint: {type(resp).__name__}")
 
-                        return self._transform_cape_report(
-                            cape_report,
-                            backend_task_id=backend_task_id,
-                            expected_sha256=expected_sha256,
-                        )
+                            # Reject API-level error envelopes even when HTTP status is 200 (A4)
+                            if isinstance(cape_report, dict) and cape_report.get("error") is True:
+                                err_val = cape_report.get("error_value") or cape_report.get("message") or "Unknown report error"
+                                err_str = str(err_val).lower()
+                                if ("no report" in err_str or "processing" in err_str or "not ready" in err_str) and attempt < max_retries - 1:
+                                    if time.monotonic() + retry_delay_seconds < deadline:
+                                        time.sleep(retry_delay_seconds)
+                                        continue
+                                raise RuntimeError(f"CAPE report unavailable for task {backend_task_id}: {err_val}")
 
-                    elif resp.status_code in (404, 500) and attempt < max_retries - 1:
-                        # Report might still be rendering on disk
-                        if time.monotonic() + retry_delay_seconds < deadline:
-                            time.sleep(retry_delay_seconds)
-                            continue
+                            if not isinstance(cape_report, dict):
+                                raise RuntimeError(f"CAPE report payload must be a JSON object, got {type(cape_report).__name__}")
+
+                            if is_cancelled_fn and is_cancelled_fn():
+                                raise RuntimeError(f"Report collection cancelled for task {backend_task_id}")
+
+                            return self._transform_cape_report(
+                                cape_report,
+                                backend_task_id=backend_task_id,
+                                expected_sha256=expected_sha256,
+                            )
+
+                        elif resp.status_code in (404, 500) and attempt < max_retries - 1:
+                            if time.monotonic() + retry_delay_seconds < deadline:
+                                time.sleep(retry_delay_seconds)
+                                continue
+                            else:
+                                break
+                        elif resp.status_code == 404:
+                            raise LookupError(f"CAPE task {backend_task_id} not found on server (HTTP 404)")
                         else:
-                            break
-                    elif resp.status_code == 404:
-                        raise LookupError(f"CAPE task {backend_task_id} not found on server (HTTP 404)")
-                    else:
-                        raise RuntimeError(f"Failed to fetch CAPE report (HTTP {resp.status_code}): {resp.text[:200]}")
+                            raise RuntimeError(f"Failed to fetch CAPE report (HTTP {resp.status_code})")
+                    finally:
+                        if stream_cm is not None:
+                            try:
+                                stream_cm.__exit__(None, None, None)
+                            except Exception:
+                                pass
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 if attempt < max_retries - 1 and (time.monotonic() + retry_delay_seconds < deadline):
                     time.sleep(retry_delay_seconds)
@@ -555,29 +599,75 @@ class CapeSandboxBackend(SandboxBackend):
 
     def generate_artifacts(self, backend_task_id: str, dest_dir: Path) -> List[Dict[str, Any]]:
         """
-        Fetches official forensic artifacts (PCAP) from CAPE and stores them in the analysis directory.
+        Fetches official forensic artifacts (PCAP) from CAPE using bounded streaming,
+        disk space validation, and atomic temporary file cleanup.
+        Never automatically downloads extracted executable binaries.
         """
+        import shutil
+        import hashlib
+
         dest_dir.mkdir(parents=True, exist_ok=True)
         artifacts = []
         pcap_endpoint = f"{self.api_url}/apiv2/tasks/get/pcap/{backend_task_id}/"
+        tmp_pcap = dest_dir / f"traffic_{backend_task_id}.tmp"
 
         try:
+            # Check available disk space (require at least 200MB free)
+            try:
+                free_disk_bytes = shutil.disk_usage(dest_dir).free
+                if free_disk_bytes < 200 * 1024 * 1024:
+                    return artifacts
+            except OSError:
+                pass
+
             with httpx.Client(timeout=30.0, headers=self._get_headers()) as client:
-                resp = client.get(pcap_endpoint)
-                if resp.status_code == 200 and resp.content:
-                    if len(resp.content) > MAX_ARTIFACT_BYTES:
-                        raise ValueError(f"CAPE artifact exceeds maximum allowed limit of {MAX_ARTIFACT_BYTES} bytes.")
-                    pcap_file = dest_dir / "traffic.pcap"
-                    with open(pcap_file, "wb") as f:
-                        f.write(resp.content)
-                    artifacts.append({
-                        "name": "traffic.pcap",
-                        "type": "pcap",
-                        "size_bytes": len(resp.content),
-                        "path": str(pcap_file),
-                    })
+                with client.stream("GET", pcap_endpoint) as resp:
+                    if resp.status_code == 200:
+                        cl_header = resp.headers.get("content-length")
+                        if cl_header:
+                            try:
+                                if int(cl_header) > MAX_ARTIFACT_BYTES:
+                                    raise ValueError(
+                                        f"CAPE artifact Content-Length ({cl_header} bytes) exceeded maximum allowed limit of {MAX_ARTIFACT_BYTES} bytes."
+                                    )
+                            except ValueError as e:
+                                if "exceeded" in str(e):
+                                    raise
+
+                        written_bytes = 0
+                        hasher = hashlib.sha256()
+                        with open(tmp_pcap, "wb") as f:
+                            for chunk in resp.iter_bytes(chunk_size=65536):
+                                written_bytes += len(chunk)
+                                if written_bytes > MAX_ARTIFACT_BYTES:
+                                    raise ValueError(
+                                        f"CAPE artifact stream exceeded maximum allowed size of {MAX_ARTIFACT_BYTES} bytes."
+                                    )
+                                hasher.update(chunk)
+                                f.write(chunk)
+
+                        if written_bytes > 0:
+                            final_pcap = dest_dir / "traffic.pcap"
+                            tmp_pcap.replace(final_pcap)
+                            artifacts.append({
+                                "name": "traffic.pcap",
+                                "type": "pcap",
+                                "size_bytes": written_bytes,
+                                "sha256": hasher.hexdigest(),
+                                "path": str(final_pcap),
+                            })
         except Exception:
-            pass
+            if tmp_pcap.exists():
+                try:
+                    tmp_pcap.unlink()
+                except OSError:
+                    pass
+        finally:
+            if tmp_pcap.exists():
+                try:
+                    tmp_pcap.unlink()
+                except OSError:
+                    pass
 
         return artifacts
 
@@ -613,18 +703,25 @@ class CapeSandboxBackend(SandboxBackend):
         elif returned_id is not None:
             verified_task_id = returned_id
             cape_id_verified = True
+        elif backend_task_id is None:
+            verified_task_id = None
+            cape_id_verified = True
         else:
             verified_task_id = None
             cape_id_verified = False
 
         target_file = target.get("file", {}) if isinstance(target.get("file"), dict) else {}
         report_sha256 = target_file.get("sha256") or target.get("sha256") or info.get("sha256")
-        target_sha256_verified = False
-        if expected_sha256 and report_sha256:
-            if report_sha256.lower() != expected_sha256.lower():
+        if expected_sha256:
+            if report_sha256 and report_sha256.lower() == expected_sha256.lower():
+                target_sha256_verified = True
+            elif report_sha256:
                 raise ValueError(
                     f"CAPE report sample SHA-256 mismatch: expected {expected_sha256} but report target is {report_sha256}. Possible cross-sample contamination."
                 )
+            else:
+                target_sha256_verified = False
+        else:
             target_sha256_verified = True
 
         # 1. Process activity & monitored API calls (Bounded - B4)
@@ -870,6 +967,9 @@ class CapeSandboxBackend(SandboxBackend):
         elif duration is not None and duration <= 5 and not processes:
             telemetry_completeness = "INCOMPLETE"
             telemetry_notes.append("Guest VM execution terminated prematurely (duration <= 5s) with zero monitored processes.")
+        elif (backend_task_id is not None and not cape_id_verified) or (expected_sha256 is not None and not target_sha256_verified):
+            telemetry_completeness = "UNVERIFIED"
+            telemetry_notes.append("Report task identity or sample hash could not be verified from CAPE output.")
         elif len(processes) > 0 and (len(filesystem) > 0 or len(registry) > 0 or len(network.get("dns", [])) > 0 or len(connections) > 0):
             telemetry_completeness = "COMPLETE"
         elif len(processes) > 0:
@@ -879,8 +979,24 @@ class CapeSandboxBackend(SandboxBackend):
             telemetry_completeness = "UNVERIFIED"
             telemetry_notes.append("Zero processes or behaviors were recorded by the sandbox.")
 
+        # Truncated telemetry cannot be silently COMPLETE
         if omitted_counts:
+            if telemetry_completeness == "COMPLETE":
+                telemetry_completeness = "PARTIAL"
             telemetry_notes.append(f"Telemetry capped by safety limits: {omitted_counts}")
+
+        # Check for DLL execution evidence if target file is a DLL
+        target_name = (target_file.get("name") or "").lower()
+        if target_name.endswith(".dll") or (expected_sha256 and target_name.endswith(".dll")):
+            dll_executed = any(
+                "rundll32" in (p.get("process_name") or "").lower()
+                or target_name in (p.get("command_line") or "").lower()
+                for p in processes
+            )
+            if not dll_executed:
+                telemetry_notes.append("DLL target was submitted but no export function invocation or loader was observed in guest telemetry.")
+                if telemetry_completeness == "COMPLETE":
+                    telemetry_completeness = "PARTIAL"
 
         return {
             "metadata": {

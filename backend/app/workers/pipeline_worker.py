@@ -91,6 +91,51 @@ class PipelineWorker:
                 self.db.commit()
                 return analysis
 
+            # 1.1 File intake integrity and verified quarantine hash
+            sample_quarantine_path = Path(sample.quarantine_path)
+            if not sample_quarantine_path.is_file():
+                safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                analysis.error_message = f"Quarantined binary file not found at {sample_quarantine_path}."
+                analysis.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return analysis
+
+            import hashlib
+            hasher = hashlib.sha256()
+            with open(sample_quarantine_path, "rb") as f:
+                while chunk := f.read(65536):
+                    hasher.update(chunk)
+            disk_sha = hasher.hexdigest().lower()
+            if disk_sha != (sample.sha256 or "").lower():
+                safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                analysis.error_message = f"Quarantine integrity failure: file SHA-256 ({disk_sha}) does not match registered sample hash ({sample.sha256})."
+                analysis.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return analysis
+
+            # 1.2 PE format and security policy checks
+            pe_meta = sample.pe_metadata or {}
+            is_pe = bool(
+                sample.is_pe
+                or pe_meta.get("is_valid_pe", False)
+                or (sample.file_name.lower().endswith((".exe", ".dll", ".bin")) and sample_quarantine_path.read_bytes()[:2] == b"MZ")
+            )
+            if not is_pe:
+                safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                analysis.error_message = f"Unsupported file type: sample '{sample.file_name}' is not a valid Windows PE binary."
+                analysis.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return analysis
+
+            subsystem = str(pe_meta.get("subsystem", "")).lower()
+            is_driver = "native" in subsystem or "driver" in subsystem or sample.file_name.lower().endswith(".sys")
+            if is_driver:
+                safe_update_status(analysis, self.db, AnalysisStatus.BLOCKED_BY_POLICY)
+                analysis.error_message = "Safety Policy Violation: Kernel driver (.sys / native subsystem) execution is disabled."
+                analysis.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return analysis
+
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
                 analysis.completed_at = datetime.now(timezone.utc)
@@ -108,31 +153,46 @@ class PipelineWorker:
                 self.db.commit()
                 return analysis
 
-            # 2.5 Automatic Deep Static Analysis using Ghidra (Phase B3)
-            # Ensure static analysis record exists or trigger analysis if Ghidra is available
+            # 2.5 Sequential Deep Static Analysis using Ghidra
+            # Runs sequentially before dynamic analysis to prevent resource contention.
             from app.models.static_analysis import StaticAnalysisRecord
             from app.schemas.static_analysis import (
                 StaticAnalysisResult,
                 StaticAnalysisProvenance,
                 StaticAnalysisTruncation,
             )
+            from app.services.static_analysis.selector import select_static_records, USABLE_STATIC_STATUSES
             from app.services.static_analysis.worker import static_worker_manager
 
-            existing_static = (
-                self.db.query(StaticAnalysisRecord)
-                .filter(StaticAnalysisRecord.sample_id == sample.id)
-                .order_by(StaticAnalysisRecord.created_at.desc())
-                .first()
+            sel_static = select_static_records(
+                db=self.db,
+                sample_id=sample.id,
+                sample_sha256=sample.sha256,
+                requested_analysis_id=analysis.id,
+                prefer_usable_over_active=True,
             )
 
-            if existing_static is None:
+            # Reuse a static record ONLY when valid and usable (COMPLETED or PARTIAL with matching SHA-256)
+            if sel_static.usable_record is not None and sel_static.usable_record.status in USABLE_STATIC_STATUSES:
+                pass
+            else:
                 if getattr(settings, "GHIDRA_ENABLED", False) and getattr(settings, "GHIDRA_HOME", ""):
                     try:
-                        static_worker_manager.submit_job(
+                        job_rec = static_worker_manager.submit_job(
                             db=self.db,
                             sample=sample,
                             analysis_id=analysis.id,
                         )
+                        # Wait synchronously for Ghidra to finish so stages execute strictly sequentially
+                        if static_worker_manager._active_future is not None:
+                            try:
+                                ghidra_timeout = min(
+                                    float(analysis.timeout_seconds),
+                                    float(getattr(settings, "GHIDRA_TIMEOUT_SECONDS", 120))
+                                )
+                                static_worker_manager._active_future.result(timeout=ghidra_timeout)
+                            except TimeoutError:
+                                static_worker_manager.cancel_active()
                     except Exception:
                         pass
                 else:
@@ -166,7 +226,9 @@ class PipelineWorker:
 
             # 3. RUNNING (Detonation / Sandbox execution phase)
             safe_update_status(analysis, self.db, AnalysisStatus.RUNNING)
-            sample_quarantine_path = Path(sample.quarantine_path)
+
+            # Define absolute monotonic deadline across polling, report collection, and artifacts
+            overall_deadline = time.monotonic() + float(analysis.timeout_seconds)
 
             # Check backend type & enforce second-layer safety gate
             if analysis.backend_type == SandboxBackendType.CAPE.value:
@@ -188,8 +250,8 @@ class PipelineWorker:
                 from app.services.sandbox.cape import CapeSandboxBackend
                 sandbox = CapeSandboxBackend()
 
-                # Readiness check before sample submission
-                readiness = sandbox.check_readiness()
+                # Server-side readiness check immediately before CAPE submission
+                readiness = sandbox.check_readiness(timeout=2.0)
                 if not readiness.get("ready"):
                     safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
                     err_msg = f"CAPE backend readiness check failed: {readiness.get('error')}"
@@ -197,6 +259,11 @@ class PipelineWorker:
                     analysis.completed_at = datetime.now(timezone.utc)
                     self.db.commit()
                     # Preserve static analysis & triage findings in structured report
+                    try:
+                        from app.services.evidence_correlation.service import EvidenceCorrelationService
+                        EvidenceCorrelationService(self.db).compute_and_persist(analysis.id, triggered_automatically=True)
+                    except Exception:
+                        pass
                     try:
                         from app.schemas.report import RiskAssessment
                         safe_risk = RiskAssessment(score=0, level="Inconclusive / Incomplete", confidence=0.0)
@@ -210,8 +277,7 @@ class PipelineWorker:
                         pass
                     return analysis
 
-                # Translate only explicitly supported, operator-controlled parameters to CAPE request (A1)
-                # Never blindly forward internal planning fields (requested_artifacts, telemetry_focus)
+                # Translate only explicitly supported, operator-controlled parameters to CAPE request
                 cape_transport_options: Dict[str, Any] = {}
                 if getattr(settings, "CAPE_DEFAULT_MACHINE", ""):
                     cape_transport_options["machine"] = settings.CAPE_DEFAULT_MACHINE
@@ -220,8 +286,7 @@ class PipelineWorker:
                 if analysis.profile == "ransomware_focus":
                     cape_transport_options["enforce_timeout"] = "1"
 
-                # Automatic package selection (Phase B4)
-                pe_meta = sample.pe_metadata or {}
+                # Automatic package selection (exe vs dll)
                 is_dll = pe_meta.get("is_dll", False) or sample.file_name.lower().endswith(".dll")
                 if is_dll:
                     cape_transport_options["package"] = "dll"
@@ -237,10 +302,9 @@ class PipelineWorker:
                 analysis.external_task_id = backend_task_id
                 self.db.commit()
 
-                # Poll status until report is ready or timeout (A4 - Monotonic deadline)
-                poll_deadline = time.monotonic() + analysis.timeout_seconds + 30
+                # Poll status until report is ready or overall monotonic deadline expires
                 cape_ready = False
-                while time.monotonic() < poll_deadline:
+                while time.monotonic() < overall_deadline:
                     if self._is_cancelled():
                         sandbox.cancel_task(backend_task_id)
                         safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
@@ -330,7 +394,15 @@ class PipelineWorker:
             # 4. COLLECTING
             safe_update_status(analysis, self.db, AnalysisStatus.COLLECTING)
             if analysis.backend_type == SandboxBackendType.CAPE.value:
-                remaining_time = max(10.0, poll_deadline - time.monotonic())
+                remaining_time = overall_deadline - time.monotonic()
+                if remaining_time <= 0:
+                    sandbox.cancel_task(backend_task_id)
+                    safe_update_status(analysis, self.db, AnalysisStatus.TIMED_OUT)
+                    analysis.error_message = f"Monotonic deadline expired before report collection for task {backend_task_id}."
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    return analysis
+
                 raw_results = sandbox.collect_results(
                     backend_task_id,
                     expected_sha256=sample.sha256,
@@ -346,8 +418,10 @@ class PipelineWorker:
                     analysis.replay_scenario_id = resolved_scen
                     self.db.commit()
 
-            artifacts_dir = settings.ARTIFACTS_DIR / analysis.id
-            sandbox.generate_artifacts(backend_task_id, artifacts_dir)
+            # Bound artifact downloads within remaining deadline
+            if time.monotonic() < overall_deadline:
+                artifacts_dir = settings.ARTIFACTS_DIR / analysis.id
+                sandbox.generate_artifacts(backend_task_id, artifacts_dir)
 
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
@@ -379,6 +453,17 @@ class PipelineWorker:
                 self.db.commit()
                 return analysis
 
+            # 6.5 EVIDENCE CORRELATION (Executed sequentially BEFORE report generation)
+            try:
+                from app.services.evidence_correlation.service import EvidenceCorrelationService
+                EvidenceCorrelationService(self.db).compute_and_persist(
+                    analysis_id=analysis.id,
+                    triggered_automatically=True,
+                )
+            except Exception as e:
+                # Correlation failure is recorded without blocking reporting
+                pass
+
             # 7. AI OBSERVATION EVALUATION (Evaluates Real Findings & Telemetry Gaps)
             events = analysis.events or []
             proc_events = [e for e in events if e.category == "process"]
@@ -396,7 +481,23 @@ class PipelineWorker:
             }
             # AI Evaluates telemetry and post-detection findings with policy enforcement
             follow_up, follow_up_validation = evaluator.evaluate_observations(analysis, telemetry_summary)
-            # The follow-up is classified as an advisory recommendation only (no unexecuted second pass is claimed)
+
+            # 7.5 EVIDENCE-GROUNDED MALWARE CLASSIFICATION (Runs before final report generation)
+            classification_res = None
+            try:
+                from app.services.classification.engine import MalwareClassificationEngine
+                classification_res = MalwareClassificationEngine(self.db).classify(
+                    analysis_id=analysis.id,
+                    sample_sha256=sample.sha256 if sample else "Unknown",
+                    findings=findings,
+                    events=events,
+                    pe_metadata=sample.pe_metadata if sample else {},
+                    is_pe=sample.is_pe if sample else True,
+                    telemetry_completeness=telemetry_comp,
+                    is_replay=(analysis.backend_type == "replay"),
+                )
+            except Exception:
+                pass
 
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
@@ -404,7 +505,7 @@ class PipelineWorker:
                 self.db.commit()
                 return analysis
 
-            # 8. REPORTING
+            # 8. FINAL INTELLIGENCE REPORTING (Includes complete upstream static, dynamic, & correlation evidence)
             safe_update_status(analysis, self.db, AnalysisStatus.REPORTING)
             reporter = ReportGenerator(self.db)
             raw_env = raw_results.get("metadata", {}).get("environment", {}) if "raw_results" in locals() and raw_results else {}
@@ -422,29 +523,8 @@ class PipelineWorker:
                 ai_summary=None,
                 ai_follow_up=follow_up.model_dump(),
                 env_metadata=raw_env,
+                malware_classification=classification_res,
             )
-
-            # Optional deterministic static/dynamic correlation post-processing
-            # ONLY when verified usable static evidence already exists (never spawns Ghidra/CAPE/OpenCode).
-            try:
-                if sample is not None:
-                    from app.services.evidence_correlation.service import EvidenceCorrelationService
-                    from app.services.static_analysis.selector import select_static_records
-
-                    sel_static = select_static_records(
-                        db=self.db,
-                        sample_id=sample.id,
-                        sample_sha256=sample.sha256,
-                        requested_analysis_id=analysis.id,
-                        prefer_usable_over_active=True,
-                    )
-                    if sel_static.usable_record is not None:
-                        EvidenceCorrelationService(self.db).compute_and_persist(
-                            analysis_id=analysis.id,
-                            triggered_automatically=True,
-                        )
-            except Exception:
-                pass
 
             # Re-read status under lock to avoid race conditions with concurrent cancellation
             if self._is_cancelled():

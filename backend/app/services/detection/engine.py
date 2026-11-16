@@ -250,8 +250,8 @@ class DetectionEngine:
                                 thread_evs.append(ev)
 
                         # Sequence requirement:
-                        # (Remote Thread AND (Alloc OR Write)) OR (Remote Alloc AND Remote Write)
-                        # All targeting the same remote process!
+                        # Remote thread execution MUST follow remote memory allocation or modification.
+                        # Remote allocation/write alone without thread creation is memory staging, NOT confirmed injection execution.
                         matched_seq = []
                         if thread_evs and (alloc_evs or write_evs):
                             for th in thread_evs:
@@ -265,16 +265,6 @@ class DetectionEngine:
                                         if delta_sec > 60.0:  # Distant events (> 60s apart, likely unrelated or PID reuse)
                                             continue
                                     matched_seq.extend([th.id, mem.id])
-                        elif alloc_evs and write_evs:
-                            for al in alloc_evs:
-                                al_time = al.timestamp
-                                for wr in write_evs:
-                                    wr_time = wr.timestamp
-                                    if al_time is not None and wr_time is not None:
-                                        delta_sec = abs((wr_time - al_time).total_seconds())
-                                        if delta_sec > 60.0:
-                                            continue
-                                    matched_seq.extend([al.id, wr.id])
 
                         if matched_seq:
                             matched_event_ids.extend(matched_seq)

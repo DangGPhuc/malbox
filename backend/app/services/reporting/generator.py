@@ -25,6 +25,7 @@ class ReportGenerator:
         ai_summary: str = "",
         ai_follow_up: dict = None,
         env_metadata: Optional[Dict[str, Any]] = None,
+        malware_classification: Optional[Any] = None,
     ) -> AnalysisReport:
         analysis = self.db.query(Analysis).filter(Analysis.id == analysis_id).first()
         if not analysis:
@@ -215,17 +216,20 @@ class ReportGenerator:
                 })
 
         # Deterministic Malware Taxonomy Classification (Phase C)
-        from app.services.classification.engine import MalwareClassificationEngine
-        classification_res = MalwareClassificationEngine(self.db).classify(
-            analysis_id=analysis_id,
-            sample_sha256=sample.sha256 if sample else "Unknown",
-            findings=findings_db,
-            events=analysis.events or [],
-            pe_metadata=sample.pe_metadata if sample else {},
-            is_pe=sample.is_pe if sample else True,
-            telemetry_completeness=resolved_completeness,
-            is_replay=is_replay,
-        )
+        if malware_classification is not None:
+            classification_res = malware_classification
+        else:
+            from app.services.classification.engine import MalwareClassificationEngine
+            classification_res = MalwareClassificationEngine(self.db).classify(
+                analysis_id=analysis_id,
+                sample_sha256=sample.sha256 if sample else "Unknown",
+                findings=findings_db,
+                events=analysis.events or [],
+                pe_metadata=sample.pe_metadata if sample else {},
+                is_pe=sample.is_pe if sample else True,
+                telemetry_completeness=resolved_completeness,
+                is_replay=is_replay,
+            )
 
         report_payload = FullReportSchema(
             analysis_id=analysis_id,
