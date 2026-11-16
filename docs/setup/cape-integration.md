@@ -108,17 +108,19 @@ In your Malbox `.env` file, configure the following:
 # Enable Live Execution Gate (requires explicit operator token)
 MALBOX_LIVE_MODE_ENABLED=true
 MALBOX_DEFAULT_SANDBOX_BACKEND=cape
+# Generate high-entropy operator token:
+# openssl rand -hex 32
 MALBOX_OPERATOR_TOKEN=your-random-high-entropy-token-min-32-chars
 
-# CAPE API Endpoints
+# CAPE API Endpoints (default port 8008 avoids collision with backend 8000)
 MALBOX_CAPE_API_URL=http://127.0.0.1:8008
 MALBOX_CAPE_API_TOKEN=your-cape-bearer-token-if-configured
-MALBOX_CAPE_TIMEOUT_SECONDS=120
+MALBOX_CAPE_TIMEOUT_SECONDS=300
 ```
 
 Verify readiness using the Doctor CLI:
 ```bash
-./scripts/malbox doctor
+./malbox doctor --check
 ```
 If CAPE is online and responsive, the doctor output will confirm:
 `[PASS] Optional: CAPE Sandbox: CAPE Sandbox READY at http://127.0.0.1:8008 (version: 2.4-CAPE).`

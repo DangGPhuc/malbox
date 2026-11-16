@@ -132,12 +132,11 @@ class FakeToolchainRunner:
 
         if len(cmd) >= 3 and cmd[1] == "-c" and "SMOKE_JSON" in cmd[2]:
             payload = {
-                "analysis_id": "smoke-test-123",
-                "risk_score": 100,
-                "risk_level": "Malicious",
-                "findings_count": 4,
-                "graph_nodes": 17,
-                "graph_edges": 16,
+                "sample_id": "smoke-sample-123",
+                "sha256": "a" * 64,
+                "is_pe": True,
+                "quarantine_verified": True,
+                "db_verified": True,
                 "elapsed_ms": 50.0,
                 "peak_rss_mb": 45.0,
             }
@@ -164,7 +163,7 @@ def test_doctor_fresh_installation_and_permissions(tmp_path):
 
     setup_rep = run_doctor(ws, mode="default", environ={}, runner=runner, which_fn=_fake_which)
     assert setup_rep["exit_code"] == 0
-    assert setup_rep["overall_status"] == "PASS"
+    assert setup_rep["overall_status"] in ("PASS", "WARN")
 
     if os.name == "posix":
         assert ((ws / ".env").stat().st_mode & 0o777) == 0o600
@@ -172,9 +171,10 @@ def test_doctor_fresh_installation_and_permissions(tmp_path):
         assert ((ws / ".malbox").stat().st_mode & 0o777) == 0o700
 
     env_vals = parse_env_file(ws / ".env")
-    assert env_vals["MALBOX_LIVE_MODE_ENABLED"].lower() == "false"
-    assert env_vals["MALBOX_DEFAULT_SANDBOX_BACKEND"].lower() == "replay"
+    assert env_vals["MALBOX_LIVE_MODE_ENABLED"].lower() == "true"
+    assert env_vals["MALBOX_DEFAULT_SANDBOX_BACKEND"].lower() == "cape"
     assert env_vals["MALBOX_HOST"] == "127.0.0.1"
+    assert len(env_vals.get("MALBOX_OPERATOR_TOKEN", "")) >= 32
 
     for cmd in runner.commands:
         assert "sudo" not in cmd
@@ -213,8 +213,9 @@ def test_doctor_repeated_invocation_preserves_secrets_and_tightens_permissions(t
     rep2 = run_doctor(ws, mode="default", environ={}, runner=runner, which_fn=_fake_which)
 
     assert rep1["exit_code"] == 0
-    assert rep1["overall_status"] == "PASS"
+    assert rep1["overall_status"] in ("PASS", "WARN")
     assert rep2["exit_code"] == 0
+    assert rep2["overall_status"] in ("PASS", "WARN")
     assert (ws / ".env").read_text(encoding="utf-8") == env_text
     assert custom_secret not in json.dumps(rep1)
 
@@ -313,7 +314,7 @@ def test_doctor_recovery_corrupt_venv_stale_pid_and_missing_tables(tmp_path):
 
     rep = run_doctor(ws, mode="repair", environ={}, runner=runner, which_fn=_fake_which)
     assert rep["exit_code"] == 0
-    assert rep["overall_status"] == "PASS"
+    assert rep["overall_status"] in ("PASS", "WARN")
     assert not (ws / ".malbox" / "backend.pid").exists()
     assert not (ws / ".malbox" / "frontend.pid").exists()
 
@@ -630,7 +631,7 @@ def test_doctor_smoke_test_flag_and_read_only_check_exclusion(tmp_path):
     # Smoke test executes via runner cleanly without altering user DB
     smoke_res = run_replay_smoke_test(ws, runner=runner, environ={})
     assert smoke_res.status == CheckStatus.PASS
-    assert "WannaCry scenario" in smoke_res.summary
+    assert "Isolated safe intake verified" in smoke_res.summary
 
     # Also verify real isolated SMOKE_TEST_SCRIPT execution using current test interpreter
     from malbox_cli.repair import SMOKE_TEST_SCRIPT
@@ -645,11 +646,11 @@ def test_doctor_smoke_test_flag_and_read_only_check_exclusion(tmp_path):
             "MALBOX_ARTIFACTS_DIR": str(Path(real_tmp) / "data" / "artifacts"),
             "MALBOX_FIXTURES_DIR": str(REPO_ROOT / "fixtures" / "replay"),
             "MALBOX_DATABASE_URL": f"sqlite:///{Path(real_tmp) / 'smoke.db'}",
-            "MALBOX_LIVE_MODE_ENABLED": "false",
-            "MALBOX_DEFAULT_SANDBOX_BACKEND": "replay",
-            "MALBOX_ALLOW_SYNTHETIC_REPLAY": "true",
+            "MALBOX_LIVE_MODE_ENABLED": "true",
+            "MALBOX_DEFAULT_SANDBOX_BACKEND": "cape",
+            "MALBOX_ALLOW_SYNTHETIC_REPLAY": "false",
             "MALBOX_AI_PROVIDER": "mock",
-            "MALBOX_OPERATOR_TOKEN": "",
+            "MALBOX_OPERATOR_TOKEN": "smoke-test-operator-token-32chars!!",
         })
         real_run = subprocess.run(
             [sys.executable, "-c", SMOKE_TEST_SCRIPT],

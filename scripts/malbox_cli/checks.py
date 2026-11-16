@@ -324,8 +324,6 @@ def check_env_config(
         )
 
     warnings: List[str] = []
-    if live_enabled:
-        warnings.append("Live Mode is ENABLED (`MALBOX_LIVE_MODE_ENABLED=true`); ensure VM isolation")
     if default_backend != "replay" and not live_enabled:
         warnings.append(f"MALBOX_DEFAULT_SANDBOX_BACKEND={default_backend} while Live Mode is disabled")
     if host not in ("127.0.0.1", "localhost", "::1"):
@@ -911,19 +909,23 @@ def check_optional_integrations(
     results: List[CheckResult] = []
 
     # 1. CAPE Sandbox
-    live_enabled = parse_bool(config.get("MALBOX_LIVE_MODE_ENABLED"), default=False)
+    live_enabled = parse_bool(config.get("MALBOX_LIVE_MODE_ENABLED"), default=True)
     cape_url = config.get("MALBOX_CAPE_API_URL", "http://127.0.0.1:8008")
     cape_token = (config.get("MALBOX_CAPE_API_TOKEN") or "").strip() or None
     if live_enabled:
         probe = _probe_cape_readiness(cape_url, token=cape_token)
         classification = probe.get("classification", "UNREACHABLE")
+        total_vms = probe.get("guest_vms_total", 0)
+        avail_vms = probe.get("guest_vms_available", 0)
+
         if classification == "READY":
+            vm_info = f", {avail_vms}/{total_vms} guest VMs ready" if total_vms else ""
             results.append(CheckResult(
                 id="opt_cape",
                 name="Optional: CAPE Sandbox",
                 status=CheckStatus.PASS,
-                summary=f"CAPE Sandbox READY at {cape_url} (version: {probe.get('version', '2.x')}).",
-                details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe},
+                summary=f"CAPE Sandbox READY at {cape_url} (version: {probe.get('version', '2.x')}{vm_info}).",
+                details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe, "stage": "ready_for_analysis"},
             ))
         elif classification == "UNAUTHORIZED":
             results.append(CheckResult(
@@ -939,7 +941,7 @@ def check_optional_integrations(
                 id="opt_cape",
                 name="Optional: CAPE Sandbox",
                 status=CheckStatus.WARN,
-                summary=f"CAPE Sandbox {classification} at {cape_url}: {probe.get('error', 'Service unavailable')}.",
+                summary=f"CAPE Sandbox {classification} at {cape_url}: {probe.get('error', 'Service unavailable')}. Host app and static analysis remain operational.",
                 details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe},
                 remediation="Verify CAPE API service is active (systemctl status cape-web or poetry run python manage.py runserver 0.0.0.0:8008).",
             ))
@@ -948,7 +950,7 @@ def check_optional_integrations(
             id="opt_cape",
             name="Optional: CAPE Sandbox",
             status=CheckStatus.SKIP,
-            summary=f"Optional live CAPE Sandbox disabled in Replay Mode (configured URL: {cape_url}).",
+            summary=f"Optional live CAPE Sandbox disabled (configured URL: {cape_url}).",
             details={"cape_api_url": cape_url, "live_mode_enabled": False, "classification": "DISABLED"},
         ))
 

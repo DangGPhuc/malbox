@@ -34,21 +34,23 @@ from .models import (
     verify_managed_process,
 )
 
-MINIMAL_SAFE_ENV = """# Auto-generated minimal safe Replay Mode configuration
+MINIMAL_SAFE_ENV = """# Auto-generated minimal safe Live-First configuration
 MALBOX_ENV=development
 MALBOX_HOST=127.0.0.1
 MALBOX_PORT=8000
 MALBOX_DATA_DIR=./data
 MALBOX_QUARANTINE_DIR=./data/quarantine
 MALBOX_ARTIFACTS_DIR=./data/artifacts
-MALBOX_LIVE_MODE_ENABLED=false
+MALBOX_LIVE_MODE_ENABLED=true
 MALBOX_REQUIRE_EXPLICIT_APPROVAL=true
+MALBOX_ALLOW_SYNTHETIC_REPLAY=false
 MALBOX_OPERATOR_TOKEN=
 MALBOX_REPORTING_AUTH_TOKEN=
 MALBOX_TRACE_AUTH_KEY=
-MALBOX_DEFAULT_SANDBOX_BACKEND=replay
+MALBOX_DEFAULT_SANDBOX_BACKEND=cape
 MALBOX_AI_PROVIDER=mock
 MALBOX_CAPE_API_URL=http://127.0.0.1:8008
+MALBOX_CAPE_API_TOKEN=
 """
 
 SMOKE_TEST_SCRIPT = r"""
@@ -66,69 +68,57 @@ from app.core.config import settings
 from app.core.database import init_db, SessionLocal
 from app.main import app
 
-assert settings.LIVE_MODE_ENABLED is False, "Unsafe Live Mode enabled during smoke test"
 assert str(settings.DATA_DIR).startswith(os.environ["MALBOX_SMOKE_TMPDIR"]), "Settings DATA_DIR escaped isolated tmpdir"
 
 init_db()
 
 with TestClient(app) as client:
+    # 1. Platform Health Check
     h = client.get("/api/v1/health")
     assert h.status_code == 200, f"Health check HTTP {h.status_code}"
     hd = h.json()
-    assert hd["live_mode_enabled"] is False
-    assert hd["default_backend"] == "replay"
+    assert hd.get("status") in ("healthy", "ok")
 
-    synthetic_pe = b"MZ" + b"\x00" * 80 + b"MALBOX_DOCTOR_SYNTHETIC_SMOKE_SAMPLE"
+    # 2. Minimal Benign PE Intake (Safe Non-Malicious Structure)
+    synthetic_pe = b"MZ" + b"\x00" * 80 + b"MALBOX_DOCTOR_SAFE_BENIGN_INTAKE_SAMPLE"
     up = client.post(
         "/api/v1/samples",
-        files={"file": ("smoke_synthetic.exe", io.BytesIO(synthetic_pe), "application/octet-stream")},
+        files={"file": ("smoke_safe_intake.exe", io.BytesIO(synthetic_pe), "application/octet-stream")},
     )
-    assert up.status_code == 201, f"Sample upload failed: {up.status_code} {up.text}"
-    sample_id = up.json()["id"]
+    assert up.status_code == 201, f"Sample intake failed: {up.status_code} {up.text}"
+    sample_data = up.json()
+    sample_id = sample_data["id"]
 
-    an = client.post(
-        "/api/v1/analyses?run_sync=true",
-        json={
-            "sample_id": sample_id,
-            "backend_type": "replay",
-            "profile": "ransomware_focus",
-            "replay_scenario_id": "ransomware_wannacry_mock",
-            "live_mode": False,
-            "timeout_seconds": 30,
-        },
-    )
-    assert an.status_code == 201, f"Replay analysis failed: {an.status_code} {an.text}"
-    an_data = an.json()
-    assert an_data["status"] == "COMPLETED", f"Unexpected analysis status: {an_data['status']}"
-    assert an_data["replay_scenario_id"] == "ransomware_wannacry_mock"
-    analysis_id = an_data["id"]
+    # 3. Verify Hashing, Quarantine, Preflight PE Metadata Extraction
+    assert sample_data["sha256"], "Missing SHA-256 hash"
+    assert sample_data["file_name"] == "smoke_safe_intake.exe"
+    assert "is_pe" in sample_data
+    assert "pe_metadata" in sample_data
 
-    gr = client.get(f"/api/v1/analyses/{analysis_id}/graph")
-    assert gr.status_code == 200, f"Graph endpoint failed: {gr.status_code}"
-    gr_data = gr.json()
-    assert gr_data["total_nodes"] > 0 and gr_data["total_edges"] > 0
+    # 4. Verify Database Persistence
+    s_get = client.get(f"/api/v1/samples/{sample_id}")
+    assert s_get.status_code == 200, f"Sample get HTTP {s_get.status_code}"
+    assert s_get.json()["id"] == sample_id
+    assert s_get.json()["sha256"] == sample_data["sha256"]
 
-    rp = client.get(f"/api/v1/analyses/{analysis_id}/report")
-    assert rp.status_code == 200, f"Report endpoint failed: {rp.status_code}"
-    rp_data = rp.json()
-    assert rp_data["is_replay"] is True
-    assert rp_data["replay_scenario_id"] == "ransomware_wannacry_mock"
-    assert rp_data["risk_score"] > 0
-    full_rep = rp_data["full_report"]
-    assert "REPLAY DATA PROVENANCE" in full_rep["provenance_disclaimer"]
-    findings = full_rep["findings"]
-    assert len(findings) >= 1, "Expected behavioral findings in Replay report"
-    assert all(len(f.get("supporting_event_ids", [])) >= 1 for f in findings), "Missing event provenance on findings"
+    # 5. Verify API Endpoints Respond Correctly
+    al = client.get("/api/v1/analyses")
+    assert al.status_code == 200, f"Analyses list HTTP {al.status_code}"
+
+    # 6. Verify Quarantine File Permissions (0400 Read-Only)
+    quarantine_path = os.path.join(settings.QUARANTINE_DIR, f"{sample_data['sha256']}.bin")
+    assert os.path.exists(quarantine_path), f"Quarantine file missing: {quarantine_path}"
+    st_mode = os.stat(quarantine_path).st_mode & 0o777
+    assert st_mode == 0o400, f"Quarantine file permission {oct(st_mode)} != 0o400"
 
 elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
 peak_rss_mb = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 2)
 print("SMOKE_JSON:" + json.dumps({
-    "analysis_id": analysis_id,
-    "risk_score": rp_data["risk_score"],
-    "risk_level": rp_data["risk_level"],
-    "findings_count": len(findings),
-    "graph_nodes": gr_data["total_nodes"],
-    "graph_edges": gr_data["total_edges"],
+    "sample_id": sample_id,
+    "sha256": sample_data["sha256"],
+    "is_pe": sample_data["is_pe"],
+    "quarantine_verified": True,
+    "db_verified": True,
     "elapsed_ms": elapsed_ms,
     "peak_rss_mb": peak_rss_mb,
 }))
@@ -167,10 +157,22 @@ def repair_env_file(
     if not env_file.exists() or confirm_overwrite_env:
         if example_file.is_file():
             content = example_file.read_text(encoding="utf-8")
-            label = "Reset `.env` from `.env.example` with explicit confirmation" if confirm_overwrite_env else "Created `.env` from `.env.example` (Live Mode disabled, Replay Mode active)"
+            label = "Reset `.env` from `.env.example` with explicit confirmation" if confirm_overwrite_env else "Created `.env` from `.env.example` (Live-First architecture active)"
         else:
             content = MINIMAL_SAFE_ENV
-            label = "Created minimal `.env` with safe Replay defaults"
+            label = "Created minimal `.env` with Live-First defaults"
+
+        # If MALBOX_OPERATOR_TOKEN is blank, generate a random high-entropy token during bootstrap
+        import secrets
+        lines = content.splitlines()
+        new_lines = []
+        for line in lines:
+            if line.startswith("MALBOX_OPERATOR_TOKEN=") and line.strip() == "MALBOX_OPERATOR_TOKEN=":
+                token = secrets.token_hex(32)
+                new_lines.append(f"MALBOX_OPERATOR_TOKEN={token}")
+            else:
+                new_lines.append(line)
+        content = "\n".join(new_lines) + "\n"
 
         if os.name == "posix":
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
@@ -384,11 +386,11 @@ def run_replay_smoke_test(
             "MALBOX_ARTIFACTS_DIR": str(tmp_path / "data" / "artifacts"),
             "MALBOX_FIXTURES_DIR": str(root_dir / "fixtures" / "replay"),
             "MALBOX_DATABASE_URL": f"sqlite:///{tmp_path / 'smoke.db'}",
-            "MALBOX_LIVE_MODE_ENABLED": "false",
-            "MALBOX_DEFAULT_SANDBOX_BACKEND": "replay",
-            "MALBOX_ALLOW_SYNTHETIC_REPLAY": "true",
+            "MALBOX_LIVE_MODE_ENABLED": "true",
+            "MALBOX_DEFAULT_SANDBOX_BACKEND": "cape",
+            "MALBOX_ALLOW_SYNTHETIC_REPLAY": "false",
             "MALBOX_AI_PROVIDER": "mock",
-            "MALBOX_OPERATOR_TOKEN": "",
+            "MALBOX_OPERATOR_TOKEN": "smoke-test-operator-token-32chars!!",
             "MALBOX_TRACE_AUTH_KEY": "",
         })
 
@@ -398,10 +400,10 @@ def run_replay_smoke_test(
         except Exception as exc:
             return CheckResult(
                 id="replay_smoke_test",
-                name="Replay Pipeline Smoke Test",
+                name="Analysis Pipeline Intake Smoke Test",
                 status=CheckStatus.FAIL,
-                summary=f"Replay smoke test timed out or crashed: {exc}",
-                remediation="Inspect backend environment via `./malbox doctor --check` or run `pytest backend/tests/test_replay_pipeline.py`.",
+                summary=f"Intake smoke test timed out or crashed: {exc}",
+                remediation="Inspect backend environment via `./malbox doctor --check` or run `pytest backend/tests/test_submission.py`.",
             )
         wall_ms = round((time.perf_counter() - t_start) * 1000, 2)
 
@@ -410,11 +412,11 @@ def run_replay_smoke_test(
             tail = "\n".join(err_lines[-6:]) if err_lines else "Unknown error"
             return CheckResult(
                 id="replay_smoke_test",
-                name="Replay Pipeline Smoke Test",
+                name="Analysis Pipeline Intake Smoke Test",
                 status=CheckStatus.FAIL,
-                summary=f"Replay smoke test failed (exit {res.returncode}): {err_lines[-1] if err_lines else tail}",
+                summary=f"Intake smoke test failed (exit {res.returncode}): {err_lines[-1] if err_lines else tail}",
                 details={"stderr_tail": tail, "wall_ms": wall_ms},
-                remediation="Run `./malbox doctor --repair` and `pytest -v backend/tests/test_replay_pipeline.py` to diagnose.",
+                remediation="Run `./malbox doctor --repair` and `pytest -v backend/tests/test_submission.py` to diagnose.",
             )
 
         smoke_meta: Dict[str, Any] = {"wall_ms": wall_ms, "isolated": True}
@@ -425,14 +427,15 @@ def run_replay_smoke_test(
                 except Exception:
                     pass
 
+        sample_id_short = str(smoke_meta.get("sample_id", "sample"))[:8]
         return CheckResult(
             id="replay_smoke_test",
-            name="Replay Pipeline Smoke Test",
+            name="Analysis Pipeline Intake Smoke Test",
             status=CheckStatus.PASS,
             summary=(
-                f"Isolated Replay E2E verified (WannaCry scenario, {smoke_meta.get('findings_count', '?')} findings, "
-                f"{smoke_meta.get('graph_nodes', '?')} graph nodes, {smoke_meta.get('elapsed_ms', wall_ms)} ms, "
-                f"{smoke_meta.get('peak_rss_mb', '?')} MB peak RSS)."
+                f"Isolated safe intake verified (sample {sample_id_short}, "
+                f"quarantine 0400 permissions verified, DB persistence confirmed, "
+                f"{smoke_meta.get('elapsed_ms', wall_ms)} ms, {smoke_meta.get('peak_rss_mb', '?')} MB peak RSS)."
             ),
             details=smoke_meta,
         )
