@@ -54,7 +54,11 @@ def build_behavior_graph(analysis_id: str, db: Session) -> BehaviorGraphResponse
     )
 
     # 2. Process Instance Nodes & Temporal Lifecycle Index
-    proc_events = [e for e in events if e.category == "process"]
+    # Exclude API call events so API invocations are never represented as process creation nodes
+    proc_events = [
+        e for e in events
+        if e.category == "process" and not (e.attributes or {}).get("is_api_call", False)
+    ]
     # Sort process events by timestamp to ensure deterministic ordering
     proc_events.sort(key=lambda e: (_to_comparable_dt(e.timestamp) or datetime.min))
 

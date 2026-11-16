@@ -59,6 +59,11 @@ def create_analysis(
             )
 
     elif payload.backend_type == SandboxBackendType.REPLAY:
+        if not getattr(settings, "ALLOW_SYNTHETIC_REPLAY", False):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Replay mode is deprecated and disabled in production. Live CAPE analysis is the default."
+            )
         if payload.live_mode:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

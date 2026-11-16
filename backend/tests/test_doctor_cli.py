@@ -647,6 +647,7 @@ def test_doctor_smoke_test_flag_and_read_only_check_exclusion(tmp_path):
             "MALBOX_DATABASE_URL": f"sqlite:///{Path(real_tmp) / 'smoke.db'}",
             "MALBOX_LIVE_MODE_ENABLED": "false",
             "MALBOX_DEFAULT_SANDBOX_BACKEND": "replay",
+            "MALBOX_ALLOW_SYNTHETIC_REPLAY": "true",
             "MALBOX_AI_PROVIDER": "mock",
             "MALBOX_OPERATOR_TOKEN": "",
         })

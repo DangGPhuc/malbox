@@ -29,6 +29,10 @@ SAFE_CUSTOM_REGEX = re.compile(r"^[a-zA-Z0-9_., -]{1,256}$")
 # No implicit machine tag for any analysis profile.
 DEFAULT_PROFILE_TAG_MAP: Dict[str, str] = {}
 
+MAX_REPORT_BYTES = 50 * 1024 * 1024  # 50 MB hard cap on CAPE JSON report
+MAX_ARTIFACT_BYTES = 100 * 1024 * 1024  # 100 MB hard cap on downloaded artifacts
+
+
 
 class CapeSandboxBackend(SandboxBackend):
     """
@@ -462,6 +466,18 @@ class CapeSandboxBackend(SandboxBackend):
                         )
 
                     if resp.status_code == 200:
+                        # Enforce bounded byte limits before full buffering
+                        cl_header = resp.headers.get("content-length") if hasattr(resp, "headers") and resp.headers else None
+                        if cl_header:
+                            try:
+                                if int(cl_header) > MAX_REPORT_BYTES:
+                                    raise ValueError(f"CAPE report exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes.")
+                            except (ValueError, TypeError) as e:
+                                if "exceeded" in str(e):
+                                    raise
+                        if hasattr(resp, "content") and resp.content and len(resp.content) > MAX_REPORT_BYTES:
+                            raise ValueError(f"CAPE report exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes.")
+
                         try:
                             cape_report = resp.json()
                         except Exception as e:
@@ -529,6 +545,8 @@ class CapeSandboxBackend(SandboxBackend):
             with httpx.Client(timeout=30.0, headers=self._get_headers()) as client:
                 resp = client.get(pcap_endpoint)
                 if resp.status_code == 200 and resp.content:
+                    if len(resp.content) > MAX_ARTIFACT_BYTES:
+                        raise ValueError(f"CAPE artifact exceeds maximum allowed limit of {MAX_ARTIFACT_BYTES} bytes.")
                     pcap_file = dest_dir / "traffic.pcap"
                     with open(pcap_file, "wb") as f:
                         f.write(resp.content)

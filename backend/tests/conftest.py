@@ -25,6 +25,7 @@ def setup_test_env(tmp_path_factory):
     settings.DATA_DIR = test_dir
     settings.QUARANTINE_DIR = test_dir / "quarantine"
     settings.ARTIFACTS_DIR = test_dir / "artifacts"
+    settings.ALLOW_SYNTHETIC_REPLAY = True
     settings.setup_directories()
 
 @pytest.fixture(scope="function")

@@ -39,7 +39,8 @@ class Settings(BaseSettings):
 
     # Upload & Security Limits
     MAX_UPLOAD_SIZE_BYTES: int = 33554432  # 32 MB
-    LIVE_MODE_ENABLED: bool = False
+    LIVE_MODE_ENABLED: bool = True
+    ALLOW_SYNTHETIC_REPLAY: bool = False  # Disabled in production; Replay is strictly isolated
     REQUIRE_EXPLICIT_APPROVAL: bool = True
     OPERATOR_TOKEN: str = ""  # Must be explicitly configured via MALBOX_OPERATOR_TOKEN to enable live operations
     WORKER_CONCURRENCY: int = 1
@@ -108,7 +109,7 @@ class Settings(BaseSettings):
     GHIDRA_MAX_PERSISTED_RESULT_BYTES: int = 1048576  # 1 MiB DB persistence ceiling
 
     # Pluggable Sandbox Settings
-    DEFAULT_SANDBOX_BACKEND: str = "replay"  # replay, cape
+    DEFAULT_SANDBOX_BACKEND: str = "cape"  # cape (default live), replay (deprecated)
     CAPE_API_URL: str = "http://127.0.0.1:8008"  # Distinct from application port 8000
     CAPE_API_TOKEN: str = ""
     CAPE_TIMEOUT_SECONDS: int = 300

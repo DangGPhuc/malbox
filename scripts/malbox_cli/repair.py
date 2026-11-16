@@ -386,6 +386,7 @@ def run_replay_smoke_test(
             "MALBOX_DATABASE_URL": f"sqlite:///{tmp_path / 'smoke.db'}",
             "MALBOX_LIVE_MODE_ENABLED": "false",
             "MALBOX_DEFAULT_SANDBOX_BACKEND": "replay",
+            "MALBOX_ALLOW_SYNTHETIC_REPLAY": "true",
             "MALBOX_AI_PROVIDER": "mock",
             "MALBOX_OPERATOR_TOKEN": "",
             "MALBOX_TRACE_AUTH_KEY": "",
