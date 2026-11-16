@@ -6,11 +6,20 @@ export interface HealthStatus {
   live_mode_enabled: boolean;
   default_backend: string;
   ai_provider: string;
+  ready_for_analysis?: boolean;
+  readiness_status?: string;
+  live_mode_configured?: boolean;
+  operator_auth_configured?: boolean;
   cape_reachable?: boolean;
+  cape_authenticated?: boolean;
   cape_version?: string;
+  guest_vms_total?: number;
+  guest_vms_available?: number;
   guest_vm_ready?: boolean;
+  network_isolation_verified?: boolean;
   ghidra_installed?: boolean;
   rules_loaded?: number;
+  readiness_details?: string;
 }
 
 export interface SectionInfo {

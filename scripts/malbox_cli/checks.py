@@ -341,14 +341,19 @@ def check_env_config(
             status=CheckStatus.WARN,
             summary=f".env present with safety warnings: {'; '.join(warnings)}.",
             details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
-            remediation="Run `./malbox doctor --repair` to tighten `.env` to `0600` (secrets untouched) and verify Replay Mode defaults.",
+            remediation="Run `./malbox doctor --repair` to tighten `.env` to `0600` (secrets untouched) and verify configuration defaults.",
         )
 
+    summary_text = (
+        "Live analysis configured securely (operator token active, localhost-bound, .env protected)."
+        if live_enabled
+        else "Safe analysis defaults active (Live Mode disabled, localhost-bound, .env protected)."
+    )
     return CheckResult(
         id="env_config",
         name="Configuration (.env) & Safety Policy",
         status=CheckStatus.PASS,
-        summary="Safe Replay Mode defaults active (Live Mode disabled, localhost-bound, .env protected).",
+        summary=summary_text,
         details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
     )
 
@@ -969,7 +974,7 @@ def check_optional_integrations(
                 id="opt_ghidra",
                 name="Optional: Ghidra Headless",
                 status=CheckStatus.WARN,
-                summary="MALBOX_GHIDRA_ENABLED=true, but Ghidra analyzeHeadless was not found (Replay Mode remains ready).",
+                summary="MALBOX_GHIDRA_ENABLED=true, but Ghidra analyzeHeadless was not found (Analysis pipeline remains operational).",
                 details={"ghidra_enabled": True, "ghidra_home": ghidra_home or None},
                 remediation="Install Ghidra and set MALBOX_GHIDRA_HOME, or set MALBOX_GHIDRA_ENABLED=false.",
             ))
@@ -978,7 +983,7 @@ def check_optional_integrations(
                 id="opt_ghidra",
                 name="Optional: Ghidra Headless",
                 status=CheckStatus.SKIP,
-                summary="Optional Ghidra not installed/configured (not required for Replay Mode).",
+                summary="Optional Ghidra not installed/configured (static disassembly will be skipped).",
                 details={"ghidra_enabled": False},
             ))
     elif not g_info["jdk_compatible"]:
@@ -989,7 +994,7 @@ def check_optional_integrations(
             summary=(
                 f"Ghidra {g_info['ghidra_version']} found at {g_info['ghidra_home'] or g_info['analyze_headless']}, "
                 f"but compatible JDK {g_info['required_java_major']}+ (with javac) is unavailable "
-                f"(detected Java={g_info['java_major'] or 'missing'}; Replay Mode unaffected)."
+                f"(detected Java={g_info['java_major'] or 'missing'}; static disassembly disabled)."
             ),
             details={**g_info, "ghidra_enabled": ghidra_enabled},
             remediation=f"Install OpenJDK {g_info['required_java_major']}+ JDK package (including javac) without running doctor with sudo.",
@@ -1006,7 +1011,7 @@ def check_optional_integrations(
             status=CheckStatus.WARN,
             summary=(
                 f"Ghidra {g_info['ghidra_version']} enabled, but required containment is unavailable: "
-                f"{', '.join(missing_parts)} (fail-closed; Replay Mode unaffected)."
+                f"{', '.join(missing_parts)} (fail-closed; static analysis disabled)."
             ),
             details={**g_info, "ghidra_enabled": True},
             remediation="Ensure bubblewrap and user systemd cgroup v2 delegation are active on this Linux host.",
@@ -1040,7 +1045,7 @@ def check_optional_integrations(
             id="opt_opencode",
             name="Optional: OpenCode CLI",
             status=CheckStatus.SKIP,
-            summary="Optional OpenCode CLI not installed (not required for Replay Mode).",
+            summary="Optional OpenCode CLI not installed (not required for standard analysis).",
         ))
 
     # 4. External AI Provider
@@ -1051,7 +1056,7 @@ def check_optional_integrations(
             id="opt_ai_provider",
             name="Optional: External AI Credentials",
             status=CheckStatus.SKIP,
-            summary="Using deterministic MockLLMProvider (no external API key required for Replay Mode).",
+            summary="Using deterministic MockLLMProvider (no external API key required for local reporting).",
             details={"ai_provider": ai_provider, "api_key_configured": ai_key_set},
         ))
     else:

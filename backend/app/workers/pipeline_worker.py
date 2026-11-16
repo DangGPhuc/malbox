@@ -290,8 +290,15 @@ class PipelineWorker:
                     self.db.commit()
                     return analysis
 
-            else:
-                # Replay backend
+            elif analysis.backend_type == SandboxBackendType.REPLAY.value:
+                if not getattr(settings, "ALLOW_SYNTHETIC_REPLAY", False):
+                    safe_update_status(analysis, self.db, AnalysisStatus.BLOCKED_BY_POLICY)
+                    analysis.error_message = "Replay execution blocked: synthetic replay is disabled in production."
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    return analysis
+
+                # Replay backend (strictly isolated for regression fixtures)
                 sandbox = ReplaySandboxBackend()
                 sandbox_options = {
                     "requested_artifacts": plan.requested_artifacts,
@@ -307,6 +314,12 @@ class PipelineWorker:
                 )
                 analysis.external_task_id = backend_task_id
                 self.db.commit()
+            else:
+                safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                analysis.error_message = f"Unsupported execution backend: {analysis.backend_type}"
+                analysis.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return analysis
 
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)

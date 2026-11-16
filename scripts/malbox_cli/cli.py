@@ -59,7 +59,7 @@ def _format_doctor_human(report: Dict[str, Any], verbose: bool = False) -> str:
         f"PASS={s['PASS']} WARN={s['WARN']} FAIL={s['FAIL']} SKIP={s['SKIP']}"
     )
     if report["exit_code"] == 0:
-        lines.append("Ready for Replay Mode. Run `./malbox start` to launch services.")
+        lines.append("Ready for analysis. Run `./malbox start` to launch services.")
     else:
         lines.append("Diagnostics reported failures. Review `[FAIL]` items above before starting.")
 
@@ -130,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # doctor
-    p_doc = sub.add_parser("doctor", help="Diagnose environment and safely bootstrap/repair Replay Mode")
+    p_doc = sub.add_parser("doctor", help="Diagnose environment and safely bootstrap/repair Malbox-AI")
     mode_grp = p_doc.add_mutually_exclusive_group()
     mode_grp.add_argument("--check", action="store_true", help="Read-only diagnostics (no modifications)")
     mode_grp.add_argument("--repair", action="store_true", help="Check and safely repair missing/broken setup")
@@ -141,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument(
         "--smoke-test",
         action="store_true",
-        help="Run an isolated end-to-end Replay smoke test (synthetic only; does not modify user data)",
+        help="Run an isolated end-to-end safe intake smoke test (does not detonate malware)",
     )
     p_doc.add_argument(
         "--overwrite-env",

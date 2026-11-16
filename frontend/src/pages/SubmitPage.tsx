@@ -33,9 +33,18 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
   const [health, setHealth] = useState<HealthStatus | null>(propHealth || null);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Operator token & safety approval
+  // Operator token & safety approval: scoped to active session only, never persistent in localStorage
   const [operatorToken, setOperatorToken] = useState<string>(() => {
-    return localStorage.getItem('malbox_operator_token') || '';
+    try {
+      localStorage.removeItem('malbox_operator_token');
+    } catch {
+      // ignore
+    }
+    try {
+      return sessionStorage.getItem('malbox_operator_session_token') || '';
+    } catch {
+      return '';
+    }
   });
   const [approvedByUser, setApprovedByUser] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -50,10 +59,17 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
 
   const handleOperatorTokenChange = (val: string) => {
     setOperatorToken(val);
-    localStorage.setItem('malbox_operator_token', val);
+    try {
+      sessionStorage.setItem('malbox_operator_session_token', val);
+    } catch {
+      // ignore
+    }
   };
 
   const handleFileProcess = async (selectedFile: File) => {
+    // Reset approval on sample change to require explicit analyst authorization for each binary
+    setApprovedByUser(false);
+
     // Validate file size (max 32MB)
     const MAX_FILE_SIZE = 32 * 1024 * 1024;
     if (selectedFile.size > MAX_FILE_SIZE) {
@@ -147,7 +163,10 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
     }
   };
 
-  const isCapeReady = (health?.live_mode_enabled ?? true) && (health?.cape_reachable ?? true);
+  // Truthful server-controlled readiness: unknown readiness is never treated as ready (fails closed)
+  const isCapeReady = Boolean(
+    health?.ready_for_analysis ?? (health?.live_mode_enabled && health?.cape_reachable && health?.guest_vm_ready)
+  );
 
   return (
     <div className="container" style={{ maxWidth: '860px', paddingBottom: '3rem' }}>
@@ -530,10 +549,10 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                 <>
                   <AlertTriangle size={16} color="var(--amber)" />
                   <span style={{ fontWeight: 600, color: 'var(--amber)' }}>
-                    CAPE Host Connecting — Static Pipeline Ready:
+                    CAPE Sandbox Not Ready — Static Pipeline Operational:
                   </span>
                   <span style={{ color: 'var(--text-secondary)' }}>
-                    Dynamic sandbox is currently unmonitored. Static decompilation will proceed.
+                    {health?.readiness_details || 'Live sandbox is currently unreachable or guest machines are unavailable. Static triage & Ghidra extraction will proceed safely.'}
                   </span>
                 </>
               )}

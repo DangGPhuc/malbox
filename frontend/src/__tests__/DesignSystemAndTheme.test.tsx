@@ -11,6 +11,7 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
     document.documentElement.removeAttribute('data-theme');
   });
 
@@ -50,6 +51,18 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
   });
 
   it('2: SubmitPage renders single-action file analysis workflow without synthetic replay dropdowns or demo buttons', async () => {
+    vi.spyOn(api, 'getHealth').mockResolvedValue({
+      status: 'healthy',
+      service: 'malbox-ai',
+      version: '0.2.2',
+      environment: 'development',
+      live_mode_enabled: true,
+      default_backend: 'cape',
+      ai_provider: 'mock',
+      ready_for_analysis: true,
+      cape_reachable: true,
+      guest_vm_ready: true,
+    });
     const onStarted = vi.fn();
     const createAnalysisSpy = vi.spyOn(api, 'createAnalysis').mockResolvedValue({
       id: 'ana-live-001',
@@ -378,10 +391,11 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
     const analyzeBtn = screen.getByRole('button', { name: /Analyze File/i });
     expect(analyzeBtn).toBeDisabled();
 
-    // Fill operator token and verify localStorage persistence
+    // Fill operator token and verify session storage (never long-lived localStorage)
     const tokenInput = screen.getByPlaceholderText(/Enter MALBOX_OPERATOR_TOKEN from .env/i);
     fireEvent.change(tokenInput, { target: { value: 'persisted-operator-token' } });
-    expect(localStorage.getItem('malbox_operator_token')).toBe('persisted-operator-token');
+    expect(sessionStorage.getItem('malbox_operator_session_token')).toBe('persisted-operator-token');
+    expect(localStorage.getItem('malbox_operator_token')).toBeNull();
 
     // Still disabled without explicit approval
     expect(analyzeBtn).toBeDisabled();

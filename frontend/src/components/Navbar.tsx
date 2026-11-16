@@ -382,12 +382,44 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             )}
 
-            {/* Health / Readiness Indicator */}
+            {/* Health / Truthful Readiness Indicator */}
             {health ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem' }}>
-                <span className={`pill-tag ${health.live_mode_enabled ? 'badge-clean' : 'badge-neutral'}`} style={{ fontSize: '0.7rem', textTransform: 'none' }}>
-                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: health.live_mode_enabled ? '#15803d' : '#888', display: 'inline-block' }} />
-                  {health.live_mode_enabled ? 'Live CAPE: Ready' : 'Live CAPE: Isolated'}
+                <span
+                  className={`pill-tag ${
+                    health.ready_for_analysis
+                      ? 'badge-clean'
+                      : health.cape_reachable
+                      ? 'badge-warning'
+                      : !health.live_mode_enabled
+                      ? 'badge-neutral'
+                      : 'badge-danger'
+                  }`}
+                  style={{ fontSize: '0.7rem', textTransform: 'none' }}
+                  title={health.readiness_details || undefined}
+                >
+                  <span
+                    style={{
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '50%',
+                      backgroundColor: health.ready_for_analysis
+                        ? '#15803d'
+                        : health.cape_reachable
+                        ? '#d97706'
+                        : !health.live_mode_enabled
+                        ? '#888'
+                        : '#dc2626',
+                      display: 'inline-block',
+                    }}
+                  />
+                  {health.ready_for_analysis
+                    ? 'Live CAPE: Ready'
+                    : health.cape_reachable
+                    ? 'Live CAPE: No Guests'
+                    : !health.live_mode_enabled
+                    ? 'Live CAPE: Disabled'
+                    : 'Live CAPE: Unreachable'}
                 </span>
               </div>
             ) : (

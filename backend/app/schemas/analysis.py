@@ -15,7 +15,7 @@ class AnalysisCreate(BaseModel):
     )
     timeout_seconds: int = Field(default=120, ge=10, le=600)
     live_mode: bool = Field(default=True, description="Enable live malware execution (requires sandbox infrastructure)")
-    approved_by_user: bool = Field(default=True, description="Explicit approval for live execution")
+    approved_by_user: bool = Field(default=False, description="Explicit approval for live execution")
     replay_scenario_id: Optional[str] = Field(
         default=None,
         description="Explicit replay scenario selection (e.g. ransomware_wannacry_mock, infostealer_redline_mock)"
@@ -41,8 +41,6 @@ class AnalysisCreate(BaseModel):
             raise ValueError("Inconsistent configuration: Replay backend cannot run in live mode (must have live_mode=false).")
         if self.backend_type == SandboxBackendType.CAPE and not self.live_mode:
             raise ValueError("Inconsistent configuration: CAPE backend requires live_mode=true.")
-        if self.live_mode and not self.approved_by_user:
-            raise ValueError("Live execution requires explicit analyst authorization (approved_by_user=true).")
         return self
 
 class AnalysisStatusHistoryItem(BaseModel):

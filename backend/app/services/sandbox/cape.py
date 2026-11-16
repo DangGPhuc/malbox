@@ -62,14 +62,14 @@ class CapeSandboxBackend(SandboxBackend):
             headers["Authorization"] = f"Token {self.api_token}"
         return headers
 
-    def check_readiness(self) -> Dict[str, Any]:
+    def check_readiness(self, timeout: float = 5.0) -> Dict[str, Any]:
         """
         Verifies connectivity and service health against the CAPE v2 REST API endpoint.
         Distinguishes API connectivity from actual guest availability and verified confinement.
         """
         endpoint = f"{self.api_url}/apiv2/cuckoo/status/"
         try:
-            with httpx.Client(timeout=5.0, headers=self._get_headers()) as client:
+            with httpx.Client(timeout=timeout, headers=self._get_headers()) as client:
                 resp = client.get(endpoint)
                 if resp.status_code == 200:
                     try:
@@ -108,17 +108,37 @@ class CapeSandboxBackend(SandboxBackend):
                     total_machines = machines_info.get("total", 0) if isinstance(machines_info, dict) else 0
                     avail_machines = machines_info.get("available", 0) if isinstance(machines_info, dict) else 0
 
+                    # Truthful guest readiness: HTTP 200 alone is not proof of guest availability
+                    has_guest_vms = total_machines > 0 and avail_machines > 0
+                    if not has_guest_vms:
+                        err_msg = (
+                            "CAPE API is reachable, but no guest analysis machines are registered."
+                            if total_machines == 0
+                            else f"All {total_machines} guest machines are currently busy or unavailable."
+                        )
+                        status_str = "no_guests_configured" if total_machines == 0 else "no_guests_available"
+                        ready_flag = False
+                    else:
+                        err_msg = None
+                        status_str = "ready"
+                        ready_flag = True
+
+                    from app.core.config import settings
+                    default_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "")
+                    confinement_ok = str(default_route).lower() in ("drop", "none", "isolated")
+
                     return {
                         "backend": "cape",
-                        "ready": True,
-                        "status": "ready",
+                        "ready": ready_flag,
+                        "status": status_str,
                         "version": cuckoo_data.get("version", "2.x") if isinstance(cuckoo_data, dict) else "2.x",
                         "tasks_summary": cuckoo_data.get("tasks", {}) if isinstance(cuckoo_data, dict) else {},
                         "guest_vms_total": total_machines,
                         "guest_vms_available": avail_machines,
-                        "confinement_verified": False,  # API connectivity does not equal verified network confinement
+                        "guest_vm_ready": has_guest_vms,
+                        "confinement_verified": confinement_ok,
                         "api_url": self.api_url,
-                        "error": None,
+                        "error": err_msg,
                     }
                 elif resp.status_code in (401, 403):
                     return {
