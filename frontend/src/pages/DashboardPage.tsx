@@ -11,6 +11,8 @@ import {
   Layers,
   HelpCircle,
   Radio,
+  Server,
+  Terminal,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { AnalysisDetail, HealthStatus } from '../types';
@@ -75,7 +77,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   const [analyses, setAnalyses] = useState<AnalysisDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [health, setHealth] = useState<HealthStatus | null>(propHealth || null);
-  const [activeFilter, setActiveFilter] = useState<'all' | 'replay' | 'live' | 'review'>('all');
+  const [activeFilter, setActiveFilter] = useState<'all' | 'live' | 'replay' | 'review'>('all');
 
   const fetchAnalyses = async () => {
     try {
@@ -107,31 +109,31 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   let liveCount = 0;
 
   for (const a of analyses) {
-    if (a.backend_type === 'cape') {
+    const isLive = a.backend_type === 'cape' || a.live_mode === true;
+    if (isLive) {
       liveCount++;
+      const { isMalicious, isSuspicious, isLow, isClean, isInconclusive } = classifyAnalysis(a);
+      if (isInconclusive) {
+        incompleteCount++;
+      } else if (isMalicious) {
+        maliciousCount++;
+      } else if (isSuspicious) {
+        suspiciousCount++;
+      } else if (isLow) {
+        lowCount++;
+      } else if (isClean) {
+        cleanCount++;
+      } else {
+        incompleteCount++;
+      }
     } else {
       replayCount++;
-    }
-
-    const { isMalicious, isSuspicious, isLow, isClean, isInconclusive } = classifyAnalysis(a);
-    if (isInconclusive) {
-      incompleteCount++;
-    } else if (isMalicious) {
-      maliciousCount++;
-    } else if (isSuspicious) {
-      suspiciousCount++;
-    } else if (isLow) {
-      lowCount++;
-    } else if (isClean) {
-      cleanCount++;
-    } else {
-      incompleteCount++;
     }
   }
 
   const filteredAnalyses = analyses.filter((a) => {
-    if (activeFilter === 'replay') return a.backend_type !== 'cape';
-    if (activeFilter === 'live') return a.backend_type === 'cape';
+    if (activeFilter === 'replay') return a.backend_type !== 'cape' && !a.live_mode;
+    if (activeFilter === 'live') return a.backend_type === 'cape' || a.live_mode;
     if (activeFilter === 'review') {
       const { isInconclusive } = classifyAnalysis(a);
       return isInconclusive;
@@ -141,7 +143,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
   return (
     <div className="container">
-      {/* Editorial Header Banner (DESIGN.md) */}
+      {/* Editorial Header Banner */}
       <div
         style={{
           display: 'flex',
@@ -188,7 +190,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
               maxWidth: '720px',
             }}
           >
-            Grounded static-dynamic correlation, deterministic scenario replays, and verifiable
+            Automated static-dynamic correlation, live sandbox detonation, and verifiable
             MITRE ATT&CK observations without speculative execution claims.
           </p>
         </div>
@@ -208,7 +210,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         </div>
       </div>
 
-      {/* System Readiness Strip (C3: uses real health probe) */}
+      {/* Infrastructure Readiness Strip */}
       <div
         style={{
           display: 'flex',
@@ -229,9 +231,29 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
             fontSize: '0.8rem',
           }}
         >
-          <CheckCircle size={14} color="#15803d" />
-          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Deterministic Replay:</span>
-          <span style={{ color: 'var(--text-secondary)' }}>Ready (fixtures verified)</span>
+          <Radio size={14} color={health?.live_mode_enabled ? '#15803d' : 'var(--amber)'} />
+          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>CAPE Sandbox:</span>
+          <span style={{ color: 'var(--text-secondary)' }}>
+            {health?.live_mode_enabled
+              ? 'Ready (Live Detonation Active)'
+              : 'Standby / Safety Isolated'}
+          </span>
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border)',
+            padding: '6px 14px',
+            borderRadius: '8px',
+            fontSize: '0.8rem',
+          }}
+        >
+          <Terminal size={14} color="var(--primary)" />
+          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Ghidra Decompiler:</span>
+          <span style={{ color: 'var(--text-secondary)' }}>Available (Headless PE Analyzer)</span>
         </div>
         <div
           style={{
@@ -246,28 +268,8 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           }}
         >
           <Layers size={14} color="var(--primary)" />
-          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Evidence Correlation:</span>
-          <span style={{ color: 'var(--text-secondary)' }}>HMAC-isolated trace verification</span>
-        </div>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.4rem',
-            background: 'var(--bg-surface)',
-            border: '1px solid var(--border)',
-            padding: '6px 14px',
-            borderRadius: '8px',
-            fontSize: '0.8rem',
-          }}
-        >
-          <Radio size={14} color={health?.live_mode_enabled ? '#15803d' : 'var(--amber)'} />
-          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Live Sandbox:</span>
-          <span style={{ color: 'var(--text-secondary)' }}>
-            {health?.live_mode_enabled
-              ? 'Configured (Active)'
-              : 'Safety Disabled (Replay Only)'}
-          </span>
+          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Detection Engine:</span>
+          <span style={{ color: 'var(--text-secondary)' }}>Active (17-Category Taxonomy)</span>
         </div>
         <div
           style={{
@@ -289,7 +291,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         </div>
       </div>
 
-      {/* Metric Cards - 4 Primary Canonical Buckets + Replay vs Live split */}
+      {/* Metric Cards - Canonical Threat Buckets (Excluding Historical Replay from Active Stats) */}
       <div className="grid-4" style={{ marginBottom: '1.5rem' }}>
         <div
           className="card"
@@ -308,13 +310,13 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                 textTransform: 'uppercase',
               }}
             >
-              Total Cases
+              Active Cases
             </div>
             <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-main)' }}>
-              {total}
+              {liveCount}
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-              {replayCount} Replay • {liveCount} Live
+              {replayCount > 0 ? `${replayCount} Historical Replay (Archived)` : 'All Live Analyses'}
             </div>
           </div>
         </div>
@@ -434,7 +436,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
               </p>
             </div>
             <div style={{ display: 'flex', gap: '4px' }}>
-              {(['all', 'replay', 'live', 'review'] as const).map((filter) => (
+              {(['all', 'live', 'replay', 'review'] as const).map((filter) => (
                 <button
                   key={filter}
                   type="button"
@@ -451,7 +453,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                     textTransform: 'capitalize',
                   }}
                 >
-                  {filter === 'review' ? 'Needs Review' : filter}
+                  {filter === 'live' ? 'Live CAPE' : filter === 'replay' ? 'Historical Replay' : filter === 'review' ? 'Needs Review' : 'All'}
                 </button>
               ))}
             </div>
@@ -484,10 +486,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                 No analyses matching &quot;{activeFilter}&quot;.
               </p>
               <p style={{ margin: '0 0 1rem 0', fontSize: '0.85rem' }}>
-                Submit a PE sample or launch a deterministic synthetic replay scenario.
+                Submit a PE executable for live sandbox analysis and AI reporting.
               </p>
               <button onClick={onNavigateSubmit} className="btn btn-primary">
-                Run First Replay Analysis
+                Analyze Executable
               </button>
             </div>
           ) : (
@@ -517,7 +519,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                       ? 'badge-info'
                       : 'badge-clean';
 
-                    const isLive = a.backend_type === 'cape';
+                    const isLive = a.backend_type === 'cape' || a.live_mode === true;
 
                     return (
                       <tr key={a.id}>
@@ -542,10 +544,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                             </span>
                           ) : (
                             <span
-                              className="pill-tag badge-info"
+                              className="pill-tag badge-neutral"
                               style={{ fontSize: '0.7rem' }}
                             >
-                              Replay
+                              Synthetic Replay
                             </span>
                           )}
                         </td>
@@ -621,11 +623,11 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                   background: 'var(--bg-main)',
                   padding: '12px 16px',
                   borderRadius: '8px',
-                  borderLeft: '3px solid var(--primary)',
+                  borderLeft: '3px solid var(--amber)',
                 }}
               >
-                <div style={{ fontWeight: 600, color: 'var(--primary)' }}>
-                  Deterministic Replay Mode
+                <div style={{ fontWeight: 600, color: 'var(--amber)' }}>
+                  Live CAPE Detonation Boundary
                 </div>
                 <div
                   style={{
@@ -634,8 +636,31 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                     fontSize: '0.82rem',
                   }}
                 >
-                  Executes synthetic multi-stage attack scenarios without host compromise. Grounded
-                  in signed replay fixtures.
+                  Requires active CAPE backend, isolated guest VM, and explicit high-entropy operator
+                  token authorization.
+                </div>
+              </div>
+
+              <div
+                style={{
+                  background: 'var(--bg-main)',
+                  padding: '12px 16px',
+                  borderRadius: '8px',
+                  borderLeft: '3px solid var(--primary)',
+                }}
+              >
+                <div style={{ fontWeight: 600, color: 'var(--primary)' }}>
+                  Headless Ghidra Static Decompilation
+                </div>
+                <div
+                  style={{
+                    color: 'var(--text-secondary)',
+                    marginTop: '3px',
+                    fontSize: '0.82rem',
+                  }}
+                >
+                  Automatic static PE dissection and high-risk API function extraction executed in
+                  quarantine.
                 </div>
               </div>
 
@@ -648,7 +673,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                 }}
               >
                 <div style={{ fontWeight: 600, color: '#15803d' }}>
-                  Telemetry Completeness Quality Gate
+                  Telemetry Quality Gate & Provenance
                 </div>
                 <div
                   style={{
@@ -659,29 +684,6 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                 >
                   Distinguishes verified benign execution from unmonitored crash states. Never
                   declares 0/100 Clean on incomplete telemetry.
-                </div>
-              </div>
-
-              <div
-                style={{
-                  background: 'var(--bg-main)',
-                  padding: '12px 16px',
-                  borderRadius: '8px',
-                  borderLeft: '3px solid var(--amber)',
-                }}
-              >
-                <div style={{ fontWeight: 600, color: 'var(--amber)' }}>
-                  Live Sandbox Boundary
-                </div>
-                <div
-                  style={{
-                    color: 'var(--text-secondary)',
-                    marginTop: '3px',
-                    fontSize: '0.82rem',
-                  }}
-                >
-                  Requires active CAPE backend, isolated guest VM, and explicit high-entropy operator
-                  token authorization.
                 </div>
               </div>
             </div>
@@ -696,7 +698,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                 color: 'var(--text-main)',
               }}
             >
-              Threat Severity Distribution (Mutually Exclusive)
+              Active Threat Severity Distribution
             </h2>
             <div
               style={{
@@ -711,35 +713,35 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
             >
               <div
                 style={{
-                  width: `${total ? (maliciousCount / total) * 100 : 0}%`,
+                  width: `${liveCount ? (maliciousCount / liveCount) * 100 : 0}%`,
                   background: 'var(--danger)',
                 }}
                 title={`Malicious: ${maliciousCount}`}
               />
               <div
                 style={{
-                  width: `${total ? (suspiciousCount / total) * 100 : 0}%`,
+                  width: `${liveCount ? (suspiciousCount / liveCount) * 100 : 0}%`,
                   background: 'var(--amber)',
                 }}
                 title={`Suspicious: ${suspiciousCount}`}
               />
               <div
                 style={{
-                  width: `${total ? (lowCount / total) * 100 : 0}%`,
+                  width: `${liveCount ? (lowCount / liveCount) * 100 : 0}%`,
                   background: '#0284c7',
                 }}
                 title={`Low Risk: ${lowCount}`}
               />
               <div
                 style={{
-                  width: `${total ? (cleanCount / total) * 100 : 0}%`,
+                  width: `${liveCount ? (cleanCount / liveCount) * 100 : 0}%`,
                   background: '#15803d',
                 }}
                 title={`Clean: ${cleanCount}`}
               />
               <div
                 style={{
-                  width: `${total ? (incompleteCount / total) * 100 : 0}%`,
+                  width: `${liveCount ? (incompleteCount / liveCount) * 100 : 0}%`,
                   background: 'var(--text-muted)',
                 }}
                 title={`Incomplete / Review: ${incompleteCount}`}

@@ -13,5 +13,6 @@ export { InvestigationRecommendations } from './InvestigationRecommendations';
 export { EvidenceExplorer } from './EvidenceExplorer';
 export { StaticAnalysisSummaryCard } from './StaticAnalysisSummaryCard';
 export { CorrelationSummarySection } from './CorrelationSummarySection';
+export { MalwareClassificationSection } from './MalwareClassificationSection';
 export * from './utils';
 

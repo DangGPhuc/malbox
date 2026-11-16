@@ -6,6 +6,11 @@ export interface HealthStatus {
   live_mode_enabled: boolean;
   default_backend: string;
   ai_provider: string;
+  cape_reachable?: boolean;
+  cape_version?: string;
+  guest_vm_ready?: boolean;
+  ghidra_installed?: boolean;
+  rules_loaded?: number;
 }
 
 export interface SectionInfo {
@@ -436,6 +441,40 @@ export interface FullReport {
   };
   artifacts: ReportArtifactSummary[];
   intelligence_report?: IntelligenceReport | null;
+  malware_classification?: MalwareClassificationResult | null;
+}
+
+export type CategoryAssessmentStatus = 'CONFIRMED' | 'SUSPECTED' | 'ABSENT' | 'UNSUPPORTED';
+
+export interface CategoryAssessment {
+  category_id: string;
+  category_name: string;
+  category_type: string;
+  classification_status: CategoryAssessmentStatus;
+  confidence: number;
+  evidence_ids: string[];
+  supporting_static_function_ids: string[];
+  supporting_dynamic_event_ids: number[];
+  supporting_artifact_ids: string[];
+  explanation: string;
+  contradictory_evidence: string[];
+  limitations: string[];
+}
+
+export interface MalwareClassificationResult {
+  analysis_id: string;
+  sample_sha256: string;
+  taxonomy_version: string;
+  classifier_version: string;
+  primary_category?: string | null;
+  secondary_categories: string[];
+  suspected_family?: string | null;
+  family_confidence?: number | null;
+  overall_evidence_quality: string;
+  classification_status: 'CLASSIFIED' | 'UNKNOWN' | 'INSUFFICIENT_EVIDENCE' | 'UNSUPPORTED';
+  classification_findings: CategoryAssessment[];
+  limitations: string[];
+  unsupported_categories: string[];
 }
 
 export interface ReportResponse {

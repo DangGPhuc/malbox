@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   UploadCloud,
   Shield,
@@ -6,10 +6,13 @@ import {
   AlertTriangle,
   ArrowRight,
   FileCode,
-  Play,
   Lock,
-  Radio,
   ArrowLeft,
+  Layers,
+  Terminal,
+  Check,
+  Server,
+  Play,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { HealthStatus, Sample } from '../types';
@@ -28,15 +31,16 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
   const [uploadedSample, setUploadedSample] = useState<Sample | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(propHealth || null);
+  const [isDragging, setIsDragging] = useState(false);
 
-  // Analysis options
-  const [backendType, setBackendType] = useState<'replay' | 'cape'>('replay');
-  const [selectedScenario, setSelectedScenario] = useState('ransomware_wannacry_mock');
-  const [operatorToken, setOperatorToken] = useState('');
-  const [profile, setProfile] = useState('ransomware_focus');
-  const [timeoutSeconds, setTimeoutSeconds] = useState(60);
+  // Operator token & safety approval
+  const [operatorToken, setOperatorToken] = useState<string>(() => {
+    return localStorage.getItem('malbox_operator_token') || '';
+  });
   const [approvedByUser, setApprovedByUser] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!propHealth) {
@@ -44,102 +48,80 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
     }
   }, [propHealth]);
 
-  const resetVerificationState = () => {
-    setApprovedByUser(false);
-    setOperatorToken('');
+  const handleOperatorTokenChange = (val: string) => {
+    setOperatorToken(val);
+    localStorage.setItem('malbox_operator_token', val);
+  };
+
+  const handleFileProcess = async (selectedFile: File) => {
+    // Validate file size (max 32MB)
+    const MAX_FILE_SIZE = 32 * 1024 * 1024;
+    if (selectedFile.size > MAX_FILE_SIZE) {
+      setError(`File size exceeds 32MB limit (${(selectedFile.size / (1024 * 1024)).toFixed(1)}MB).`);
+      return;
+    }
+
+    setFile(selectedFile);
+    setError(null);
+    setUploading(true);
+
+    try {
+      const sample = await api.uploadSample(selectedFile);
+      setUploadedSample(sample);
+    } catch (err: any) {
+      setError(err.message || 'Sample upload and quarantine failed');
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
-      setError(null);
+      handleFileProcess(e.target.files[0]);
     }
   };
 
-  const handleUpload = async () => {
-    if (!file || uploading) return;
-    try {
-      setUploading(true);
-      setError(null);
-      resetVerificationState();
-      const sample = await api.uploadSample(file);
-      setUploadedSample(sample);
-      if (
-        file.name.toLowerCase().includes('stealer') ||
-        file.name.toLowerCase().includes('invoice')
-      ) {
-        setProfile('infostealer_focus');
-      } else {
-        setProfile('ransomware_focus');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Sample upload failed');
-    } finally {
-      setUploading(false);
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileProcess(e.dataTransfer.files[0]);
     }
   };
 
-  const handleQuickDemo = async (threatType: 'wannacry' | 'redline') => {
-    if (uploading) return;
-    try {
-      setUploading(true);
-      setError(null);
-      resetVerificationState();
-      const filename =
-        threatType === 'wannacry'
-          ? 'wannacry_test_sample.exe'
-          : 'redline_stealer_sample.exe';
-      const fakeBytes =
-        threatType === 'wannacry'
-          ? new Blob(['MZ\x90\x00WannaCry_Synthetic_Demo_Sample'], {
-              type: 'application/octet-stream',
-            })
-          : new Blob(['MZ\x90\x00Redline_Synthetic_Demo_Sample'], {
-              type: 'application/octet-stream',
-            });
-      const demoFile = new File([fakeBytes], filename);
-      const sample = await api.uploadSample(demoFile);
-      setUploadedSample(sample);
-      setBackendType('replay');
-      setProfile(threatType === 'wannacry' ? 'ransomware_focus' : 'infostealer_focus');
-      setSelectedScenario(
-        threatType === 'wannacry'
-          ? 'ransomware_wannacry_mock'
-          : 'infostealer_redline_mock'
-      );
-    } catch (err: any) {
-      setError(err.message || 'Quick demo generation failed');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleBackendChange = (newType: 'replay' | 'cape') => {
-    setBackendType(newType);
-    resetVerificationState();
-    setError(null);
-  };
-
-  const handleStartAnalysis = async () => {
+  const handleAnalyze = async () => {
     if (!uploadedSample || submitting) return;
 
-    const isLive = backendType === 'cape';
+    const isLiveConfigured = health?.live_mode_enabled ?? true;
 
-    if (isLive) {
-      if (health && !health.live_mode_enabled) {
-        setError(
-          'Live CAPE submission is disabled on this backend (MALBOX_LIVE_MODE_ENABLED=false). Please configure an isolated guest VM environment first.'
-        );
-        return;
-      }
-      if (!approvedByUser) {
-        setError('Analyst safety confirmation is required prior to submitting to live sandbox.');
-        return;
-      }
-      if (!operatorToken.trim()) {
-        setError('A valid operator token is required for live sandbox detonation.');
-        return;
-      }
+    if (!isLiveConfigured) {
+      setError(
+        'Live CAPE submission is disabled on this backend (MALBOX_LIVE_MODE_ENABLED=false). Please configure an isolated guest VM environment first.'
+      );
+      return;
+    }
+
+    if (!approvedByUser) {
+      setError('Analyst safety confirmation is required prior to submitting to the analysis pipeline.');
+      return;
+    }
+
+    if (!operatorToken.trim()) {
+      setError('A valid operator token is required for live sandbox detonation (MALBOX_OPERATOR_TOKEN).');
+      return;
     }
 
     try {
@@ -148,28 +130,27 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
 
       const analysis = await api.createAnalysis({
         sample_id: uploadedSample.id,
-        backend_type: backendType,
-        profile: profile,
-        timeout_seconds: timeoutSeconds,
-        live_mode: isLive,
-        approved_by_user: isLive ? approvedByUser : false,
-        replay_scenario_id: backendType === 'replay' ? selectedScenario : undefined,
-        operator_token: isLive ? operatorToken.trim() : undefined,
+        backend_type: 'cape',
+        profile: 'standard',
+        timeout_seconds: 60,
+        live_mode: true,
+        approved_by_user: approvedByUser,
+        operator_token: operatorToken.trim(),
         run_sync: false,
       });
 
       onAnalysisStarted(analysis.id);
     } catch (err: any) {
-      setError(err.message || 'Failed to start analysis');
+      setError(err.message || 'Failed to start automated analysis');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const liveModeAvailable = health ? health.live_mode_enabled : true;
+  const isCapeReady = (health?.live_mode_enabled ?? true) && (health?.cape_reachable ?? true);
 
   return (
-    <div className="container" style={{ maxWidth: '980px' }}>
+    <div className="container" style={{ maxWidth: '860px', paddingBottom: '3rem' }}>
       {/* Header */}
       <div style={{ marginBottom: '2rem' }}>
         <div
@@ -184,7 +165,7 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
             className="pill-tag badge-info"
             style={{ textTransform: 'none', fontSize: '0.75rem' }}
           >
-            Guided 5-Step Submission Wizard
+            Automated Malware Analysis Pipeline
           </span>
         </div>
         <h1
@@ -196,11 +177,11 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
             letterSpacing: '-0.5px',
           }}
         >
-          Submit Suspicious <span className="hero-pill-blue">Executable</span>
+          Analyze a suspicious <span className="hero-pill-blue">file</span>
         </h1>
         <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
-          Quarantine binary payloads, extract static PE metadata, and configure safe deterministic
-          replay or isolated live sandbox execution.
+          Upload a suspicious Windows PE binary (.exe, .dll) for automated static decompilation,
+          dynamic isolated sandbox detonation, and evidence-grounded threat reporting.
         </p>
       </div>
 
@@ -226,224 +207,104 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
         </div>
       )}
 
-      {/* STEP 1: Upload or Choose Quick Demo */}
+      {/* Single-Action Upload Zone */}
       {!uploadedSample ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+        <div
+          className="card"
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          style={{
+            textAlign: 'center',
+            padding: '4rem 2rem',
+            border: isDragging ? '2px dashed var(--primary)' : '2px dashed var(--border-light)',
+            backgroundColor: isDragging ? 'var(--color-sky-tint)' : 'var(--bg-surface)',
+            borderRadius: '12px',
+            transition: 'all 0.15s ease-in-out',
+            cursor: uploading ? 'wait' : 'default',
+          }}
+        >
           <div
-            className="card"
             style={{
-              textAlign: 'center',
-              padding: '3.5rem 2rem',
-              border: '2px dashed var(--border-light)',
-              borderRadius: '12px',
+              background: 'var(--color-sky-tint)',
+              width: '64px',
+              height: '64px',
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto 1.25rem auto',
             }}
           >
-            <div
-              style={{
-                background: 'var(--color-sky-tint)',
-                width: '64px',
-                height: '64px',
-                borderRadius: '50%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 1.25rem auto',
-              }}
-            >
-              <UploadCloud size={32} color="var(--primary)" />
-            </div>
-            <h3
-              style={{
-                margin: '0 0 0.5rem 0',
-                fontSize: '1.25rem',
-                color: 'var(--text-main)',
-                fontWeight: 600,
-              }}
-            >
-              Select Windows Executable (.exe, .dll, .sys, .bin)
-            </h3>
-            <p
-              style={{
-                color: 'var(--text-secondary)',
-                fontSize: '0.875rem',
-                maxWidth: '520px',
-                margin: '0 auto 1.75rem auto',
-              }}
-            >
-              Samples are ingested into a private quarantine directory with restricted read-only
-              permissions (0400). Live binaries are never executed directly on the host.
-            </p>
-
-            <input
-              type="file"
-              id="file-upload"
-              onChange={handleFileChange}
-              style={{ display: 'none' }}
-              disabled={uploading}
-            />
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'center',
-                gap: '1rem',
-                flexWrap: 'wrap',
-              }}
-            >
-              <label
-                htmlFor="file-upload"
-                className="btn btn-secondary"
-                style={{ cursor: uploading ? 'not-allowed' : 'pointer' }}
-              >
-                <FileCode size={16} />
-                Browse File...
-              </label>
-              {file && (
-                <button
-                  type="button"
-                  onClick={handleUpload}
-                  disabled={uploading}
-                  className="btn btn-primary"
-                >
-                  {uploading ? 'Quarantining Sample...' : `Upload "${file.name}"`}
-                </button>
-              )}
-            </div>
+            <UploadCloud size={32} color="var(--primary)" />
           </div>
 
-          {/* Instant Replay Demos (Safe Synthetic) */}
-          <div className="card" style={{ padding: '24px' }}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '0.75rem',
-                flexWrap: 'wrap',
-                gap: '0.5rem',
-              }}
-            >
-              <h3
-                style={{
-                  fontSize: '1.1rem',
-                  fontWeight: 600,
-                  margin: 0,
-                  color: 'var(--text-main)',
-                }}
-              >
-                Instant Replay Scenarios (Zero-Setup Safe Demos)
-              </h3>
-              <span className="pill-tag badge-clean" style={{ fontSize: '0.7rem' }}>
-                Synthetic Telemetry Ready
-              </span>
-            </div>
-            <p
-              style={{
-                color: 'var(--text-secondary)',
-                fontSize: '0.875rem',
-                margin: '0 0 1.25rem 0',
-              }}
-            >
-              Test the end-to-end correlation and reporting pipelines instantly using verified
-              synthetic fixtures without needing live malware.
-            </p>
-            <div className="grid-2">
-              <button
-                type="button"
-                onClick={() => handleQuickDemo('wannacry')}
-                disabled={uploading}
-                className="btn btn-secondary"
-                style={{
-                  justifyContent: 'flex-start',
-                  padding: '16px',
-                  textAlign: 'left',
-                  borderRadius: '10px',
-                  cursor: uploading ? 'not-allowed' : 'pointer',
-                }}
-              >
-                <div
-                  style={{
-                    background: 'rgba(246, 73, 50, 0.1)',
-                    padding: '10px',
-                    borderRadius: '8px',
-                    marginRight: '12px',
-                  }}
-                >
-                  <Play size={20} color="var(--danger)" />
-                </div>
-                <div>
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      color: 'var(--text-main)',
-                      fontSize: '0.95rem',
-                    }}
-                  >
-                    WannaCry Ransomware Scenario
-                  </div>
-                  <div
-                    style={{
-                      fontSize: '0.78rem',
-                      color: 'var(--text-secondary)',
-                      marginTop: '2px',
-                    }}
-                  >
-                    Shadow copy deletion (vssadmin), .wnry burst encryption, and Run key
-                    persistence.
-                  </div>
-                </div>
-              </button>
+          <h3
+            style={{
+              margin: '0 0 0.5rem 0',
+              fontSize: '1.25rem',
+              color: 'var(--text-main)',
+              fontWeight: 600,
+            }}
+          >
+            {uploading ? 'Quarantining and hashing sample...' : 'Drag and drop suspicious binary here'}
+          </h3>
 
-              <button
-                type="button"
-                onClick={() => handleQuickDemo('redline')}
-                disabled={uploading}
-                className="btn btn-secondary"
-                style={{
-                  justifyContent: 'flex-start',
-                  padding: '16px',
-                  textAlign: 'left',
-                  borderRadius: '10px',
-                  cursor: uploading ? 'not-allowed' : 'pointer',
-                }}
-              >
-                <div
-                  style={{
-                    background: 'rgba(255, 177, 16, 0.15)',
-                    padding: '10px',
-                    borderRadius: '8px',
-                    marginRight: '12px',
-                  }}
-                >
-                  <Play size={20} color="#b45309" />
-                </div>
-                <div>
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      color: 'var(--text-main)',
-                      fontSize: '0.95rem',
-                    }}
-                  >
-                    RedLine Infostealer Scenario
-                  </div>
-                  <div
-                    style={{
-                      fontSize: '0.78rem',
-                      color: 'var(--text-secondary)',
-                      marginTop: '2px',
-                    }}
-                  >
-                    Encoded PowerShell command, browser credential vault access, and HTTP C2
-                    beaconing.
-                  </div>
-                </div>
-              </button>
-            </div>
+          <p
+            style={{
+              color: 'var(--text-secondary)',
+              fontSize: '0.875rem',
+              maxWidth: '520px',
+              margin: '0 auto 1.75rem auto',
+            }}
+          >
+            Supports Windows PE32 / PE32+ executables and libraries (.exe, .dll, .sys, .bin).
+            Files are immediately stored with 0400 read-only permissions in isolated quarantine.
+          </p>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            id="file-upload"
+            accept=".exe,.dll,.sys,.bin,application/x-dosexec,application/x-msdownload"
+            onChange={handleFileChange}
+            style={{ display: 'none' }}
+            disabled={uploading}
+          />
+
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '1rem',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              className="btn btn-primary"
+              style={{ padding: '10px 24px', fontSize: '0.95rem' }}
+            >
+              <FileCode size={16} />
+              Browse File...
+            </button>
+
+            <span
+              style={{
+                fontSize: '0.78rem',
+                color: 'var(--text-muted)',
+              }}
+            >
+              Maximum file size: 32MB • Direct static extraction and sandbox execution
+            </span>
           </div>
         </div>
       ) : (
+        /* Quarantined Sample & Automated Pipeline Card */
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          {/* STEP 2: Quarantined Preflight Triage */}
+          {/* Quarantined File Metadata Preview */}
           <div className="card" style={{ borderLeft: '4px solid var(--primary)' }}>
             <div
               style={{
@@ -465,20 +326,22 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                     fontWeight: 600,
                   }}
                 >
-                  Step 2: Quarantined Sample Metadata
+                  Quarantined Binary Metadata
                 </h3>
               </div>
               <button
                 type="button"
                 onClick={() => {
                   setUploadedSample(null);
-                  resetVerificationState();
+                  setFile(null);
+                  setError(null);
+                  setApprovedByUser(false);
                 }}
                 disabled={submitting}
                 className="btn btn-outline btn-sm"
               >
                 <ArrowLeft size={13} />
-                Change Sample
+                Change File
               </button>
             </div>
 
@@ -490,7 +353,7 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                 </div>
                 <div>
                   <span style={{ color: 'var(--text-muted)' }}>File Size:</span>{' '}
-                  {uploadedSample.file_size} bytes
+                  {uploadedSample.file_size.toLocaleString()} bytes
                 </div>
                 <div>
                   <span style={{ color: 'var(--text-muted)' }}>SHA-256:</span>{' '}
@@ -524,252 +387,224 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
             </div>
           </div>
 
-          {/* STEP 3 & 4: Configure Execution Backend & Profile */}
-          <div className="card">
+          {/* Analysis Pipeline Capabilities */}
+          <div className="card" style={{ padding: '20px 24px' }}>
             <h3
               style={{
-                margin: '0 0 1.25rem 0',
-                fontSize: '1.15rem',
+                margin: '0 0 1rem 0',
+                fontSize: '1.05rem',
                 color: 'var(--text-main)',
                 fontWeight: 600,
               }}
             >
-              Step 3 & 4: Configure Dynamic Analysis Parameters
+              Automated Analysis Pipeline
             </h3>
 
-            <div className="grid-2" style={{ marginBottom: '1.25rem' }}>
-              <div>
-                <label
-                  style={{
-                    display: 'block',
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    color: 'var(--text-muted)',
-                    marginBottom: '0.4rem',
-                    textTransform: 'uppercase',
-                  }}
-                >
-                  Execution Backend
-                </label>
-                <select
-                  value={backendType}
-                  onChange={(e) => handleBackendChange(e.target.value as 'replay' | 'cape')}
-                  className="intel-select"
-                  disabled={submitting}
-                >
-                  <option value="replay">
-                    Deterministic Replay Sandbox (Safe / Offline / Synthetic)
-                  </option>
-                  <option value="cape">
-                    CAPE Sandbox API v2 ({liveModeAvailable ? 'Configured' : 'Safety Disabled in .env'})
-                  </option>
-                </select>
-                {backendType === 'cape' && !liveModeAvailable && (
-                  <div
-                    style={{
-                      fontSize: '0.78rem',
-                      color: 'var(--amber)',
-                      marginTop: '4px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                    }}
-                  >
-                    <AlertTriangle size={13} />
-                    Live Mode is disabled in backend config (MALBOX_LIVE_MODE_ENABLED=false).
-                  </div>
-                )}
-              </div>
-
-              {backendType === 'replay' ? (
-                <div>
-                  <label
-                    style={{
-                      display: 'block',
-                      fontSize: '0.8rem',
-                      fontWeight: 600,
-                      color: 'var(--text-muted)',
-                      marginBottom: '0.4rem',
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    Replay Scenario Fixture
-                  </label>
-                  <select
-                    value={selectedScenario}
-                    onChange={(e) => setSelectedScenario(e.target.value)}
-                    className="intel-select"
-                    disabled={submitting}
-                  >
-                    <option value="ransomware_wannacry_mock">
-                      WannaCry Ransomware Mock (Shadow deletion & .wnry burst)
-                    </option>
-                    <option value="infostealer_redline_mock">
-                      RedLine Infostealer Mock (Credential theft & C2 gate)
-                    </option>
-                  </select>
-                </div>
-              ) : (
-                <div>
-                  <label
-                    style={{
-                      display: 'block',
-                      fontSize: '0.8rem',
-                      fontWeight: 600,
-                      color: 'var(--text-muted)',
-                      marginBottom: '0.4rem',
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    CAPE Analysis Profile
-                  </label>
-                  <select
-                    value={profile}
-                    onChange={(e) => setProfile(e.target.value)}
-                    className="intel-select"
-                    disabled={submitting}
-                  >
-                    <option value="standard">Standard Baseline (Default Windows Guest)</option>
-                    <option value="ransomware_focus">
-                      Ransomware Focus (High-frequency disk monitoring)
-                    </option>
-                    <option value="infostealer_focus">
-                      Infostealer Focus (Credential vault hooking)
-                    </option>
-                    <option value="evasion_focus">
-                      Evasion Focus (Sleep bypass & anti-VM detection)
-                    </option>
-                  </select>
-                </div>
-              )}
-            </div>
-
-            {backendType === 'cape' && (
-              <div
-                style={{
-                  marginBottom: '1.25rem',
-                  background: 'rgba(246, 73, 50, 0.05)',
-                  padding: '16px',
-                  borderRadius: '8px',
-                  border: '1px solid rgba(246, 73, 50, 0.2)',
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.4rem',
-                    marginBottom: '0.4rem',
-                  }}
-                >
-                  <Lock size={15} color="var(--danger)" />
-                  <label
-                    style={{
-                      fontSize: '0.8rem',
-                      fontWeight: 600,
-                      color: 'var(--danger)',
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    Operator Token (Required for Live Detonation)
-                  </label>
-                </div>
-                <input
-                  type="password"
-                  placeholder="Enter MALBOX_OPERATOR_TOKEN from .env"
-                  value={operatorToken}
-                  onChange={(e) => setOperatorToken(e.target.value)}
-                  className="intel-input"
-                  style={{ borderColor: 'rgba(246, 73, 50, 0.3)' }}
-                  disabled={submitting}
-                />
-                <p
-                  style={{
-                    margin: '6px 0 0 0',
-                    fontSize: '0.78rem',
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  A non-empty 32+ character operator token is mandatory to initiate live execution
-                  against guest VMs.
-                </p>
-              </div>
-            )}
-
-            <div style={{ marginBottom: '1.5rem' }}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  marginBottom: '0.4rem',
-                }}
-              >
-                <label
-                  style={{
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    color: 'var(--text-muted)',
-                    textTransform: 'uppercase',
-                  }}
-                >
-                  Execution Timeout Window
-                </label>
-                <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--primary)' }}>
-                  {timeoutSeconds} seconds
-                </span>
-              </div>
-              <input
-                type="range"
-                min="30"
-                max="300"
-                step="15"
-                value={timeoutSeconds}
-                onChange={(e) => setTimeoutSeconds(Number(e.target.value))}
-                style={{ width: '100%', accentColor: 'var(--primary)' }}
-                disabled={submitting}
-              />
-            </div>
-
-            {/* STEP 5: Safety Gate & Launch */}
             <div
               style={{
-                background: 'var(--bg-main)',
-                padding: '18px',
-                borderRadius: '10px',
-                border: '1px solid var(--border)',
-                marginBottom: '1.5rem',
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                gap: '12px',
+                marginBottom: '1.25rem',
               }}
             >
               <div
                 style={{
+                  background: 'var(--bg-main)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  padding: '12px',
                   display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem',
-                  marginBottom: '0.5rem',
+                  alignItems: 'flex-start',
+                  gap: '8px',
                 }}
               >
-                <AlertTriangle size={18} color="var(--warning)" />
-                <span
+                <div style={{ marginTop: '2px', color: 'var(--primary)' }}>
+                  <Terminal size={16} />
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Static PE Extraction
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Ghidra headless decompiler, imports & exports
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  background: 'var(--bg-main)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '8px',
+                }}
+              >
+                <div style={{ marginTop: '2px', color: '#15803d' }}>
+                  <Server size={16} />
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Isolated Sandbox
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    CAPE guest VM detonation & API hooking
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  background: 'var(--bg-main)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '8px',
+                }}
+              >
+                <div style={{ marginTop: '2px', color: 'var(--color-notion-blue)' }}>
+                  <Layers size={16} />
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Multi-Engine Correlation
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Process graph & behavioral event normalization
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  background: 'var(--bg-main)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '8px',
+                }}
+              >
+                <div style={{ marginTop: '2px', color: 'var(--danger)' }}>
+                  <Shield size={16} />
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Threat Classification
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    17-category malware taxonomy & AI reporting
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Infrastructure Readiness Badge */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+                padding: '10px 14px',
+                borderRadius: '8px',
+                backgroundColor: isCapeReady ? 'rgba(21, 128, 61, 0.08)' : 'rgba(255, 177, 16, 0.12)',
+                border: isCapeReady ? '1px solid rgba(21, 128, 61, 0.25)' : '1px solid rgba(255, 177, 16, 0.3)',
+                fontSize: '0.82rem',
+              }}
+            >
+              {isCapeReady ? (
+                <>
+                  <CheckCircle2 size={16} color="#15803d" />
+                  <span style={{ fontWeight: 600, color: '#15803d' }}>CAPE Sandbox Ready:</span>
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    Isolated guest environment configured for live automated detonation.
+                  </span>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle size={16} color="var(--amber)" />
+                  <span style={{ fontWeight: 600, color: 'var(--amber)' }}>
+                    CAPE Host Connecting — Static Pipeline Ready:
+                  </span>
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    Dynamic sandbox is currently unmonitored. Static decompilation will proceed.
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Safety Gate & Operator Authorization */}
+          <div className="card" style={{ padding: '20px 24px' }}>
+            <h3
+              style={{
+                margin: '0 0 1rem 0',
+                fontSize: '1.05rem',
+                color: 'var(--text-main)',
+                fontWeight: 600,
+              }}
+            >
+              Analyst Authorization & Execution Safety
+            </h3>
+
+            <div style={{ marginBottom: '1.25rem' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  marginBottom: '0.4rem',
+                }}
+              >
+                <Lock size={14} color="var(--danger)" />
+                <label
+                  htmlFor="operator-token"
                   style={{
+                    fontSize: '0.8rem',
                     fontWeight: 600,
-                    fontSize: '0.9rem',
-                    color: 'var(--text-main)',
+                    color: 'var(--danger)',
+                    textTransform: 'uppercase',
                   }}
                 >
-                  Step 5: Execution Safety & Confinement Review
-                </span>
+                  Operator Security Token (MALBOX_OPERATOR_TOKEN)
+                </label>
               </div>
+              <input
+                id="operator-token"
+                type="password"
+                placeholder="Enter MALBOX_OPERATOR_TOKEN from .env"
+                value={operatorToken}
+                onChange={(e) => handleOperatorTokenChange(e.target.value)}
+                className="intel-input"
+                style={{ borderColor: 'rgba(246, 73, 50, 0.3)' }}
+                disabled={submitting}
+              />
               <p
                 style={{
-                  margin: '0 0 0.75rem 0',
-                  fontSize: '0.85rem',
+                  margin: '4px 0 0 0',
+                  fontSize: '0.78rem',
                   color: 'var(--text-secondary)',
                 }}
               >
-                {backendType === 'replay'
-                  ? 'Replay mode uses hermetic fixtures. No binary code is executed on the host, and all network activity is simulated.'
-                  : 'Live mode submits the sample to the configured CAPE REST API. Guest VM confinement must be independently verified by the operator on host-only networks.'}
+                A high-entropy operator token is mandatory for authenticating live sandbox execution.
               </p>
+            </div>
+
+            <div
+              style={{
+                background: 'var(--bg-main)',
+                padding: '14px 16px',
+                borderRadius: '8px',
+                border: '1px solid var(--border)',
+                marginBottom: '1.5rem',
+              }}
+            >
               <label
                 style={{
                   display: 'flex',
@@ -791,21 +626,33 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
               </label>
             </div>
 
+            {/* Single Prominent CTA Button */}
             <button
               type="button"
-              onClick={handleStartAnalysis}
-              disabled={submitting}
+              onClick={handleAnalyze}
+              disabled={submitting || !approvedByUser || !operatorToken.trim()}
               className="btn btn-primary"
               style={{
                 width: '100%',
                 padding: '12px',
-                fontSize: '0.95rem',
-                opacity: submitting ? 0.7 : 1,
-                cursor: submitting ? 'not-allowed' : 'pointer',
+                fontSize: '1rem',
+                fontWeight: 600,
+                opacity: submitting || !approvedByUser || !operatorToken.trim() ? 0.6 : 1,
+                cursor: submitting || !approvedByUser || !operatorToken.trim() ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.5rem',
               }}
             >
-              {submitting ? 'Executing Analysis Pipeline...' : 'Start Dynamic Analysis Workflow'}
-              <ArrowRight size={16} />
+              {submitting ? (
+                'Submitting Analysis Pipeline...'
+              ) : (
+                <>
+                  <Play size={16} fill="currentColor" />
+                  Analyze File
+                </>
+              )}
             </button>
           </div>
         </div>

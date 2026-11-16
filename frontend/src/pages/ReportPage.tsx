@@ -24,6 +24,7 @@ import {
   AttackStoryTimeline,
   ConfidencePanel,
   CorrelationSummarySection,
+  MalwareClassificationSection,
   EvidenceExplorer,
   EvidenceLinkedClaim,
   ExecutiveAssessment,
@@ -346,6 +347,14 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         staticData={staticData}
         loading={staticLoading}
         onOpenStaticExplorer={onNavigateTab ? () => onNavigateTab('static') : undefined}
+      />
+
+      <MalwareClassificationSection
+        classification={full_report.malware_classification}
+        onInspectEvidence={handleInspectEvidence}
+        onOpenStaticFunction={
+          onNavigateTab ? (functionId) => onNavigateTab('static', { functionId }) : undefined
+        }
       />
 
       <CorrelationSummarySection

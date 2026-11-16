@@ -385,12 +385,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Health / Readiness Indicator */}
             {health ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem' }}>
-                <span className="pill-tag badge-clean" style={{ fontSize: '0.7rem', textTransform: 'none' }}>
-                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#15803d', display: 'inline-block' }} />
-                  Replay Safe
-                </span>
-                <span className="pill-tag badge-neutral" style={{ fontSize: '0.7rem', textTransform: 'none' }}>
-                  {health.live_mode_enabled ? 'Live: Active' : 'Live: Isolated'}
+                <span className={`pill-tag ${health.live_mode_enabled ? 'badge-clean' : 'badge-neutral'}`} style={{ fontSize: '0.7rem', textTransform: 'none' }}>
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: health.live_mode_enabled ? '#15803d' : '#888', display: 'inline-block' }} />
+                  {health.live_mode_enabled ? 'Live CAPE: Ready' : 'Live CAPE: Isolated'}
                 </span>
               </div>
             ) : (
