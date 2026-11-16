@@ -108,6 +108,62 @@ class PipelineWorker:
                 self.db.commit()
                 return analysis
 
+            # 2.5 Automatic Deep Static Analysis using Ghidra (Phase B3)
+            # Ensure static analysis record exists or trigger analysis if Ghidra is available
+            from app.models.static_analysis import StaticAnalysisRecord
+            from app.schemas.static_analysis import (
+                StaticAnalysisResult,
+                StaticAnalysisProvenance,
+                StaticAnalysisTruncation,
+            )
+            from app.services.static_analysis.worker import static_worker_manager
+
+            existing_static = (
+                self.db.query(StaticAnalysisRecord)
+                .filter(StaticAnalysisRecord.sample_id == sample.id)
+                .order_by(StaticAnalysisRecord.created_at.desc())
+                .first()
+            )
+
+            if existing_static is None:
+                if getattr(settings, "GHIDRA_ENABLED", False) and getattr(settings, "GHIDRA_HOME", ""):
+                    try:
+                        static_worker_manager.submit_job(
+                            db=self.db,
+                            sample=sample,
+                            analysis_id=analysis.id,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    now_dt = datetime.now(timezone.utc)
+                    unavail_res = StaticAnalysisResult(
+                        status="UNAVAILABLE",
+                        provenance=StaticAnalysisProvenance(
+                            analysis_id=analysis.id,
+                            sample_id=sample.id,
+                            sample_sha256=sample.sha256,
+                            started_at=now_dt.isoformat(),
+                            os_sandbox="none",
+                            ghidra_enabled=False,
+                            provenance_note="Ghidra Headless static analysis is not enabled or not configured on this host.",
+                        ),
+                        truncation=StaticAnalysisTruncation(),
+                        errors=["Ghidra static analysis is disabled or GHIDRA_HOME is unconfigured."],
+                    )
+                    unavail_rec = StaticAnalysisRecord(
+                        sample_id=sample.id,
+                        analysis_id=analysis.id,
+                        sample_sha256=sample.sha256,
+                        status="UNAVAILABLE",
+                        result_json=unavail_res.model_dump(mode="json"),
+                        error_message="Ghidra static analysis is disabled or GHIDRA_HOME is unconfigured.",
+                        created_at=now_dt,
+                        completed_at=now_dt,
+                    )
+                    self.db.add(unavail_rec)
+                    self.db.commit()
+
             # 3. RUNNING (Detonation / Sandbox execution phase)
             safe_update_status(analysis, self.db, AnalysisStatus.RUNNING)
             sample_quarantine_path = Path(sample.quarantine_path)
@@ -136,9 +192,22 @@ class PipelineWorker:
                 readiness = sandbox.check_readiness()
                 if not readiness.get("ready"):
                     safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
-                    analysis.error_message = f"CAPE backend readiness check failed: {readiness.get('error')}"
+                    err_msg = f"CAPE backend readiness check failed: {readiness.get('error')}"
+                    analysis.error_message = err_msg
                     analysis.completed_at = datetime.now(timezone.utc)
                     self.db.commit()
+                    # Preserve static analysis & triage findings in structured report
+                    try:
+                        from app.schemas.report import RiskAssessment
+                        safe_risk = RiskAssessment(score=0, level="Inconclusive / Incomplete", confidence=0.0)
+                        ReportGenerator(self.db).generate_report(
+                            analysis.id,
+                            safe_risk,
+                            ai_summary=f"Dynamic execution unavailable: {err_msg}. Static disassembly and triage findings preserved.",
+                            env_metadata={"telemetry_completeness": "UNAVAILABLE", "telemetry_notes": [err_msg]},
+                        )
+                    except Exception:
+                        pass
                     return analysis
 
                 # Translate only explicitly supported, operator-controlled parameters to CAPE request (A1)
@@ -150,6 +219,14 @@ class PipelineWorker:
                     cape_transport_options["options"] = f"route={settings.CAPE_DEFAULT_NETWORK_ROUTE}"
                 if analysis.profile == "ransomware_focus":
                     cape_transport_options["enforce_timeout"] = "1"
+
+                # Automatic package selection (Phase B4)
+                pe_meta = sample.pe_metadata or {}
+                is_dll = pe_meta.get("is_dll", False) or sample.file_name.lower().endswith(".dll")
+                if is_dll:
+                    cape_transport_options["package"] = "dll"
+                elif sample.is_pe:
+                    cape_transport_options["package"] = "exe"
 
                 backend_task_id = sandbox.submit_sample(
                     sample_path=sample_quarantine_path,

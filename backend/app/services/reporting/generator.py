@@ -214,6 +214,19 @@ class ReportGenerator:
                     ),
                 })
 
+        # Deterministic Malware Taxonomy Classification (Phase C)
+        from app.services.classification.engine import MalwareClassificationEngine
+        classification_res = MalwareClassificationEngine(self.db).classify(
+            analysis_id=analysis_id,
+            sample_sha256=sample.sha256 if sample else "Unknown",
+            findings=findings_db,
+            events=analysis.events or [],
+            pe_metadata=sample.pe_metadata if sample else {},
+            is_pe=sample.is_pe if sample else True,
+            telemetry_completeness=resolved_completeness,
+            is_replay=is_replay,
+        )
+
         report_payload = FullReportSchema(
             analysis_id=analysis_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
@@ -242,6 +255,7 @@ class ReportGenerator:
             recommended_follow_up=follow_up,
             artifacts=artifacts_summary,
             intelligence_report=intelligence_report,
+            malware_classification=classification_res,
         )
 
         # Check for existing report record to update or insert

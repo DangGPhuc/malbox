@@ -76,6 +76,9 @@ def get_analysis_report(
     if not report_record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report has not been generated yet.")
 
+    full_rep = report_record.full_report_json if isinstance(report_record.full_report_json, dict) else {}
+    malware_class = full_rep.get("malware_classification")
+
     return ReportResponse(
         id=report_record.id,
         analysis_id=report_record.analysis_id,
@@ -86,6 +89,7 @@ def get_analysis_report(
         is_replay=(analysis.backend_type == "replay"),
         replay_scenario_id=analysis.replay_scenario_id,
         full_report=report_record.full_report_json,
+        malware_classification=malware_class,
         created_at=report_record.created_at,
     )
 

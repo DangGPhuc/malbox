@@ -224,6 +224,67 @@ def _render_correlation_html_section(
     </section>"""
 
 
+def _render_malware_classification_html_section(classification: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(classification, dict):
+        return ""
+
+    primary = _esc(classification.get("primary_category") or "Unknown / Unclassified")
+    status = _esc(classification.get("classification_status") or "UNKNOWN")
+    secondaries = classification.get("secondary_categories") or []
+    sec_str = ", ".join(_esc(s) for s in secondaries) if secondaries else "None identified"
+    tax_ver = _esc(classification.get("taxonomy_version") or "1.0")
+    classifier_ver = _esc(classification.get("classifier_version") or "1.0.0")
+
+    findings = [f for f in (classification.get("classification_findings") or []) if isinstance(f, dict)]
+    rows = ""
+    for f in findings:
+        c_status = f.get("classification_status")
+        if c_status in ("CONFIRMED", "SUSPECTED", "UNSUPPORTED"):
+            c_name = _esc(f.get("category_name"))
+            c_type = _esc(f.get("category_type"))
+            conf = f"{float(f.get('confidence', 0.0)) * 100:.0f}%" if c_status != "UNSUPPORTED" else "N/A"
+            expl = _esc(f.get("explanation"))
+            badge_class = "pill-critical" if c_status == "CONFIRMED" else ("pill-warn" if c_status == "SUSPECTED" else "pill-neutral")
+            rows += f"""
+            <tr>
+                <td><strong>{c_name}</strong> <span class="muted">({c_type})</span></td>
+                <td><span class="pill {badge_class}">{_esc(c_status)}</span></td>
+                <td>{conf}</td>
+                <td>{expl}</td>
+            </tr>
+            """
+
+    unsupp = classification.get("unsupported_categories") or []
+    unsupp_str = ", ".join(_esc(u) for u in unsupp)
+
+    return f"""
+    <section class="card">
+        <h2>Malware Category Classification</h2>
+        <div class="provenance-box" style="margin-bottom: 1rem;">
+            <div><strong>Primary Classification:</strong> <span class="pill pill-critical">{primary}</span></div>
+            <div style="margin-top: 0.35rem;"><strong>Secondary Characteristics:</strong> {sec_str}</div>
+            <div class="muted" style="margin-top: 0.35rem; font-size: 0.8rem;">
+                Status: <strong>{status}</strong> | Taxonomy: v{tax_ver} | Classifier: v{classifier_ver}
+                {f" | Note: {unsupp_str} are unsupported for Windows PE." if unsupp else ""}
+            </div>
+        </div>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 0.5rem;">
+            <thead>
+                <tr>
+                    <th style="text-align: left;">Category</th>
+                    <th style="text-align: left;">Status</th>
+                    <th style="text-align: left;">Confidence</th>
+                    <th style="text-align: left;">Grounding Evidence &amp; Explanation</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows or '<tr><td colspan="4" class="muted">No behavioral categories matched.</td></tr>'}
+            </tbody>
+        </table>
+    </section>"""
+
+
+
 def generate_html_report(
     report_data: Dict[str, Any],
     live_correlation: Optional[Dict[str, Any]] = None,
@@ -481,6 +542,10 @@ def generate_html_report(
         current_correlation_fingerprint=current_correlation_fingerprint,
     )
 
+    malware_class_html = _render_malware_classification_html_section(
+        report_data.get("malware_classification")
+    )
+
     findings_rows = ""
     for f in findings:
         sev = _esc(f.get("severity"), "Low")
@@ -721,6 +786,7 @@ def generate_html_report(
             </ul>
         </section>
 
+        {malware_class_html}
         {intel_section}
         {corr_section_html}
 
