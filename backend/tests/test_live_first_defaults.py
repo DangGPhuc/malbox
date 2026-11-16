@@ -42,19 +42,13 @@ def test_production_replay_request_is_rejected(client, db_session, monkeypatch):
 
 def test_historical_replay_records_remain_labeled(client, db_session):
     """Verifies that historical replay analyses retain their replay label and synthetic provenance."""
-    sample = Sample(
-        file_name="historic_wannacry.exe",
-        file_size=2048,
-        sha256="aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-        sha1="1122334455667788990011223344556677889900",
-        md5="11223344556677889900112233445566",
-        quarantine_path="/tmp/fake_quarantine",
-    )
-    db_session.add(sample)
-    db_session.commit()
+    sample_bytes = b"MZ" + b"\x00" * 80
+    res_upload = client.post("/api/v1/samples", files={"file": ("historic_wannacry.exe", io.BytesIO(sample_bytes))})
+    assert res_upload.status_code == 201
+    sample_id = res_upload.json()["id"]
 
     hist_analysis = Analysis(
-        sample_id=sample.id,
+        sample_id=sample_id,
         backend_type=SandboxBackendType.REPLAY.value,
         status=AnalysisStatus.COMPLETED.value,
         profile="ransomware_focus",
