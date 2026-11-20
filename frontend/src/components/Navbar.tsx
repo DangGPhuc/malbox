@@ -17,6 +17,7 @@ import {
   Layers,
   Clock,
   Radio,
+  Server,
 } from 'lucide-react';
 import { HealthStatus } from '../types';
 
@@ -48,6 +49,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
     { id: 'cases', label: 'Analyses / Cases', icon: Layers, targetTab: 'dashboard' },
     { id: 'submit', label: 'Submit Sample', icon: UploadCloud },
+    { id: 'infrastructure', label: 'Infrastructure Setup', icon: Server },
   ];
 
   const activeAnalysisTabs = [

@@ -879,3 +879,39 @@ export interface CorrelationBundleSection {
   truncated: boolean;
   disclaimer: string;
 }
+
+export interface SubsystemReadinessCard {
+  name: string;
+  tier: string;
+  status: string;
+  details: string;
+  remediation?: string | null;
+}
+
+export interface InfrastructureReadinessResponse {
+  overall_status: string;
+  tiers: {
+    APPLICATION_READY: boolean;
+    STATIC_ANALYSIS_READY: boolean;
+    AI_PROVIDER_READY: boolean;
+    CAPE_API_READY: boolean;
+    GUEST_READY: boolean;
+    CONFINEMENT_VERIFIED: boolean;
+    DETONATION_READY: boolean;
+  };
+  subsystems: {
+    backend: SubsystemReadinessCard;
+    ghidra: SubsystemReadinessCard;
+    cape: SubsystemReadinessCard;
+    guest: SubsystemReadinessCard;
+    isolation: SubsystemReadinessCard;
+    ai: SubsystemReadinessCard;
+    worker: SubsystemReadinessCard;
+    detonation: SubsystemReadinessCard;
+  };
+  remediation_commands: string[];
+  detonation_blockers: string[];
+  live_mode_enabled: boolean;
+  default_backend: string;
+}
+

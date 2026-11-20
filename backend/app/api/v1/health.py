@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from app.core.config import settings
-from app.services.sandbox.readiness import check_system_readiness
+from app.services.sandbox.readiness import check_system_readiness, check_infrastructure_readiness
 
 router = APIRouter()
 
@@ -37,5 +37,12 @@ def health_check():
 def readiness_check():
     """Detailed server-controlled execution readiness check."""
     return check_system_readiness(check_cape=True, timeout=2.0)
+
+@router.get("/health/infrastructure", tags=["Health"])
+@router.get("/infrastructure/readiness", tags=["Health"])
+def infrastructure_readiness_check():
+    """Detailed 7-tier infrastructure readiness and subsystem diagnostics."""
+    return check_infrastructure_readiness(timeout=2.0)
+
 
 

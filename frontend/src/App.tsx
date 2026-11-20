@@ -16,6 +16,9 @@ const StaticAnalysisPage = lazy(() =>
 const CorrelationPage = lazy(() =>
   import('./pages/CorrelationPage').then((mod) => ({ default: mod.CorrelationPage }))
 );
+const InfrastructurePage = lazy(() =>
+  import('./pages/InfrastructurePage').then((mod) => ({ default: mod.InfrastructurePage }))
+);
 
 const SAFE_ANALYSIS_ID_RE = /^[a-zA-Z0-9_-]{4,80}$/;
 const SAFE_REF_ID_RE = /^[a-zA-Z0-9:._-]{4,120}$/;
@@ -34,6 +37,9 @@ function readInitialHashRoute(): {
   if (!match || !SAFE_ANALYSIS_ID_RE.test(match[2])) {
     if (rawPath === '#submit') {
       return { tab: 'submit', analysisId: null, functionId: null, correlationId: null };
+    }
+    if (rawPath === '#infrastructure') {
+      return { tab: 'infrastructure', analysisId: null, functionId: null, correlationId: null };
     }
     return { tab: 'dashboard', analysisId: null, functionId: null, correlationId: null };
   }
@@ -258,6 +264,20 @@ export default function App() {
               initialCorrelationId={requestedCorrelationId}
               onNavigateTab={handleNavigateTab}
             />
+          </Suspense>
+        )}
+        {currentTab === 'infrastructure' && (
+          <Suspense
+            fallback={
+              <div
+                className="container"
+                style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}
+              >
+                Loading infrastructure readiness status...
+              </div>
+            }
+          >
+            <InfrastructurePage />
           </Suspense>
         )}
       </main>

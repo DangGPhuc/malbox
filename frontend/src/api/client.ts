@@ -13,6 +13,7 @@ import {
   StaticAnalysisResult,
   StaticAnalysisJobAcceptedResponse,
   CorrelationResult,
+  InfrastructureReadinessResponse,
 } from '../types';
 
 const BASE_URL = '/api/v1';
@@ -55,6 +56,12 @@ export const api = {
   async getHealth(): Promise<HealthStatus> {
     const res = await fetch(`${BASE_URL}/health`);
     if (!res.ok) throw new Error('Failed to retrieve health status');
+    return res.json();
+  },
+
+  async getInfrastructureReadiness(): Promise<InfrastructureReadinessResponse> {
+    const res = await fetch(`${BASE_URL}/health/infrastructure`);
+    if (!res.ok) throw new Error('Failed to retrieve infrastructure readiness status');
     return res.json();
   },
 
