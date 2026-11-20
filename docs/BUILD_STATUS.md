@@ -3,9 +3,12 @@
 **Project Codename:** `malbox-ai`  
 **Architecture Version:** 0.2.2-live-first-safety-hardened  
 **Active Branch:** `fix/live-cape-portability-ui-redesign`  
-**Baseline Commit SHA:** `6f103989daa26ff9978e0a3d8951d27201b6d7b1`  
-**Status:** **OPERATIONAL — PRODUCTION LIVE-FIRST SUSPICIOUS FILE ANALYSIS PLATFORM (SAFETY HARDENED)**  
+**Baseline Commit SHA:** `5021959`  
+**Status:** **OPERATIONAL — COMPLETE AUTOMATED PROVISIONING & PRODUCTION LIVE-FIRST PLATFORM**  
+**CI Run:** [https://github.com/DangGPhuc/malbox/actions/runs/44761351446](https://github.com/DangGPhuc/malbox/actions/runs/44761351446) (PASS: Backend 272 passed, Frontend 51 passed)
 **Release Documents:**
+- [`docs/deployment/OPERATOR_INSTALLATION_GUIDE.md`](deployment/OPERATOR_INSTALLATION_GUIDE.md) — Complete Automated Operator Installation & Provisioning Guide
+- [`docs/deployment/UNINSTALL_AND_ROLLBACK.md`](deployment/UNINSTALL_AND_ROLLBACK.md) — Teardown, State Reset, and Complete Uninstall Guide
 - [`docs/architecture/live-first-analysis.md`](architecture/live-first-analysis.md) — Live-First Suspicious File Analysis Architecture & Confinement Gate
 - [`docs/architecture/malware-classification.md`](architecture/malware-classification.md) — 17-Category Evidence-Grounded Malware Classification Taxonomy
 - [`docs/setup/cape-integration.md`](setup/cape-integration.md) — CAPE Sandbox v2 Production Integration & Isolation Attestation Guide
@@ -32,14 +35,17 @@
 | **Cytoscape.js Behavior Graph** | **VERIFIED** | `test_telemetry_integrity.py` (7/7 PASSED), `BehaviorGraphPage.tsx` | Process instance identity (`proc_{ev.id}`), temporal PID reuse resolution, API call event filtering (API calls are not processes). |
 | **Evidence Correlation Engine & Explorer** | **VERIFIED** | `test_evidence_correlation.py` (19/19 PASSED) | Bounded deterministic $O(F+E)$ correlation connecting Ghidra code observations with runtime dynamic events. HMAC-signed trace key. |
 | **Evidence-Grounded AI Intelligence** | **VERIFIED** | `test_intelligence_engine.py` (13/13 PASSED), `test_opencode_and_hardening.py` (13/13 PASSED) | Bounded evidence bundle, claim/fact verification, dedicated `X-Reporting-Token` authorization, zero external calls on mount. |
+| **Automated Provisioning & Hardware Discovery** | **VERIFIED** | `test_automated_provisioning.py` (13/13 PASSED) | Hardware detection, Profile A/B/C recommendation, core setup, Ghidra detection/containment, AI model catalog, CAPE installer scripts, guest templates, isolation evidence collector, and minimal benign PE acceptance. |
+| **7-Tier Infrastructure Readiness Dashboard** | **VERIFIED** | `InfrastructurePage.test.tsx` (3/3 PASSED), `test_health.py` | 7 core tiers (Application, Static, AI, CAPE, Guest, Confinement, Detonation), 8 subsystem cards, copyable CLI remediation commands. Never treats `APPLICATION_READY` as `DETONATION_READY`. |
 | **Doctor CLI & Safe Intake Smoke Test** | **VERIFIED** | `test_doctor_cli.py` (13/13 PASSED) | Idempotent diagnostics distinguishing app install, CAPE configuration, API reachability, and guest VM readiness. Safe non-executing intake smoke test. |
 
 ---
 
 ## 2. Test Execution Outcomes
 
-### Backend (`pytest` 9.1.1)
-- **Full Backend Test Suite:** **214 passed, 1 skipped** in 50.40s
+### Backend (`pytest` 9.2.0)
+- **Full Backend Test Suite:** **272 passed, 1 skipped** in 58.35s
+  * `test_automated_provisioning.py`: 13 passed
   * `test_cape_confinement_gate.py`: 8 passed
   * `test_ghidra_sequential_cleanup.py`: 3 passed
   * `test_cape_transport_deadline.py`: 6 passed
@@ -62,11 +68,12 @@
   * `test_real_ai_provider.py`: 6 passed
   * `test_telemetry_integrity.py`: 7 passed
   * `test_health.py`: 3 passed
+  * `test_product_completion.py`: 24 passed
 
 ### Frontend (`vitest` 4.1.12 + `tsc` + `vite` 6.4.6)
-- **Frontend Unit Tests:** **47/47 PASSED** across 5 test suites (`DesignSystemAndTheme.test.tsx` [8], `CorrelationPage.test.tsx` [10], `ReportPage.test.tsx` [11], `EnrichmentFlow.test.tsx` [4], `StaticAnalysisPage.test.tsx` [14])
+- **Frontend Unit Tests:** **51/51 PASSED** across 6 test suites (`DesignSystemAndTheme.test.tsx` [9], `CorrelationPage.test.tsx` [10], `ReportPage.test.tsx` [11], `EnrichmentFlow.test.tsx` [4], `StaticAnalysisPage.test.tsx` [14], `InfrastructurePage.test.tsx` [3])
 - **TypeScript Strict Check:** `tsc` PASSED (0 errors)
-- **Production Build:** `vite build` PASSED (clean bundle in 1.74s)
+- **Production Build:** `vite build` PASSED (clean bundle in 2.43s)
 - **Dependency Audit Baseline:** `npm audit` $\rightarrow$ 0 vulnerabilities
 
 ### Doctor & Safe Intake Smoke Test
