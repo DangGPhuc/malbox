@@ -61,6 +61,16 @@ def test_orphaned_job_recovery_marks_failed_with_audit_message(db_session):
     assert job2.completed_at is not None
 
 
+def _upload_sample(client):
+    sample_bytes = b"MZ" + b"\x90" * 128 + uuid.uuid4().hex.encode("ascii")
+    res_up = client.post(
+        "/api/v1/samples",
+        files={"file": ("retry_test.exe", io.BytesIO(sample_bytes), "application/octet-stream")},
+    )
+    assert res_up.status_code == 201
+    return res_up.json()
+
+
 def test_retry_nonexistent_analysis_returns_404(client):
     """POST /analyses/{id}/retry returns 404 if analysis ID does not exist."""
     res = client.post(f"/api/v1/analyses/{uuid.uuid4()}/retry")
@@ -70,10 +80,10 @@ def test_retry_nonexistent_analysis_returns_404(client):
 
 def test_retry_active_or_completed_analysis_returns_400(client, db_session):
     """Retrying an analysis that is COMPLETED returns 400 Bad Request."""
-    sample = _create_sample(db_session)
+    sample = _upload_sample(client)
     analysis = Analysis(
         id=str(uuid.uuid4()),
-        sample_id=sample.id,
+        sample_id=sample["id"],
         status=AnalysisStatus.COMPLETED.value,
         backend_type="replay",
         live_mode=False,
@@ -88,10 +98,10 @@ def test_retry_active_or_completed_analysis_returns_400(client, db_session):
 
 def test_retry_failed_analysis_resets_status(client, db_session):
     """Retrying a failed analysis resets status to QUEUED and clears transient error message."""
-    sample = _create_sample(db_session)
+    sample = _upload_sample(client)
     analysis = Analysis(
         id=str(uuid.uuid4()),
-        sample_id=sample.id,
+        sample_id=sample["id"],
         status=AnalysisStatus.FAILED.value,
         error_message="Previous transient error",
         backend_type="replay",
@@ -111,10 +121,10 @@ def test_retry_failed_analysis_resets_status(client, db_session):
 def test_retry_live_mode_requires_valid_operator_token(client, db_session, monkeypatch):
     """Retrying a live mode analysis requires valid X-Operator-Token."""
     monkeypatch.setattr(settings, "OPERATOR_TOKEN", "secure-op-token-999")
-    sample = _create_sample(db_session)
+    sample = _upload_sample(client)
     analysis = Analysis(
         id=str(uuid.uuid4()),
-        sample_id=sample.id,
+        sample_id=sample["id"],
         status=AnalysisStatus.FAILED.value,
         backend_type="cape",
         live_mode=True,
