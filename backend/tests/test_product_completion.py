@@ -398,6 +398,53 @@ def test_cli_setup_and_logs(isolated_workspace: Path, capsys):
     assert ret_logs == 0
 
 
+def test_setup_secrets_redacted_in_output_and_json(isolated_workspace: Path, capsys):
+    """Setup CLI and returned dictionaries must never leak raw tokens/keys."""
+    secret_token = "secret_cape_token_xyz999"
+    secret_key = "secret_ai_key_abc123"
+
+    c_res = setup_cape(
+        isolated_workspace,
+        api_token=secret_token,
+        machine="win10_analyst",
+        route="drop",
+    )
+    assert c_res["configured_values"]["MALBOX_CAPE_API_TOKEN"] == "[REDACTED]"
+
+    ai_res = setup_ai(
+        isolated_workspace,
+        provider="openai",
+        api_key=secret_key,
+        model="gpt-4o",
+    )
+    assert ai_res["configured_values"]["MALBOX_AI_API_KEY"] == "[REDACTED]"
+
+    # Test CLI --json output does not leak plaintext secrets
+    ret = cli_main(
+        ["setup", "--ai", "--provider", "openai", "--api-key", secret_key, "--json"],
+        root_dir=isolated_workspace,
+    )
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert secret_key not in out
+    assert "[REDACTED]" in out
+
+
+def test_env_backup_permissions_and_gitignore(isolated_workspace: Path):
+    """Backup files created during setup must have 0600 permissions and be in .gitignore."""
+    res = setup_cape(isolated_workspace, machine="win10_analyst", route="drop")
+    backup_path = res.get("backup_file")
+    assert backup_path is not None
+    b_file = Path(backup_path)
+    assert b_file.is_file()
+    if os.name == "posix":
+        mode = b_file.stat().st_mode & 0o777
+        assert (mode & 0o077) == 0  # No group/other access (0600)
+
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert ".env.bak*" in gitignore
+
+
 # ==============================================================================
 # 3. AI Unavailable Fallback Tests (P0 Defect Resolution)
 # ==============================================================================

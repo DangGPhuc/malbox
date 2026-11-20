@@ -15,6 +15,7 @@ from .models import (
     chmod_safe,
     parse_bool,
     parse_env_file,
+    redact_config_dict,
     resolve_effective_config,
 )
 
@@ -221,7 +222,7 @@ def setup_ghidra(
         "success": ok,
         "dry_run": dry_run,
         "backup_file": str(backup) if backup else None,
-        "configured_values": updates,
+        "configured_values": redact_config_dict(updates),
         "ghidra_operational": operational,
         "status": status_str,
         "probe": probe,
@@ -266,7 +267,7 @@ def setup_cape(
         "success": ok,
         "dry_run": dry_run,
         "backup_file": str(backup) if backup else None,
-        "configured_values": updates,
+        "configured_values": redact_config_dict(updates),
         "attestation": None,
         "notice": (
             "CAPE connection parameters configured in .env. Live detonation remains BLOCKED "
@@ -447,7 +448,7 @@ def setup_ai(
         "success": ok,
         "dry_run": dry_run,
         "backup_file": str(backup) if backup else None,
-        "configured_values": updates,
+        "configured_values": redact_config_dict(updates),
     }
 
 

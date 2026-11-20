@@ -31,6 +31,9 @@ artifacts_storage/
 # Environment configurations with secrets
 .env
 .env.local
+.env.bak*
+.env.*.bak
+*.bak
 
 # IDE & OS
 .vscode/

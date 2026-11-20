@@ -407,10 +407,14 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
         elif args.ghidra:
             res = setup_ghidra(repo_root, ghidra_home=args.ghidra_home, dry_run=args.dry_run)
         elif args.cape:
+            token_val = args.token
+            if token_val == "-":
+                import getpass
+                token_val = getpass.getpass("Enter CAPE API Token: ").strip()
             res = setup_cape(
                 repo_root,
                 api_url=args.url,
-                api_token=args.token,
+                api_token=token_val,
                 machine=args.machine,
                 route=args.route,
                 dry_run=args.dry_run,
@@ -427,11 +431,15 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
                 dry_run=args.dry_run,
             )
         elif args.ai:
+            key_val = args.api_key
+            if key_val == "-":
+                import getpass
+                key_val = getpass.getpass("Enter AI API Key: ").strip()
             res = setup_ai(
                 repo_root,
                 provider=args.provider or "local",
                 base_url=args.url,
-                api_key=args.api_key,
+                api_key=key_val,
                 model=args.model,
                 external_consent=args.external_consent,
                 dry_run=args.dry_run,
@@ -442,7 +450,8 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
             res = setup_check(repo_root, json_mode=args.json)
 
         if args.json:
-            print(json.dumps(res, indent=2, default=str))
+            from .models import redact_config_dict
+            print(json.dumps(redact_config_dict(res), indent=2, default=str))
         else:
             _format_setup_human(res)
         return 0

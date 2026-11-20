@@ -27,7 +27,36 @@ SECRET_ENV_KEYS = {
     "MALBOX_AI_API_KEY",
     "MALBOX_SECRET_KEY",
     "MALBOX_CAPE_API_TOKEN",
+    "MALBOX_OPENCODE_PROVIDER_API_KEY",
 }
+
+
+def redact_secret_value(key: str, val: Any) -> Any:
+    """Redacts values for keys containing secrets, passwords, tokens, or keys."""
+    if not val or not isinstance(val, str):
+        return val
+    k_upper = key.upper()
+    if k_upper in SECRET_ENV_KEYS or any(
+        term in k_upper for term in ("TOKEN", "KEY", "SECRET", "PASSWORD")
+    ):
+        return "[REDACTED]"
+    return val
+
+
+def redact_config_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively redacts secrets from dictionary structures."""
+    redacted: Dict[str, Any] = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            redacted[k] = redact_config_dict(v)
+        elif isinstance(v, list):
+            redacted[k] = [
+                redact_config_dict(item) if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            redacted[k] = redact_secret_value(k, v)
+    return redacted
 
 REQUIRED_REPLAY_FIXTURES = (
     "ransomware_wannacry_mock",
