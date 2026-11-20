@@ -224,3 +224,52 @@ def cancel_analysis(
 
     db.refresh(a)
     return a
+
+@router.post("/analyses/{analysis_id}/retry", response_model=AnalysisResponse, tags=["Analyses"])
+def retry_analysis(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+    run_sync: bool = Query(False),
+    x_operator_token: Optional[str] = Header(None, alias="X-Operator-Token"),
+):
+    """
+    Allows safe operator retry of failed or cancelled analysis tasks.
+    Enforces operator security token for live mode and concurrency limits.
+    """
+    a = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+    if not a:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis task not found.")
+
+    if a.status not in [AnalysisStatus.FAILED.value, AnalysisStatus.CANCELLED.value]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot retry analysis in status '{a.status}'. Only FAILED or CANCELLED analyses can be retried."
+        )
+
+    # Protect live analysis retry operations
+    if a.live_mode:
+        if not settings.OPERATOR_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Live retry blocked: Server operator security token is unconfigured (fail closed)."
+            )
+        if not x_operator_token or not hmac.compare_digest(x_operator_token, settings.OPERATOR_TOKEN):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: Valid operator token required to retry live malware analysis (X-Operator-Token)."
+            )
+
+    # Reset analysis status to QUEUED and clear transient error state
+    a.status = AnalysisStatus.QUEUED.value
+    a.error_message = None
+    a.started_at = None
+    a.completed_at = None
+    db.commit()
+    db.refresh(a)
+
+    if run_sync:
+        a = job_queue_manager.execute_sync(a.id, db)
+    else:
+        job_queue_manager.start()
+
+    return a

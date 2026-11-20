@@ -137,6 +137,22 @@ export const api = {
     return res.json();
   },
 
+  async retryAnalysis(analysisId: string, operatorToken?: string): Promise<AnalysisDetail> {
+    const headers: Record<string, string> = {};
+    if (operatorToken) {
+      headers['X-Operator-Token'] = operatorToken;
+    }
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/retry`, {
+      method: 'POST',
+      headers,
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || 'Failed to retry analysis');
+    }
+    return res.json();
+  },
+
   async getEvents(
     analysisId: string,
     params?: { category?: string; action?: string; process_id?: number; page?: number; page_size?: number }

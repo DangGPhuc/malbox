@@ -14,6 +14,8 @@ import {
   GitCompareArrows,
   Layers,
   Radio,
+  RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 import { api } from '../api/client';
 import {
@@ -55,6 +57,21 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [loading, setLoading] = useState(true);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const updated = await api.retryAnalysis(analysisId);
+      setAnalysis(updated);
+    } catch (err: any) {
+      setRetryError(err.message || 'Failed to retry analysis');
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   // Generation counter to eliminate async race conditions when switching analysis IDs (C6)
   const generationRef = useRef(0);
@@ -223,6 +240,51 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
               this environment.
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Analysis Failure / Cancellation Retry Banner */}
+      {(analysis?.status === 'FAILED' || analysis?.status === 'CANCELLED') && (
+        <div
+          role="alert"
+          style={{
+            background: 'rgba(239, 68, 68, 0.12)',
+            border: '1px solid rgba(239, 68, 68, 0.4)',
+            borderLeft: '4px solid #ef4444',
+            padding: '14px 18px',
+            borderRadius: '8px',
+            marginBottom: '1.25rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '1rem',
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 700, color: '#dc2626', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <AlertTriangle size={18} />
+              <span>Analysis {analysis.status}: {analysis.error_message || 'Task terminated unexpectedly.'}</span>
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+              Static PE triage and quarantine artifacts remain preserved. You can re-execute this task.
+            </div>
+            {retryError && (
+              <div style={{ color: '#ef4444', fontSize: '0.78rem', marginTop: '4px' }}>
+                Retry failed: {retryError}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={handleRetry}
+            disabled={retrying}
+            style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+          >
+            <RefreshCw size={14} className={retrying ? 'spin' : ''} />
+            <span>{retrying ? 'Retrying...' : 'Retry Analysis'}</span>
+          </button>
         </div>
       )}
 
