@@ -175,7 +175,11 @@ def setup_ghidra(
     enable: bool = True,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Configures Ghidra Headless static disassembly settings."""
+    """
+    Configures Ghidra Headless static disassembly settings.
+    Verifies actual tool binary, compatible JDK 21+, and containment prerequisites
+    before reporting operational readiness.
+    """
     resolved_home = ghidra_home or ""
     if not resolved_home:
         for cand in ("/usr/share/ghidra", "/opt/ghidra"):
@@ -189,11 +193,43 @@ def setup_ghidra(
     }
 
     ok, backup = update_env_values(root_dir, updates, dry_run=dry_run)
+
+    from .checks import _probe_ghidra_and_jdk
+    from .models import default_command_runner
+    probe = _probe_ghidra_and_jdk(
+        ghidra_home_raw=resolved_home,
+        which_fn=shutil.which,
+        runner=default_command_runner,
+        env_map=dict(os.environ),
+    )
+
+    operational = False
+    prerequisites_missing: List[str] = []
+    if enable:
+        if not probe.get("installed"):
+            prerequisites_missing.append("Ghidra analyzeHeadless binary not found")
+        elif not probe.get("jdk_compatible"):
+            prerequisites_missing.append(f"Compatible OpenJDK {probe.get('required_java_major', 21)}+ (with javac) missing")
+        elif not probe.get("bwrap_available"):
+            prerequisites_missing.append("Bubblewrap (bwrap) sandbox utility missing")
+        else:
+            operational = True
+
+    status_str = "OPERATIONAL" if (enable and operational) else ("CONFIGURED_NOT_OPERATIONAL" if enable else "DISABLED")
+
     return {
         "success": ok,
         "dry_run": dry_run,
         "backup_file": str(backup) if backup else None,
         "configured_values": updates,
+        "ghidra_operational": operational,
+        "status": status_str,
+        "probe": probe,
+        "prerequisites_missing": prerequisites_missing,
+        "notice": (
+            "Ghidra static analysis operational." if (enable and operational)
+            else (f"Ghidra configured in .env, but NOT operational: {'; '.join(prerequisites_missing)}." if enable else "Ghidra disabled.")
+        ),
     }
 
 
@@ -416,15 +452,107 @@ def setup_ai(
 
 
 def setup_verify(root_dir: Path) -> Dict[str, Any]:
-    """Runs end-to-end post-setup verification checks."""
+    """Runs end-to-end post-setup verification checks and exposes granular readiness tiers."""
     results = run_all_checks(root_dir)
+    res_map = {r.id: r for r in results}
+
     passed = [r for r in results if r.status == CheckStatus.PASS]
     warned = [r for r in results if r.status == CheckStatus.WARN]
     failed = [r for r in results if r.status == CheckStatus.FAIL]
     skipped = [r for r in results if r.status == CheckStatus.SKIP]
 
+    # 1. APPLICATION_READY: Core app host environment checks
+    core_check_ids = [
+        "os", "python", "node_npm", "resources", "env_config",
+        "directories", "backend_venv", "frontend_deps", "database_health", "ports",
+    ]
+    core_failures = [r for r in failed if r.id in core_check_ids]
+    application_ready = (len(core_failures) == 0)
+
+    # 2. STATIC_ANALYSIS_READY: Ghidra verified with JDK and bwrap/cgroup
+    ghidra_res = res_map.get("opt_ghidra")
+    static_analysis_ready = bool(
+        ghidra_res
+        and ghidra_res.status == CheckStatus.PASS
+        and ghidra_res.readiness_tier in ("READY", "VERIFIED")
+    )
+
+    # 3. AI_PROVIDER_READY: Local AI reachable, valid cloud credentials + consent, or mock
+    ai_res = res_map.get("opt_ai_provider")
+    ai_provider_ready = bool(
+        ai_res
+        and ai_res.status in (CheckStatus.PASS, CheckStatus.SKIP)
+        and ai_res.readiness_tier in ("READY", "VERIFIED", "CONFIGURED")
+    )
+
+    # 4. CAPE_API_READY: CAPE endpoint reachable and authenticated
+    cape_res = res_map.get("opt_cape")
+    cape_api_ready = bool(
+        cape_res
+        and cape_res.status == CheckStatus.PASS
+        and cape_res.readiness_tier in ("READY", "VERIFIED")
+    )
+
+    # 5. GUEST_READY: >= 1 available guest VM in CAPE
+    guest_ready = False
+    if cape_res and cape_res.details and isinstance(cape_res.details, dict):
+        probe_data = cape_res.details.get("probe", {})
+        if isinstance(probe_data, dict):
+            guest_ready = probe_data.get("guest_vms_available", 0) > 0
+
+    # 6. CONFINEMENT_VERIFIED: Isolation attestation verified for machine and safe isolated route
+    att_res = res_map.get("cape_attestation")
+    confinement_verified = bool(
+        att_res
+        and att_res.status == CheckStatus.PASS
+        and att_res.readiness_tier == "VERIFIED"
+    )
+
+    # 7. DETONATION_READY: All prerequisites for live malware execution met
+    detonation_ready = bool(
+        application_ready
+        and cape_api_ready
+        and guest_ready
+        and confinement_verified
+    )
+
+    # Determine overall status and detonation blockers
+    detonation_blockers: List[str] = []
+    if not cape_api_ready:
+        detonation_blockers.append("CAPE REST API is unreachable or unauthorized.")
+    if not guest_ready:
+        detonation_blockers.append("No active guest VMs registered or available in CAPE.")
+    if not confinement_verified:
+        detonation_blockers.append("VM network isolation attestation is missing, invalid, or expired.")
+
+    if detonation_ready:
+        overall_status = "DETONATION_READY"
+    elif application_ready:
+        overall_status = "APPLICATION_READY_DETONATION_BLOCKED"
+    else:
+        overall_status = "APPLICATION_NOT_READY"
+
+    readiness = {
+        "APPLICATION_READY": application_ready,
+        "STATIC_ANALYSIS_READY": static_analysis_ready,
+        "AI_PROVIDER_READY": ai_provider_ready,
+        "CAPE_API_READY": cape_api_ready,
+        "GUEST_READY": guest_ready,
+        "CONFINEMENT_VERIFIED": confinement_verified,
+        "DETONATION_READY": detonation_ready,
+    }
+
     return {
-        "overall_status": "READY" if not failed else "NOT_READY",
+        "overall_status": overall_status,
+        "readiness": readiness,
+        "APPLICATION_READY": application_ready,
+        "STATIC_ANALYSIS_READY": static_analysis_ready,
+        "AI_PROVIDER_READY": ai_provider_ready,
+        "CAPE_API_READY": cape_api_ready,
+        "GUEST_READY": guest_ready,
+        "CONFINEMENT_VERIFIED": confinement_verified,
+        "DETONATION_READY": detonation_ready,
+        "detonation_blockers": detonation_blockers,
         "counts": {
             "pass": len(passed),
             "warn": len(warned),

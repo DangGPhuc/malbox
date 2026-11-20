@@ -351,6 +351,29 @@ def test_setup_ghidra_and_cape_and_ai(isolated_workspace: Path):
     # Setup verify
     v_res = setup_verify(isolated_workspace)
     assert "overall_status" in v_res
+    assert "readiness" in v_res
+    assert "APPLICATION_READY" in v_res
+    assert "DETONATION_READY" in v_res
+    assert "CONFINEMENT_VERIFIED" in v_res
+    assert v_res["readiness"]["CONFINEMENT_VERIFIED"] is True
+
+
+def test_setup_verify_distinguishes_app_from_detonation_readiness():
+    """Missing CAPE/confinement must allow APPLICATION_READY but block DETONATION_READY on clean repo."""
+    v_res = setup_verify(REPO_ROOT)
+    assert v_res["APPLICATION_READY"] is True
+    assert v_res["DETONATION_READY"] is False
+    assert v_res["overall_status"] == "APPLICATION_READY_DETONATION_BLOCKED"
+    assert len(v_res["detonation_blockers"]) > 0
+
+
+def test_setup_ghidra_distinguishes_configuration_from_operational(isolated_workspace: Path):
+    """Configuring GHIDRA_ENABLED=true without valid binary must NOT report operational readiness."""
+    res = setup_ghidra(isolated_workspace, ghidra_home="/nonexistent/ghidra/path", enable=True)
+    assert res["success"] is True
+    assert res["ghidra_operational"] is False
+    assert res["status"] == "CONFIGURED_NOT_OPERATIONAL"
+    assert len(res["prerequisites_missing"]) > 0
 
 
 def test_setup_dry_run_does_not_modify_env(isolated_workspace: Path):

@@ -61,7 +61,14 @@ def _format_doctor_human(report: Dict[str, Any], verbose: bool = False) -> str:
         f"PASS={s['PASS']} WARN={s['WARN']} FAIL={s['FAIL']} SKIP={s['SKIP']}"
     )
     if report["exit_code"] == 0:
-        lines.append("Ready for analysis. Run `./malbox start` to launch services.")
+        unverified_detonation = any(
+            c.get("id") in ("cape_attestation", "opt_cape") and c.get("status") in ("WARN", "FAIL")
+            for c in report.get("checks", [])
+        )
+        if unverified_detonation:
+            lines.append("Application host services ready. Live malware detonation BLOCKED (CAPE/confinement unverified).")
+        else:
+            lines.append("Application ready. Run `./malbox start` to launch services.")
     else:
         lines.append("Diagnostics reported failures. Review `[FAIL]` items above before starting.")
 
@@ -119,14 +126,36 @@ def _format_setup_human(res: Dict[str, Any]) -> None:
             print(f"    Machine: {att['machine']} | Route: {att['route']} | Valid: {att['expires_in_days']} days")
         return
 
-    if "critical_issues" in res:
+    if "critical_issues" in res or "readiness" in res or "APPLICATION_READY" in res:
         print(f"malbox-ai Setup Verification: [{res.get('overall_status', 'UNKNOWN')}]")
         print("=" * 72)
+        r = res.get("readiness", {})
+        if r:
+            print("Subsystem Operational Readiness Tiers:")
+            tiers = [
+                ("APPLICATION_READY", "Core application, database, and web services"),
+                ("STATIC_ANALYSIS_READY", "Ghidra Headless, JDK 21+, and cgroup containment"),
+                ("AI_PROVIDER_READY", "Local AI / external LLM credentials and consent"),
+                ("CAPE_API_READY", "CAPE Sandbox v2 REST API connectivity"),
+                ("GUEST_READY", "Registered and available Windows guest VM"),
+                ("CONFINEMENT_VERIFIED", "Isolated route attestation & zero-egress invariants"),
+                ("DETONATION_READY", "Authorized end-to-end live malware detonation"),
+            ]
+            for key, desc in tiers:
+                val = r.get(key, res.get(key, False))
+                badge = "[READY]" if val else ("[BLOCKED]" if "DETONATION" in key or "CONFINEMENT" in key else "[NOT READY]")
+                print(f"  * {badge:<11} {key:<24}: {desc}")
+            print("-" * 72)
         c = res.get("counts", {})
         print(f"Results: PASS={c.get('pass', 0)} WARN={c.get('warn', 0)} FAIL={c.get('fail', 0)} SKIP={c.get('skip', 0)}")
+        if res.get("detonation_blockers"):
+            print("-" * 72)
+            print("Detonation Blockers (Blocking Live Malware Execution):")
+            for b in res["detonation_blockers"]:
+                print(f"  ! {b}")
         if res.get("critical_issues"):
             print("-" * 72)
-            print("Critical Issues (Blocking Live Detonation):")
+            print("Critical Issues:")
             for iss in res["critical_issues"]:
                 print(f"  ! {iss}")
         if res.get("warnings"):
