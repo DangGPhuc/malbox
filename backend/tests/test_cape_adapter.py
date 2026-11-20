@@ -12,7 +12,10 @@ def test_cape_readiness_failure(monkeypatch):
     assert len(res["prerequisites_missing"]) > 0
 
 def test_cape_readiness_mocked(monkeypatch):
-    """Verifies CAPE readiness parsing when API responds with 200."""
+    """Verifies CAPE readiness parsing when API responds with 200, machine metadata, and verified confinement."""
+    from app.services.sandbox.confinement import create_isolation_attestation
+    create_isolation_attestation(verified_machine="*", verified_route="drop")
+
     backend = CapeSandboxBackend(api_url="http://mock-cape.local")
 
     class MockResponse:
@@ -22,6 +25,7 @@ def test_cape_readiness_mocked(monkeypatch):
                 "error": False,
                 "data": {
                     "version": "2.4.0-CAPE",
+                    "machines": {"total": 2, "available": 2},
                     "tasks": {"total": 150, "completed": 140, "running": 2}
                 }
             }
@@ -31,6 +35,8 @@ def test_cape_readiness_mocked(monkeypatch):
     assert res["ready"] is True
     assert res["version"] == "2.4.0-CAPE"
     assert res["tasks_summary"]["total"] == 150
+    assert res["guest_vms_total"] == 2
+    assert res["confinement_verified"] is True
 
 def test_cape_submission_and_report_transform(monkeypatch, tmp_path):
     backend = CapeSandboxBackend(api_url="http://mock-cape.local")
@@ -673,6 +679,9 @@ def test_cape_pipeline_worker_e2e_regression_mocked_http(client, monkeypatch, tm
 
     monkeypatch.setattr(httpx.Client, "post", mock_post)
     monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    from app.services.sandbox.confinement import create_isolation_attestation
+    create_isolation_attestation(verified_machine="*", verified_route="drop")
 
     # 2. Trigger synchronous analysis creation through API
     payload = {

@@ -124,3 +124,43 @@ Verify readiness using the Doctor CLI:
 ```
 If CAPE is online and responsive, the doctor output will confirm:
 `[PASS] Optional: CAPE Sandbox: CAPE Sandbox READY at http://127.0.0.1:8008 (version: 2.4-CAPE).`
+
+---
+
+## 5. Mandatory Operator Confinement Attestation (`cape_isolation_attestation.json`)
+
+### 5.1 Why Attestation is Mandatory
+Configuring `route = drop` or `route = none` in `cuckoo.conf` or `.env` is **not sufficient proof of network isolation**. Misconfigurations, host routing table changes, or hypervisor bridge bypasses could permit guest VM outbound traffic to the local network or internet.
+
+To enforce fail-closed isolation safety, Malbox implements an **Independent Operator Attestation Contract** (`verify_cape_confinement`):
+- Dynamic detonation is **blocked** unless an operator has independently verified network confinement and written an attestation.
+- The attestation must specify the verified guest machine (or `*`), a permitted safe isolated route (`drop`, `none`, or `isolated`), and an unexpired `expires_at` ISO-8601 timestamp.
+- If the attestation is missing, expired, or mismatches the requested submission machine/route, the pipeline immediately halts with status `FAILED` and error `"CAPE confinement check failed"`.
+
+### 5.2 Generating or Renewing Operator Attestation
+
+Attestations are stored by default at:
+`data/cape_isolation_attestation.json` (or path configured in `MALBOX_CAPE_ISOLATION_ATTESTATION_PATH`).
+
+To generate or renew the attestation file using Python:
+
+```bash
+# Activate malbox environment and run attestation generator
+python3 -c "
+from app.services.sandbox.confinement import create_isolation_attestation
+p = create_isolation_attestation(
+    verified_machine='win10_analyst', # or '*' for all machines
+    verified_route='drop',             # must be 'drop', 'none', or 'isolated'
+    verifier='analyst@secops',
+    validity_seconds=86400             # 24-hour expiration
+)
+print(f'Confinement attestation active at {p}')
+"
+```
+
+### 5.3 Three Operational Readiness States
+
+1. **Mocked Unit/E2E Testing:** Uses synthetic responses and ephemeral test attestations in pytest fixtures (`create_isolation_attestation(verified_machine='*', verified_route='drop')`).
+2. **Benign Acceptance Verification:** Real benign PE binaries (e.g., standard Windows sysinternals or compilers) detonated on an attested isolated guest machine to verify the live integration lifecycle.
+3. **Host Safety Failsafe:** Real malware execution remains strictly blocked pending explicit operator verification, operator token authentication, and signed attestation.
+

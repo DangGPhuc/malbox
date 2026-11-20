@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     CAPE_PROFILE_TAG_MAP: Dict[str, str] = Field(default_factory=dict)
     CAPE_DEFAULT_MACHINE: str = ""
     CAPE_DEFAULT_NETWORK_ROUTE: str = ""
+    CAPE_ISOLATION_ATTESTATION_PATH: Optional[str] = None
 
     def get_database_url(self) -> str:
         if self.DATABASE_URL:

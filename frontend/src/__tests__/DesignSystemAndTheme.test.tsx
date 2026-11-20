@@ -391,10 +391,10 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
     const analyzeBtn = screen.getByRole('button', { name: /Analyze File/i });
     expect(analyzeBtn).toBeDisabled();
 
-    // Fill operator token and verify session storage (never long-lived localStorage)
+    // Fill operator token and verify transient in-memory state (NEVER written to sessionStorage or localStorage)
     const tokenInput = screen.getByPlaceholderText(/Enter MALBOX_OPERATOR_TOKEN from .env/i);
     fireEvent.change(tokenInput, { target: { value: 'persisted-operator-token' } });
-    expect(sessionStorage.getItem('malbox_operator_session_token')).toBe('persisted-operator-token');
+    expect(sessionStorage.getItem('malbox_operator_session_token')).toBeNull();
     expect(localStorage.getItem('malbox_operator_token')).toBeNull();
 
     // Still disabled without explicit approval

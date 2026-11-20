@@ -1,9 +1,12 @@
 import time
 import threading
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 from app.models.analysis import (
@@ -185,16 +188,52 @@ class PipelineWorker:
                         )
                         # Wait synchronously for Ghidra to finish so stages execute strictly sequentially
                         if static_worker_manager._active_future is not None:
+                            ghidra_timeout = min(
+                                float(analysis.timeout_seconds),
+                                float(getattr(settings, "GHIDRA_TIMEOUT_SECONDS", 120))
+                            )
                             try:
-                                ghidra_timeout = min(
-                                    float(analysis.timeout_seconds),
-                                    float(getattr(settings, "GHIDRA_TIMEOUT_SECONDS", 120))
-                                )
                                 static_worker_manager._active_future.result(timeout=ghidra_timeout)
                             except TimeoutError:
-                                static_worker_manager.cancel_active()
-                    except Exception:
-                        pass
+                                static_worker_manager.cancel_active(wait_seconds=2.0)
+                                is_clean = static_worker_manager.wait_for_completion(timeout=3.0)
+                                if not is_clean or static_worker_manager.is_process_active():
+                                    # Worker refused immediate cancellation; CAPE MUST NOT BE DISPATCHED!
+                                    safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                                    analysis.error_message = (
+                                        "Ghidra static analysis timed out and background worker process remained active; "
+                                        "dynamic execution blocked to ensure host safety and execution isolation."
+                                    )
+                                    analysis.completed_at = datetime.now(timezone.utc)
+                                    self.db.commit()
+                                    return analysis
+
+                                # Record accurate TIMED_OUT status for static analysis record
+                                if job_rec is not None:
+                                    db_rec = (
+                                        self.db.query(StaticAnalysisRecord)
+                                        .filter(StaticAnalysisRecord.id == job_rec.id)
+                                        .first()
+                                    )
+                                    if db_rec and db_rec.status in ("QUEUED", "RUNNING"):
+                                        db_rec.status = "TIMED_OUT"
+                                        db_rec.error_message = f"Ghidra static analysis exceeded {ghidra_timeout}s timeout and was cancelled."
+                                        db_rec.completed_at = datetime.now(timezone.utc)
+                                        self.db.commit()
+                    except Exception as exc:
+                        logger.warning(f"Static analysis failed for analysis {analysis.id}: {exc}")
+                        now_dt = datetime.now(timezone.utc)
+                        fail_rec = StaticAnalysisRecord(
+                            sample_id=sample.id,
+                            analysis_id=analysis.id,
+                            sample_sha256=sample.sha256,
+                            status="FAILED",
+                            error_message=f"Static analysis dispatch failed: {str(exc)[:500]}",
+                            created_at=now_dt,
+                            completed_at=now_dt,
+                        )
+                        self.db.add(fail_rec)
+                        self.db.commit()
                 else:
                     now_dt = datetime.now(timezone.utc)
                     unavail_res = StaticAnalysisResult(
@@ -250,11 +289,11 @@ class PipelineWorker:
                 from app.services.sandbox.cape import CapeSandboxBackend
                 sandbox = CapeSandboxBackend()
 
-                # Server-side readiness check immediately before CAPE submission
+                # Server-side readiness & confinement check immediately before CAPE submission
                 readiness = sandbox.check_readiness(timeout=2.0)
-                if not readiness.get("ready"):
+                if not readiness.get("ready") or not readiness.get("confinement_verified"):
                     safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
-                    err_msg = f"CAPE backend readiness check failed: {readiness.get('error')}"
+                    err_msg = f"CAPE backend confinement or readiness check failed: {readiness.get('error') or readiness.get('confinement_details')}"
                     analysis.error_message = err_msg
                     analysis.completed_at = datetime.now(timezone.utc)
                     self.db.commit()
@@ -285,6 +324,31 @@ class PipelineWorker:
                     cape_transport_options["options"] = f"route={settings.CAPE_DEFAULT_NETWORK_ROUTE}"
                 if analysis.profile == "ransomware_focus":
                     cape_transport_options["enforce_timeout"] = "1"
+
+                # Verify confinement specifically for the selected machine & route
+                from app.services.sandbox.confinement import verify_cape_confinement
+                conf_specific = verify_cape_confinement(
+                    target_machine=cape_transport_options.get("machine"),
+                    target_route=getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "") or None,
+                )
+                if not conf_specific.is_verified:
+                    safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                    err_msg = f"CAPE confinement check failed for selected submission target: {conf_specific.error}"
+                    analysis.error_message = err_msg
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    try:
+                        from app.schemas.report import RiskAssessment
+                        safe_risk = RiskAssessment(score=0, level="Inconclusive / Incomplete", confidence=0.0)
+                        ReportGenerator(self.db).generate_report(
+                            analysis.id,
+                            safe_risk,
+                            ai_summary=f"Dynamic execution blocked by confinement gate: {err_msg}. Static disassembly and triage findings preserved.",
+                            env_metadata={"telemetry_completeness": "UNAVAILABLE", "telemetry_notes": [err_msg]},
+                        )
+                    except Exception:
+                        pass
+                    return analysis
 
                 # Automatic package selection (exe vs dll)
                 is_dll = pe_meta.get("is_dll", False) or sample.file_name.lower().endswith(".dll")
@@ -421,7 +485,11 @@ class PipelineWorker:
             # Bound artifact downloads within remaining deadline
             if time.monotonic() < overall_deadline:
                 artifacts_dir = settings.ARTIFACTS_DIR / analysis.id
-                sandbox.generate_artifacts(backend_task_id, artifacts_dir)
+                try:
+                    sandbox.generate_artifacts(backend_task_id, artifacts_dir, deadline=overall_deadline)
+                except Exception as art_err:
+                    if "raw_results" in locals() and isinstance(raw_results, dict):
+                        raw_results.setdefault("telemetry_notes", []).append(f"Forensic artifact retrieval note: {str(art_err)}")
 
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
@@ -461,8 +529,9 @@ class PipelineWorker:
                     triggered_automatically=True,
                 )
             except Exception as e:
-                # Correlation failure is recorded without blocking reporting
-                pass
+                logger.warning(f"Correlation computation failed for analysis {analysis.id}: {e}")
+                if "raw_results" in locals() and isinstance(raw_results, dict):
+                    raw_results.setdefault("telemetry_notes", []).append(f"Correlation computation note: {str(e)}")
 
             # 7. AI OBSERVATION EVALUATION (Evaluates Real Findings & Telemetry Gaps)
             events = analysis.events or []

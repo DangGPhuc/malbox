@@ -135,6 +135,30 @@ class StaticAnalysisWorkerManager:
         with self._lock:
             return self._active_job_id is not None
 
+    def is_process_active(self) -> bool:
+        """Returns True if a Ghidra static analysis job or worker thread is actively executing."""
+        with self._lock:
+            if self._active_job_id is not None:
+                return True
+            if self._active_future is not None and not self._active_future.done():
+                return True
+            return False
+
+    def wait_for_completion(self, timeout: float = 5.0) -> bool:
+        """
+        Waits for any active Ghidra background worker future to finish or terminate.
+        Returns True if the worker is idle, False if still running after timeout.
+        """
+        with self._lock:
+            fut = self._active_future
+        if fut is None or fut.done():
+            return True
+        try:
+            fut.result(timeout=timeout)
+            return True
+        except Exception:
+            return not self.is_process_active()
+
     def active_job_id(self) -> Optional[str]:
         with self._lock:
             return self._active_job_id
@@ -384,12 +408,18 @@ class StaticAnalysisWorkerManager:
                     self._cancel_event = None
                     self._active_future = None
 
-    def cancel_active(self) -> bool:
+    def cancel_active(self, wait_seconds: float = 2.0) -> bool:
         with self._lock:
             if self._cancel_event is not None:
                 self._cancel_event.set()
-                return True
-            return False
+            fut = self._active_future
+
+        if fut is not None and wait_seconds > 0:
+            try:
+                fut.result(timeout=wait_seconds)
+            except Exception:
+                pass
+        return not self.is_process_active()
 
     def stop(self, wait_seconds: float = 5.0) -> int:
         """

@@ -62,8 +62,19 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
                 guest_vm_ready = bool(probe.get("guest_vm_ready", False))
                 network_isolation_verified = bool(probe.get("confinement_verified", False))
                 readiness_status = "ready"
-                details = f"CAPE API ready (version {cape_version}); {guest_vms_available}/{guest_vms_total} guest VMs available."
-            elif status_probe in ("no_guests_configured", "no_guests_available"):
+                details = f"CAPE API ready (version {cape_version}); {guest_vms_available}/{guest_vms_total} guest VMs available. Confinement verified."
+            elif status_probe == "unverified_confinement":
+                cape_reachable = True
+                cape_authenticated = True
+                cape_compatible = True
+                cape_version = probe.get("version")
+                guest_vms_total = probe.get("guest_vms_total", 0)
+                guest_vms_available = probe.get("guest_vms_available", 0)
+                guest_vm_ready = bool(probe.get("guest_vm_ready", False))
+                network_isolation_verified = False
+                readiness_status = "unverified_confinement"
+                details = probe.get("error") or "Guest network isolation is unverified; live detonation blocked."
+            elif status_probe in ("no_guests_configured", "no_guests_available", "missing_machine_metadata"):
                 cape_reachable = True
                 cape_authenticated = True
                 cape_compatible = True
@@ -105,8 +116,8 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
     # Loaded rules count
     rules_loaded = 0
     try:
-        from app.services.detection.rules import DETECTION_RULES
-        rules_loaded = len(DETECTION_RULES)
+        from app.services.detection.rules import BEHAVIORAL_RULES
+        rules_loaded = len(BEHAVIORAL_RULES)
     except Exception:
         rules_loaded = 0
 
@@ -118,6 +129,7 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
         and cape_authenticated
         and cape_compatible
         and guest_vm_ready
+        and network_isolation_verified
     )
 
     return {
@@ -138,3 +150,4 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
         "rules_loaded": rules_loaded,
         "details": details,
     }
+

@@ -105,34 +105,51 @@ class CapeSandboxBackend(SandboxBackend):
                         }
 
                     cuckoo_data = data.get("data", {}) if isinstance(data, dict) else {}
-                    machines_info = cuckoo_data.get("machines", {}) if isinstance(cuckoo_data, dict) else {}
-                    total_machines = machines_info.get("total", 0) if isinstance(machines_info, dict) else 0
-                    avail_machines = machines_info.get("available", 0) if isinstance(machines_info, dict) else 0
 
-                    # Truthful guest readiness: HTTP 200 alone is not proof of guest availability
-                    if "machines" in cuckoo_data:
-                        has_guest_vms = total_machines > 0 and avail_machines > 0
-                        if not has_guest_vms:
-                            err_msg = (
-                                "CAPE API is reachable, but no guest analysis machines are registered."
-                                if total_machines == 0
-                                else f"All {total_machines} guest machines are currently busy or unavailable."
-                            )
-                            status_str = "no_guests_configured" if total_machines == 0 else "no_guests_available"
-                            ready_flag = False
-                        else:
-                            err_msg = None
-                            status_str = "ready"
-                            ready_flag = True
+                    # Strict Guest Readiness: HTTP 200 alone is not proof of guest availability
+                    # Missing machine metadata must NOT imply guest readiness (fails closed)
+                    if "machines" not in cuckoo_data:
+                        has_guest_vms = False
+                        ready_flag = False
+                        status_str = "missing_machine_metadata"
+                        err_msg = "CAPE API response does not contain machine metadata; guest readiness cannot be verified."
+                        total_machines = 0
+                        avail_machines = 0
                     else:
-                        has_guest_vms = True
-                        ready_flag = True
-                        status_str = "ready"
-                        err_msg = None
+                        machines_info = cuckoo_data.get("machines", {}) if isinstance(cuckoo_data, dict) else {}
+                        total_machines = machines_info.get("total", 0) if isinstance(machines_info, dict) else 0
+                        avail_machines = machines_info.get("available", 0) if isinstance(machines_info, dict) else 0
+                        if total_machines == 0:
+                            has_guest_vms = False
+                            ready_flag = False
+                            status_str = "no_guests_configured"
+                            err_msg = "CAPE API is reachable, but no guest analysis machines are registered."
+                        elif avail_machines == 0:
+                            has_guest_vms = False
+                            ready_flag = False
+                            status_str = "no_guests_available"
+                            err_msg = f"All {total_machines} guest machines are currently busy or unavailable."
+                        else:
+                            has_guest_vms = True
+                            ready_flag = True
+                            status_str = "ready"
+                            err_msg = None
 
+                    # Strict Confinement Gate: Independent operator isolation attestation contract
+                    from app.services.sandbox.confinement import verify_cape_confinement
                     from app.core.config import settings
-                    default_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "")
-                    confinement_ok = str(default_route).lower() in ("drop", "none", "isolated")
+
+                    conf_res = verify_cape_confinement(
+                        target_machine=getattr(settings, "CAPE_DEFAULT_MACHINE", "") or None,
+                        target_route=getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "") or None,
+                    )
+                    confinement_ok = conf_res.is_verified
+
+                    # If guest VMs are available but confinement is unverified, readiness fails closed
+                    if ready_flag and not confinement_ok:
+                        ready_flag = False
+                        status_str = "unverified_confinement"
+                        err_msg = conf_res.error or "Guest network isolation is unverified; live detonation blocked."
 
                     return {
                         "backend": "cape",
@@ -144,9 +161,12 @@ class CapeSandboxBackend(SandboxBackend):
                         "guest_vms_available": avail_machines,
                         "guest_vm_ready": has_guest_vms,
                         "confinement_verified": confinement_ok,
+                        "confinement_status": conf_res.status,
+                        "confinement_details": conf_res.error if not confinement_ok else "Isolation verified",
                         "api_url": self.api_url,
                         "error": err_msg,
                     }
+
                 elif resp.status_code in (401, 403):
                     return {
                         "backend": "cape",
@@ -477,10 +497,11 @@ class CapeSandboxBackend(SandboxBackend):
             if is_cancelled_fn and is_cancelled_fn():
                 raise RuntimeError(f"Report collection cancelled for task {backend_task_id}")
 
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError(f"Monotonic deadline exceeded waiting for CAPE report for task {backend_task_id}")
 
-            timeout_per_request = min(30.0, max(5.0, deadline - time.monotonic()))
+            timeout_per_request = min(30.0, remaining)
 
             try:
                 with httpx.Client(timeout=timeout_per_request, headers=self._get_headers()) as client:
@@ -536,7 +557,14 @@ class CapeSandboxBackend(SandboxBackend):
                                     except Exception as e:
                                         raise RuntimeError(f"CAPE report returned invalid JSON: {str(e)}")
 
-                            if cape_report is None and hasattr(resp, "json") and callable(resp.json):
+                            if cape_report is None and hasattr(resp, "content"):
+                                if len(resp.content) > MAX_REPORT_BYTES:
+                                    raise ValueError(
+                                        f"CAPE report body ({len(resp.content)} bytes) exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes."
+                                    )
+                                if hasattr(resp, "json") and callable(resp.json):
+                                    cape_report = resp.json()
+                            elif cape_report is None and hasattr(resp, "json") and callable(resp.json):
                                 cape_report = resp.json()
 
                             if cape_report is None:
@@ -597,10 +625,16 @@ class CapeSandboxBackend(SandboxBackend):
         except Exception:
             return False
 
-    def generate_artifacts(self, backend_task_id: str, dest_dir: Path) -> List[Dict[str, Any]]:
+    def generate_artifacts(
+        self,
+        backend_task_id: str,
+        dest_dir: Path,
+        max_timeout: Optional[float] = None,
+        deadline: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Fetches official forensic artifacts (PCAP) from CAPE using bounded streaming,
-        disk space validation, and atomic temporary file cleanup.
+        monotonic deadline enforcement, disk space validation, and atomic temporary file cleanup.
         Never automatically downloads extracted executable binaries.
         """
         import shutil
@@ -611,6 +645,22 @@ class CapeSandboxBackend(SandboxBackend):
         pcap_endpoint = f"{self.api_url}/apiv2/tasks/get/pcap/{backend_task_id}/"
         tmp_pcap = dest_dir / f"traffic_{backend_task_id}.tmp"
 
+        if deadline is not None:
+            effective_deadline = deadline
+        elif max_timeout is not None:
+            effective_deadline = time.monotonic() + max_timeout
+        else:
+            effective_deadline = time.monotonic() + 30.0
+
+        if time.monotonic() >= effective_deadline:
+            return artifacts
+
+        remaining_time = effective_deadline - time.monotonic()
+        if remaining_time <= 0:
+            return artifacts
+
+        timeout_per_request = min(30.0, remaining_time)
+
         try:
             # Check available disk space (require at least 200MB free)
             try:
@@ -620,7 +670,7 @@ class CapeSandboxBackend(SandboxBackend):
             except OSError:
                 pass
 
-            with httpx.Client(timeout=30.0, headers=self._get_headers()) as client:
+            with httpx.Client(timeout=timeout_per_request, headers=self._get_headers()) as client:
                 with client.stream("GET", pcap_endpoint) as resp:
                     if resp.status_code == 200:
                         cl_header = resp.headers.get("content-length")
@@ -638,6 +688,8 @@ class CapeSandboxBackend(SandboxBackend):
                         hasher = hashlib.sha256()
                         with open(tmp_pcap, "wb") as f:
                             for chunk in resp.iter_bytes(chunk_size=65536):
+                                if time.monotonic() >= effective_deadline:
+                                    raise TimeoutError("Monotonic deadline exceeded while streaming artifact.")
                                 written_bytes += len(chunk)
                                 if written_bytes > MAX_ARTIFACT_BYTES:
                                     raise ValueError(

@@ -33,25 +33,20 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
   const [health, setHealth] = useState<HealthStatus | null>(propHealth || null);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Operator token & safety approval: scoped to active session only, never persistent in localStorage
-  const [operatorToken, setOperatorToken] = useState<string>(() => {
-    try {
-      localStorage.removeItem('malbox_operator_token');
-    } catch {
-      // ignore
-    }
-    try {
-      return sessionStorage.getItem('malbox_operator_session_token') || '';
-    } catch {
-      return '';
-    }
-  });
+  // Operator token & safety approval: strictly transient in-memory state only (never in localStorage or sessionStorage)
+  const [operatorToken, setOperatorToken] = useState<string>('');
   const [approvedByUser, setApprovedByUser] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    try {
+      localStorage.removeItem('malbox_operator_token');
+      sessionStorage.removeItem('malbox_operator_session_token');
+    } catch {
+      // ignore
+    }
     if (!propHealth) {
       api.getHealth().then(setHealth).catch(() => {});
     }
@@ -59,11 +54,6 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
 
   const handleOperatorTokenChange = (val: string) => {
     setOperatorToken(val);
-    try {
-      sessionStorage.setItem('malbox_operator_session_token', val);
-    } catch {
-      // ignore
-    }
   };
 
   const handleFileProcess = async (selectedFile: File) => {
@@ -163,9 +153,10 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
     }
   };
 
-  // Truthful server-controlled readiness: unknown readiness is never treated as ready (fails closed)
-  const isCapeReady = Boolean(
-    health?.ready_for_analysis ?? (health?.live_mode_enabled && health?.cape_reachable && health?.guest_vm_ready)
+  // Truthful server-controlled readiness: requires all mandatory prerequisites including verified confinement
+  const isCapeReady = Boolean(health?.ready_for_analysis === true);
+  const isConfinementUnverified = Boolean(
+    health?.cape_reachable && health?.network_isolation_verified === false
   );
 
   return (
@@ -532,8 +523,16 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                 gap: '0.5rem',
                 padding: '10px 14px',
                 borderRadius: '8px',
-                backgroundColor: isCapeReady ? 'rgba(21, 128, 61, 0.08)' : 'rgba(255, 177, 16, 0.12)',
-                border: isCapeReady ? '1px solid rgba(21, 128, 61, 0.25)' : '1px solid rgba(255, 177, 16, 0.3)',
+                backgroundColor: isCapeReady
+                  ? 'rgba(21, 128, 61, 0.08)'
+                  : isConfinementUnverified
+                  ? 'rgba(246, 73, 50, 0.08)'
+                  : 'rgba(255, 177, 16, 0.12)',
+                border: isCapeReady
+                  ? '1px solid rgba(21, 128, 61, 0.25)'
+                  : isConfinementUnverified
+                  ? '1px solid rgba(246, 73, 50, 0.25)'
+                  : '1px solid rgba(255, 177, 16, 0.3)',
                 fontSize: '0.82rem',
               }}
             >
@@ -542,7 +541,17 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                   <CheckCircle2 size={16} color="#15803d" />
                   <span style={{ fontWeight: 600, color: '#15803d' }}>CAPE Sandbox Ready:</span>
                   <span style={{ color: 'var(--text-secondary)' }}>
-                    Isolated guest environment configured for live automated detonation.
+                    Isolated guest environment and network confinement verified for live automated detonation.
+                  </span>
+                </>
+              ) : isConfinementUnverified ? (
+                <>
+                  <AlertTriangle size={16} color="var(--danger)" />
+                  <span style={{ fontWeight: 600, color: 'var(--danger)' }}>
+                    CAPE Confinement Gate Blocked:
+                  </span>
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    {health?.readiness_details || 'Guest network isolation is unverified. Detonation is blocked pending operator isolation verification.'}
                   </span>
                 </>
               ) : (

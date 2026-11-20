@@ -13,6 +13,19 @@ from app.models.analysis import Analysis, AnalysisStatus
 from app.models.sample import Sample
 from app.models.static_analysis import StaticAnalysisRecord
 from app.workers.pipeline_worker import PipelineWorker
+from app.services.sandbox.confinement import create_isolation_attestation
+
+
+@pytest.fixture(autouse=True)
+def setup_test_isolation_attestation(tmp_path, monkeypatch):
+    att_file = tmp_path / "test_attestation.json"
+    monkeypatch.setattr(settings, "CAPE_ISOLATION_ATTESTATION_PATH", str(att_file))
+    create_isolation_attestation(
+        verified_machine="*",
+        verified_route="drop",
+        attestation_path=att_file,
+    )
+    yield
 
 
 def create_test_pe_sample(db_session, tmp_path, name="sample.exe") -> Sample:
@@ -75,7 +88,7 @@ def test_pipeline_strict_stage_ordering_and_upstream_evidence_in_report(db_sessi
     # 2. Mock CAPE backend methods
     from app.services.sandbox.cape import CapeSandboxBackend
     def mock_check_readiness(self, timeout=2.0):
-        return {"ready": True, "error": None}
+        return {"ready": True, "confinement_verified": True, "error": None}
 
     def mock_submit_sample(self, sample_path, profile="standard", timeout_seconds=120, options=None):
         execution_order.append("cape_submit")
@@ -111,7 +124,7 @@ def test_pipeline_strict_stage_ordering_and_upstream_evidence_in_report(db_sessi
     monkeypatch.setattr(CapeSandboxBackend, "submit_sample", mock_submit_sample)
     monkeypatch.setattr(CapeSandboxBackend, "get_task_status", mock_get_task_status)
     monkeypatch.setattr(CapeSandboxBackend, "collect_results", mock_collect_results)
-    monkeypatch.setattr(CapeSandboxBackend, "generate_artifacts", lambda self, tid, d: [])
+    monkeypatch.setattr(CapeSandboxBackend, "generate_artifacts", lambda *a, **k: [])
 
     # 3. Spy Detection Engine
     from app.services.detection.engine import DetectionEngine
@@ -191,7 +204,7 @@ def test_pipeline_error_path_ghidra_disabled(db_session, monkeypatch, tmp_path):
     db_session.commit()
 
     from app.services.sandbox.cape import CapeSandboxBackend
-    monkeypatch.setattr(CapeSandboxBackend, "check_readiness", lambda self, timeout=2.0: {"ready": True, "error": None})
+    monkeypatch.setattr(CapeSandboxBackend, "check_readiness", lambda self, timeout=2.0: {"ready": True, "confinement_verified": True, "error": None})
     monkeypatch.setattr(CapeSandboxBackend, "submit_sample", lambda *a, **k: "9002")
     monkeypatch.setattr(CapeSandboxBackend, "get_task_status", lambda *a, **k: {"status": "reported", "is_ready_for_report": True})
     monkeypatch.setattr(CapeSandboxBackend, "collect_results", lambda *a, **k: {
@@ -267,7 +280,7 @@ def test_pipeline_error_path_report_retrieval_failure(db_session, monkeypatch, t
     db_session.commit()
 
     from app.services.sandbox.cape import CapeSandboxBackend
-    monkeypatch.setattr(CapeSandboxBackend, "check_readiness", lambda self, timeout=2.0: {"ready": True, "error": None})
+    monkeypatch.setattr(CapeSandboxBackend, "check_readiness", lambda self, timeout=2.0: {"ready": True, "confinement_verified": True, "error": None})
     monkeypatch.setattr(CapeSandboxBackend, "submit_sample", lambda *a, **k: "9003")
     monkeypatch.setattr(CapeSandboxBackend, "get_task_status", lambda *a, **k: {"status": "reported", "is_ready_for_report": True})
 
@@ -316,7 +329,7 @@ def test_pipeline_error_path_deadline_timeout(db_session, monkeypatch, tmp_path)
         return p, v
 
     monkeypatch.setattr(AnalysisPlanner, "create_and_validate_plan", mock_short_plan)
-    monkeypatch.setattr(CapeSandboxBackend, "check_readiness", lambda self, timeout=2.0: {"ready": True, "error": None})
+    monkeypatch.setattr(CapeSandboxBackend, "check_readiness", lambda self, timeout=2.0: {"ready": True, "confinement_verified": True, "error": None})
     monkeypatch.setattr(CapeSandboxBackend, "submit_sample", lambda *a, **k: "9004")
     # Always report still running until timeout
     monkeypatch.setattr(CapeSandboxBackend, "get_task_status", lambda *a, **k: {"status": "running", "is_ready_for_report": False})
