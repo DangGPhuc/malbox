@@ -358,9 +358,19 @@ def test_setup_ghidra_and_cape_and_ai(isolated_workspace: Path):
     assert v_res["readiness"]["CONFINEMENT_VERIFIED"] is True
 
 
-def test_setup_verify_distinguishes_app_from_detonation_readiness():
+def test_setup_verify_distinguishes_app_from_detonation_readiness(isolated_workspace: Path):
     """Missing CAPE/confinement must allow APPLICATION_READY but block DETONATION_READY on clean repo."""
-    v_res = setup_verify(REPO_ROOT)
+    (isolated_workspace / "data" / "quarantine").mkdir(parents=True, exist_ok=True)
+    (isolated_workspace / "data" / "artifacts").mkdir(parents=True, exist_ok=True)
+    (isolated_workspace / ".malbox").mkdir(parents=True, exist_ok=True)
+    env_lines = (isolated_workspace / ".env").read_text(encoding="utf-8").splitlines()
+    new_env = [
+        line if not line.startswith("MALBOX_OPERATOR_TOKEN=") else "MALBOX_OPERATOR_TOKEN=test-operator-token-xyz"
+        for line in env_lines
+    ]
+    (isolated_workspace / ".env").write_text("\n".join(new_env), encoding="utf-8")
+
+    v_res = setup_verify(isolated_workspace)
     assert v_res["APPLICATION_READY"] is True
     assert v_res["DETONATION_READY"] is False
     assert v_res["overall_status"] == "APPLICATION_READY_DETONATION_BLOCKED"
