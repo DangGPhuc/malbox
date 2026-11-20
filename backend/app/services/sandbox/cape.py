@@ -1161,3 +1161,7 @@ class CapeSandboxBackend(SandboxBackend):
             },
             "artifacts": extracted_artifacts,
         }
+
+
+cape_backend = CapeSandboxBackend()
+cape_adapter = cape_backend

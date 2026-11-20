@@ -259,7 +259,70 @@ def retry_analysis(
                 detail="Unauthorized: Valid operator token required to retry live malware analysis (X-Operator-Token)."
             )
 
-    # Reset analysis status to QUEUED and clear transient error state
+        # Recheck Live Mode & confinement readiness
+        if a.backend_type == SandboxBackendType.CAPE.value:
+            from app.services.sandbox.confinement import verify_cape_confinement
+            target_machine = getattr(settings, "CAPE_DEFAULT_MACHINE", "win10_analyst")
+            target_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "drop")
+            conf_res = verify_cape_confinement(target_machine=target_machine, target_route=target_route)
+            if not conf_res.is_verified:
+                raise HTTPException(
+                    status_code=status.HTTP_412_PRECONDITION_FAILED,
+                    detail=f"Live retry blocked by confinement policy: {conf_res.error or conf_res.status}"
+                )
+
+            # Reconcile previous CAPE task before retrying
+            if a.external_task_id:
+                from app.services.sandbox.cape import cape_adapter
+                try:
+                    task_status = cape_adapter.get_task_status(a.external_task_id)
+                    cape_status = str(task_status.get("cape_status", "")).lower()
+
+                    # Prevent duplicate remote detonation if task is still running or pending
+                    if cape_status in ("running", "processing", "pending", "distributed"):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Cannot retry analysis: remote CAPE task {a.external_task_id} is still active (status: {cape_status}). Reconcile or cancel remote task before retrying."
+                        )
+
+                    # For cancelled tasks, confirm remote cancellation/cleanup before retrying
+                    if a.status == AnalysisStatus.CANCELLED.value:
+                        if cape_status not in ("completed", "reported", "failed", "not_found", "deleted"):
+                            cape_adapter.cancel_task(a.external_task_id)
+                            recheck = cape_adapter.get_task_status(a.external_task_id)
+                            recheck_status = str(recheck.get("cape_status", "")).lower()
+                            if recheck_status in ("running", "processing", "pending"):
+                                raise HTTPException(
+                                    status_code=status.HTTP_409_CONFLICT,
+                                    detail=f"Cannot retry cancelled analysis: remote CAPE task {a.external_task_id} cleanup could not be confirmed."
+                                )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Failed to reconcile previous remote CAPE task {a.external_task_id}: {str(e)}. Retry blocked to prevent duplicate remote execution."
+                    )
+
+    # Record retry event for provenance and preserve historical evidence
+    from app.models.event import AnalysisEvent
+    retry_event = AnalysisEvent(
+        analysis_id=a.id,
+        category="artifact",
+        action="operator_retry",
+        attributes={
+            "previous_status": a.status,
+            "previous_external_task_id": a.external_task_id,
+            "live_mode": a.live_mode,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        source_tool="operator",
+        confidence=1.0,
+    )
+    db.add(retry_event)
+
+    # Reset analysis status to QUEUED, clear external_task_id for fresh execution, and clear transient error state
+    a.external_task_id = None
     a.status = AnalysisStatus.QUEUED.value
     a.error_message = None
     a.started_at = None

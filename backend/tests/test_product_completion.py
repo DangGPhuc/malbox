@@ -55,6 +55,16 @@ def isolated_workspace(tmp_path: Path) -> Path:
     shutil.copyfile(REPO_ROOT / "backend" / "pyproject.toml", ws / "backend" / "pyproject.toml")
     (ws / "frontend").mkdir()
     shutil.copyfile(REPO_ROOT / "frontend" / "package.json", ws / "frontend" / "package.json")
+    if (REPO_ROOT / "frontend" / "node_modules").is_dir():
+        try:
+            os.symlink(REPO_ROOT / "frontend" / "node_modules", ws / "frontend" / "node_modules")
+        except OSError:
+            pass
+    if (REPO_ROOT / ".venv").is_dir():
+        try:
+            os.symlink(REPO_ROOT / ".venv", ws / ".venv")
+        except OSError:
+            pass
     (ws / "data").mkdir()
     fixtures_dst = ws / "fixtures" / "replay"
     fixtures_dst.mkdir(parents=True)
@@ -103,13 +113,14 @@ def test_cape_confinement_attestation_insecure_permissions(isolated_workspace: P
 
 
 def test_cape_confinement_attestation_mismatched_target(isolated_workspace: Path):
-    from app.services.sandbox.confinement import create_isolation_attestation
+    from app.services.sandbox.confinement import create_isolation_attestation, STANDARD_VALID_ASSERTIONS
     att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
     create_isolation_attestation(
         verified_machine="other_machine",
         verified_route="drop",
         verifier="test_op",
         attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
         evidence_references=["pcap:test_evidence"],
     )
 
@@ -123,7 +134,7 @@ def test_cape_confinement_attestation_mismatched_target(isolated_workspace: Path
 
 
 def test_cape_confinement_attestation_expired(isolated_workspace: Path):
-    from app.services.sandbox.confinement import create_isolation_attestation
+    from app.services.sandbox.confinement import create_isolation_attestation, STANDARD_VALID_ASSERTIONS
     att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
     create_isolation_attestation(
         verified_machine="win10_analyst",
@@ -131,6 +142,7 @@ def test_cape_confinement_attestation_expired(isolated_workspace: Path):
         verifier="test_op",
         validity_seconds=-10,  # Expired immediately
         attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
         evidence_references=["pcap:test_evidence"],
     )
 
@@ -177,13 +189,18 @@ def test_cape_confinement_attestation_unverified_assertions(isolated_workspace: 
 
 
 def test_cape_confinement_attestation_verified(isolated_workspace: Path):
-    from app.services.sandbox.confinement import create_isolation_attestation, verify_cape_confinement
+    from app.services.sandbox.confinement import (
+        create_isolation_attestation,
+        verify_cape_confinement,
+        STANDARD_VALID_ASSERTIONS,
+    )
     att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
     create_isolation_attestation(
         verified_machine="win10_analyst",
         verified_route="drop",
         verifier="test_operator",
         attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
         evidence_references=["pcap:zero_egress_test", "iptables:drop_rule_checked"],
     )
 
@@ -265,20 +282,41 @@ def test_setup_cape_default_never_creates_attestation(isolated_workspace: Path):
 
 
 def test_setup_attest_isolation_requires_operator_and_evidence(isolated_workspace: Path):
-    """Explicit operator isolation workflow requires operator name and evidence references."""
+    """Explicit operator isolation workflow requires operator name, valid evidence, and affirmative assertions."""
     from malbox_cli.setup import setup_attest_isolation
+    from app.services.sandbox.confinement import STANDARD_VALID_ASSERTIONS
+
+    # Operator name + arbitrary string alone cannot silently certify all 4 checks
+    silent_res = setup_attest_isolation(
+        isolated_workspace,
+        operator="lead_analyst",
+        evidence_refs=["iptables:drop_rules_verified"],
+        assertions=None,
+    )
+    assert silent_res["success"] is False
+    assert "mandatory affirmative operator assertions" in silent_res["error"]
 
     # Missing operator
-    bad_op = setup_attest_isolation(isolated_workspace, operator="", evidence_refs=["pcap:test"])
+    bad_op = setup_attest_isolation(isolated_workspace, operator="", evidence_refs=["pcap:zero_leak"], assertions=STANDARD_VALID_ASSERTIONS)
     assert bad_op["success"] is False
     assert "operator" in bad_op["error"].lower()
 
     # Missing evidence references
-    bad_refs = setup_attest_isolation(isolated_workspace, operator="analyst", evidence_refs=[])
+    bad_refs = setup_attest_isolation(isolated_workspace, operator="analyst", evidence_refs=[], assertions=STANDARD_VALID_ASSERTIONS)
     assert bad_refs["success"] is False
     assert "evidence" in bad_refs["error"].lower()
 
-    # Valid attestation workflow
+    # Placeholder evidence references rejected
+    ph_res = setup_attest_isolation(
+        isolated_workspace,
+        operator="analyst",
+        evidence_refs=["placeholder"],
+        assertions=STANDARD_VALID_ASSERTIONS,
+    )
+    assert ph_res["success"] is False
+    assert "placeholder" in ph_res["error"].lower()
+
+    # Valid attestation workflow with explicit affirmative assertions
     ok_att = setup_attest_isolation(
         isolated_workspace,
         operator="lead_analyst",
@@ -286,6 +324,7 @@ def test_setup_attest_isolation_requires_operator_and_evidence(isolated_workspac
         route="drop",
         evidence_refs=["iptables:drop_rules_verified", "wireshark:zero_egress_test"],
         notes="Verified in lab VLAN",
+        assertions=STANDARD_VALID_ASSERTIONS,
     )
     assert ok_att["success"] is True
     assert ok_att["verified"] is True
@@ -326,12 +365,14 @@ def test_setup_ghidra_and_cape_and_ai(isolated_workspace: Path):
 
     # Separate operator isolation attestation workflow
     from malbox_cli.setup import setup_attest_isolation
+    from app.services.sandbox.confinement import STANDARD_VALID_ASSERTIONS
     att_res = setup_attest_isolation(
         isolated_workspace,
         operator="lead_analyst",
         machine="win10_test",
         route="drop",
         evidence_refs=["pcap:zero_leak"],
+        assertions=STANDARD_VALID_ASSERTIONS,
     )
     assert att_res["success"] is True
     assert Path(att_res["attestation_path"]).is_file()
@@ -578,9 +619,9 @@ def test_orphaned_analysis_recovery():
     db.refresh(a3)
 
     assert a1.status == AnalysisStatus.FAILED.value
-    assert a1.error_message == "Analysis interrupted by process shutdown or worker restart; static triage preserved."
+    assert "never started: abandoned in QUEUED state" in a1.error_message
     assert a2.status == AnalysisStatus.FAILED.value
-    assert a2.error_message == "Analysis interrupted by process shutdown or worker restart; static triage preserved."
+    assert "interrupted by process shutdown or worker restart" in a2.error_message
     assert a3.status == AnalysisStatus.COMPLETED.value
 
     db.close()

@@ -59,13 +59,22 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [operatorToken, setOperatorToken] = useState<string>('');
+  const [showTokenPrompt, setShowTokenPrompt] = useState<boolean>(false);
 
   const handleRetry = async () => {
+    if (retrying) return;
+    if (analysis?.live_mode && !operatorToken.trim()) {
+      setShowTokenPrompt(true);
+      return;
+    }
+
     setRetrying(true);
     setRetryError(null);
     try {
-      const updated = await api.retryAnalysis(analysisId);
+      const updated = await api.retryAnalysis(analysisId, analysis?.live_mode ? operatorToken.trim() : undefined);
       setAnalysis(updated);
+      setShowTokenPrompt(false);
     } catch (err: any) {
       setRetryError(err.message || 'Failed to retry analysis');
     } finally {
@@ -274,6 +283,59 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
                 Retry failed: {retryError}
               </div>
             )}
+            {showTokenPrompt && analysis.live_mode && (
+              <div
+                style={{
+                  marginTop: '0.65rem',
+                  padding: '0.65rem 0.75rem',
+                  background: 'rgba(0, 0, 0, 0.25)',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border-light)',
+                }}
+              >
+                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '0.25rem' }}>
+                  Operator Security Authorization (Live Detonation)
+                </div>
+                <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.45rem' }}>
+                  A valid operator token is required to re-detonate live malware in CAPE. Token is kept in transient memory only.
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  <input
+                    type="password"
+                    aria-label="Operator Security Token"
+                    placeholder="Enter X-Operator-Token..."
+                    value={operatorToken}
+                    onChange={(e) => setOperatorToken(e.target.value)}
+                    disabled={retrying}
+                    style={{
+                      flex: 1,
+                      padding: '0.3rem 0.5rem',
+                      fontSize: '0.8rem',
+                      background: 'var(--bg-card)',
+                      border: '1px solid var(--border-light)',
+                      color: 'var(--text-main)',
+                      borderRadius: '4px',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={handleRetry}
+                    disabled={retrying || !operatorToken.trim()}
+                  >
+                    {retrying ? 'Authorizing...' : 'Authorize & Retry'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setShowTokenPrompt(false)}
+                    disabled={retrying}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           <button
             type="button"
@@ -283,7 +345,7 @@ export const WorkspacePage: React.FC<WorkspacePageProps> = ({
             style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
           >
             <RefreshCw size={14} className={retrying ? 'spin' : ''} />
-            <span>{retrying ? 'Retrying...' : 'Retry Analysis'}</span>
+            <span>{retrying ? 'Retrying...' : (analysis.live_mode && !operatorToken.trim() ? 'Authorize & Retry' : 'Retry Analysis')}</span>
           </button>
         </div>
       )}

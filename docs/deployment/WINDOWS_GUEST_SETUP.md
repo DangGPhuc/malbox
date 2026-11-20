@@ -19,27 +19,31 @@
    - Set Computer Name: `WIN-ANALYST-01`.
    - Install Guest Additions / VirtIO drivers.
 
-2. **Isolated-Lab Analysis Configuration (Disable Antivirus Interferences)**:
-   In a dedicated malware detonation VM, security suites must be disabled to observe authentic execution behavior rather than having samples quarantined prematurely:
-   - **Disable Windows Defender Antivirus**:
-     Open PowerShell as Administrator:
+2. **Guest VM Analysis Tuning (Scoped Observation vs Containment)**:
+   > [!IMPORTANT]
+   > Host-side kernel routing (`sysctl net.ipv4.ip_forward = 0`) and host-only firewalling are the non-negotiable containment boundaries. Guest settings do NOT provide isolation from the host.
+   > Avoid blanket security-disabling defaults. Configure scoped exemptions to observe malware behavior without unnecessarily crippling system logging:
+   - **Antivirus Interference vs Observation Trade-off**:
+     In raw behavioral observation environments, real-time Defender can quarantine malware payloads before behavioral hooks trigger. If uninhibited execution observation is required:
      ```powershell
+     # Disable real-time interception in dedicated detonation VM
      Set-MpPreference -DisableRealtimeMonitoring $true
-     Set-MpPreference -DisableBehaviorMonitoring $true
-     Set-MpPreference -DisableBlockAtFirstSeen $true
      Set-MpPreference -DisableIOAVProtection $true
-     Set-MpPreference -DisableScriptScanning $true
      ```
-   - **Disable User Account Control (UAC)**:
+     *Note*: Maintain a secondary analysis profile with Defender enabled to evaluate evasion techniques against standard Windows security controls.
+   - **Scoped Firewall Configuration (Avoid Blanket Disabling)**:
+     Rather than disabling the Windows Firewall entirely, allow the CAPE agent inbound on port 8000:
      ```powershell
+     New-NetFirewallRule -DisplayName "CAPE Guest Agent" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+     ```
+     If full outbound behavioral network analysis is required and the host-side firewall enforces drop policies, guest outbound filtering may be relaxed per-profile.
+   - **User Account Control (UAC) & SmartScreen**:
+     ```powershell
+     # Disable elevation prompt modal popups that block headless execution
      Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0
-     ```
-   - **Disable Windows Firewall & SmartScreen**:
-     ```powershell
-     Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
      Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "SmartScreenEnabled" -Value "Off"
      ```
-   - **Disable Windows Update & Sleep / Hibernation**:
+   - **Disable Sleep & Background Updates**:
      ```powershell
      Stop-Service wuauserv; Set-Service wuauserv -StartupType Disabled
      powercfg /h off

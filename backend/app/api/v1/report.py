@@ -326,21 +326,24 @@ def generate_report_intelligence(
             detail="Reporting enrichment was cancelled due to timeout; previous report preserved.",
         )
 
-    # Preserve last known-good report when an explicit external enrichment attempt failed/fell back
-    if target_mode in ("llm", "opencode") and intelligence_report.provider_metadata.fallback_used:
+    # Preserve last known-good report when an explicit enrichment attempt failed/fell back across all AI modes
+    if target_mode in ("local", "ollama", "llm", "opencode") and intelligence_report.provider_metadata.fallback_used:
         db.rollback()
         safe_reason = redact_sensitive_text(
-            intelligence_report.provider_metadata.fallback_reason or "External provider error",
+            intelligence_report.provider_metadata.fallback_reason or "AI provider error",
             extra_secrets=_collect_reporting_secrets(),
             max_chars=180,
         )
         is_timeout = "timeout" in safe_reason.lower() or "timed out" in safe_reason.lower()
+        is_unavail = "unavailable" in safe_reason.lower() or "connection refused" in safe_reason.lower() or "connect" in safe_reason.lower()
+        err_status = (
+            status.HTTP_504_GATEWAY_TIMEOUT if is_timeout
+            else (status.HTTP_503_SERVICE_UNAVAILABLE if is_unavail else status.HTTP_502_BAD_GATEWAY)
+        )
         raise HTTPException(
-            status_code=(
-                status.HTTP_504_GATEWAY_TIMEOUT if is_timeout else status.HTTP_502_BAD_GATEWAY
-            ),
+            status_code=err_status,
             detail=(
-                f"External '{target_mode}' enrichment failed ({safe_reason}); "
+                f"AI '{target_mode}' enrichment failed ({safe_reason}); "
                 "previous known-good report preserved."
             ),
         )
