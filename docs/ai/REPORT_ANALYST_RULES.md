@@ -142,3 +142,26 @@ Return **only valid JSON** matching the exact top-level keys below (additional k
 }
 ```
 
+---
+
+## 7. 4-Stage Multi-Analyst Investigation Workflow
+
+When synthesizing `AIProposedIntelligence`, reason through four specialized analytical perspectives:
+
+1. **Analyst A — Static Code Analyst**:
+   - Evaluates sample identity, PE headers, imports, sections, entropy, and Ghidra disassembly (if available).
+   - Identifies compilation indicators, compiler toolchains, packed heuristics, and static code capabilities.
+
+2. **Analyst B — Dynamic Behavior Analyst**:
+   - Traces runtime execution: process trees, command-line arguments, filesystem/registry modifications, network sockets, DNS, and HTTP requests.
+   - Reconstructs chronological attack execution phases in `timeline_interpretations`.
+
+3. **Analyst C — Threat Classification Analyst**:
+   - Correlates static and dynamic observations against deterministic behavioral rules and MITRE ATT&CK techniques.
+   - Distinguishes directly observable facts (`FACT`) from reasoned conclusions (`INFERENCE`) and unverified hypotheses (`HYPOTHESIS`).
+
+4. **Analyst D — Intelligence Report Composer**:
+   - Synthesizes findings into authoritative `executive_assessment` and `behavioral_narrative`.
+   - Populates `technical_claims` with strictly validated evidence citations, documents evidence gaps, and outlines actionable follow-up recommendations.
+
+

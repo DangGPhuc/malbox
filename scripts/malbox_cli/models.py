@@ -57,6 +57,7 @@ class CheckResult:
     details: Dict[str, Any] = field(default_factory=dict)
     remediation: Optional[str] = None
     repaired: bool = False
+    readiness_tier: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -303,6 +304,18 @@ def get_system_info() -> Dict[str, Any]:
             if line.startswith("PRETTY_NAME="):
                 distro = line.split("=", 1)[1].strip().strip('"')
                 break
+    kvm_present = Path("/dev/kvm").exists()
+    virt_flags: List[str] = []
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.is_file():
+        try:
+            content = cpuinfo.read_text(encoding="utf-8", errors="replace").lower()
+            for flag in ("vmx", "svm"):
+                if re.search(r"\b" + flag + r"\b", content):
+                    virt_flags.append(flag)
+        except Exception:
+            pass
+    has_virt = kvm_present or bool(virt_flags)
     return {
         "system": platform.system(),
         "release": rel,
@@ -311,6 +324,9 @@ def get_system_info() -> Dict[str, Any]:
         "is_wsl": "microsoft" in rel.lower() or "wsl" in rel.lower(),
         "python_version": platform.python_version(),
         "cpu_count": os.cpu_count() or 1,
+        "kvm_present": kvm_present,
+        "virt_flags": virt_flags,
+        "hardware_virt": has_virt,
     }
 
 

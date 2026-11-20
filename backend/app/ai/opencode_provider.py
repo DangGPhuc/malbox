@@ -273,6 +273,10 @@ class OpenCodeReportProvider(LLMProvider):
                 max_chars=180,
             )
             fallback_proposed = build_deterministic_proposed_intelligence(bundle)
+            fallback_proposed.executive_assessment = (
+                f"[AI ANALYSIS UNAVAILABLE: {safe_reason}] Non-AI technical triage report provided. "
+                + fallback_proposed.executive_assessment
+            )
             provider_meta = AIProviderMetadata(
                 mode="mock_fallback",
                 provider="mock_fallback",

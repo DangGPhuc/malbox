@@ -86,6 +86,7 @@ class JobQueueManager:
         Marks them FAILED so they do not remain indefinitely stuck in RUNNING.
         """
         active_non_terminal = [
+            AnalysisStatus.QUEUED.value,
             AnalysisStatus.PREFLIGHT.value,
             AnalysisStatus.PLANNED.value,
             AnalysisStatus.RUNNING.value,
@@ -105,7 +106,7 @@ class JobQueueManager:
         recovered_count = 0
         for job in stale_jobs:
             job.status = AnalysisStatus.FAILED.value
-            job.error_message = "Analysis interrupted by process shutdown or worker restart. Recovered safely."
+            job.error_message = "Analysis interrupted by process shutdown or worker restart; static triage preserved."
             job.completed_at = datetime.now(timezone.utc)
             recovered_count += 1
 

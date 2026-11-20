@@ -536,7 +536,12 @@ def run_bounded_llm_intelligence(
 
     system_prompt = (
         effective_rules
-        + "\n\nCRITICAL: Respond with a single valid JSON object matching AIProposedIntelligence. "
+        + "\n\nCRITICAL: Structure your analytical investigation through four stages:\n"
+        "1. Analyst A (Static Code Analyst): inspect PE headers, sections, entropy, and static capabilities.\n"
+        "2. Analyst B (Dynamic Behavior Analyst): trace runtime execution, process tree, filesystem/registry modifications, network sockets/DNS/HTTP flows.\n"
+        "3. Analyst C (Threat Classification Analyst): correlate observations against behavioral rules and MITRE techniques; separate observable FACTs from reasoned INFERENCEs and speculative HYPOTHESEs.\n"
+        "4. Analyst D (Intelligence Report Composer): synthesize validated executive_assessment, behavioral_narrative, technical_claims, and actionable follow_up_actions.\n\n"
+        "CRITICAL: Respond with a single valid JSON object matching AIProposedIntelligence. "
         "Do not output prose or markdown outside the JSON object."
     )
     user_prompt = (
@@ -624,6 +629,10 @@ def run_bounded_llm_intelligence(
             max_chars=180,
         )
         fallback_proposed = build_deterministic_proposed_intelligence(bundle)
+        fallback_proposed.executive_assessment = (
+            f"[AI ANALYSIS UNAVAILABLE: {reason}] Non-AI technical triage report provided. "
+            + fallback_proposed.executive_assessment
+        )
         provider_meta = AIProviderMetadata(
             mode="mock_fallback",
             provider="mock_fallback",

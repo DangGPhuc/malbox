@@ -38,21 +38,38 @@ def check_os(system_info_fn: Callable[[], Dict[str, Any]] = get_system_info) -> 
     info = system_info_fn()
     sys_name = info.get("system", "Unknown")
     distro = info.get("distro", sys_name)
+    has_virt = info.get("hardware_virt", True) if "hardware_virt" in info else True
+    kvm_ok = info.get("kvm_present", False)
+    flags = info.get("virt_flags", [])
+
     if sys_name in ("Linux", "Darwin"):
         label = f"{distro} (WSL)" if info.get("is_wsl") else distro
+        if "hardware_virt" in info and not info["hardware_virt"]:
+            return CheckResult(
+                id="os_platform",
+                name="Operating System & Hypervisor Support",
+                status=CheckStatus.PASS,
+                summary=f"Supported OS detected: {label} ({info.get('machine', 'unknown')}) [Profile A hypervisor unsupported: /dev/kvm missing; Profile B Distributed Sandbox recommended]",
+                details=info,
+                readiness_tier="UNSUPPORTED",
+                remediation="Enable CPU virtualization in hypervisor or use Profile B Distributed Sandbox (external CAPE host).",
+            )
+        virt_desc = " (KVM active)" if kvm_ok else ""
         return CheckResult(
             id="os_platform",
-            name="Operating System",
+            name="Operating System & Hypervisor Support",
             status=CheckStatus.PASS,
-            summary=f"Supported OS detected: {label} ({info.get('machine', 'unknown')})",
+            summary=f"Supported OS detected: {label} ({info.get('machine', 'unknown')}{virt_desc})",
             details=info,
+            readiness_tier="READY",
         )
     return CheckResult(
         id="os_platform",
-        name="Operating System",
+        name="Operating System & Hypervisor Support",
         status=CheckStatus.WARN,
         summary=f"Uncommon host OS detected: {distro}. Linux/macOS/WSL is recommended.",
         details=info,
+        readiness_tier="DEGRADED",
     )
 
 
@@ -72,6 +89,7 @@ def check_python(
             status=CheckStatus.FAIL,
             summary=f"Python {ver_str} detected; Python 3.10+ is required.",
             details={"version": ver_str, "executable": exe},
+            readiness_tier="BLOCKED",
             remediation="Install Python 3.10 or newer via your OS package manager (never run doctor with sudo).",
         )
 
@@ -84,6 +102,7 @@ def check_python(
             status=CheckStatus.FAIL,
             summary=f"Python {ver_str} found, but stdlib venv/ensurepip support is incomplete.",
             details={"version": ver_str, "executable": exe},
+            readiness_tier="BLOCKED",
             remediation="Install the python3-venv package (e.g., `sudo apt install python3-venv` on Debian/Ubuntu) and re-run `./malbox doctor`.",
         )
 
@@ -93,6 +112,7 @@ def check_python(
         status=CheckStatus.PASS,
         summary=f"Python {ver_str} with venv support available ({exe})",
         details={"version": ver_str, "executable": exe},
+        readiness_tier="READY",
     )
 
 
@@ -112,6 +132,7 @@ def check_node_npm(
             name="Node.js & npm",
             status=CheckStatus.SKIP,
             summary="Skipped Node.js/npm check (--skip-frontend specified).",
+            readiness_tier="CONFIGURED",
         )
 
     node_bin = which_fn("node")
@@ -125,6 +146,7 @@ def check_node_npm(
             status=CheckStatus.FAIL,
             summary=f"Missing required frontend toolchain: {', '.join(missing)}.",
             details={"node": node_bin, "npm": npm_bin},
+            readiness_tier="BLOCKED",
             remediation="Install Node.js 18+ and npm (e.g., via nvm or your OS package manager), or run backend-only with `--skip-frontend`.",
         )
 
@@ -141,6 +163,7 @@ def check_node_npm(
             status=CheckStatus.WARN,
             summary=f"Node.js {node_ver} is below recommended v18+ (npm {npm_ver}).",
             details={"node_version": node_ver, "npm_version": npm_ver},
+            readiness_tier="DEGRADED",
             remediation="Upgrade to Node.js 18+ or 20 LTS for reliable Vite builds.",
         )
 
@@ -150,6 +173,7 @@ def check_node_npm(
         status=CheckStatus.PASS,
         summary=f"Node.js {node_ver} and npm {npm_ver} available",
         details={"node_version": node_ver, "npm_version": npm_ver, "node": node_bin, "npm": npm_bin},
+        readiness_tier="READY",
     )
 
 
@@ -175,6 +199,7 @@ def check_resources(
             status=CheckStatus.FAIL,
             summary=f"Critically low disk space: {free_mb} MB free (< 250 MB minimum).",
             details=details,
+            readiness_tier="BLOCKED",
             remediation="Free up at least 1.5 GB of disk space before installing dependencies.",
         )
 
@@ -185,6 +210,7 @@ def check_resources(
             status=CheckStatus.FAIL,
             summary=f"Critically low system RAM: {total_ram_mb} MB (< 512 MB minimum).",
             details=details,
+            readiness_tier="BLOCKED",
             remediation="Allocate at least 1.5 GB – 2 GB RAM to this VM.",
         )
 
@@ -207,6 +233,7 @@ def check_resources(
             status=CheckStatus.WARN,
             summary=f"Resources tight ({'; '.join(warnings)}; disk free {free_mb} MB, {ram_desc}).",
             details=details,
+            readiness_tier="DEGRADED",
         )
 
     return CheckResult(
@@ -215,6 +242,7 @@ def check_resources(
         status=CheckStatus.PASS,
         summary=f"Disk free: {free_mb} MB; Memory: {ram_desc}",
         details=details,
+        readiness_tier="READY",
     )
 
 
@@ -280,6 +308,7 @@ def check_env_config(
             status=CheckStatus.FAIL,
             summary=".env file is missing.",
             details={"env_exists": False, "example_exists": example_file.is_file(), "config": safe_summary},
+            readiness_tier="BLOCKED",
             remediation="Run `./malbox doctor --repair` to generate `.env` from `.env.example` with Live Mode disabled.",
         )
 
@@ -292,6 +321,7 @@ def check_env_config(
             status=CheckStatus.FAIL,
             summary=f"Invalid port configuration: {'; '.join(port_errors)}",
             details={"env_exists": True, "config": safe_summary, "port_errors": port_errors},
+            readiness_tier="BLOCKED",
             remediation="Set valid integer ports (1-65535) for `MALBOX_PORT` and `MALBOX_FRONTEND_PORT` in `.env`.",
         )
 
@@ -307,6 +337,7 @@ def check_env_config(
             status=CheckStatus.FAIL,
             summary="UNSAFE CONFIGURATION: MALBOX_LIVE_MODE_ENABLED=true without MALBOX_OPERATOR_TOKEN.",
             details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
+            readiness_tier="BLOCKED",
             remediation="Set `MALBOX_LIVE_MODE_ENABLED=false` in `.env` for Replay Mode, or configure a strong `MALBOX_OPERATOR_TOKEN` if an isolated CAPE lab is intended.",
         )
 
@@ -320,6 +351,7 @@ def check_env_config(
             status=CheckStatus.FAIL,
             summary=f"UNSAFE TRACE KEY CONFIGURATION: {trace_key_err}",
             details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
+            readiness_tier="BLOCKED",
             remediation="Leave `MALBOX_TRACE_AUTH_KEY=` empty to disable live trace auth cleanly, or generate an isolated key via `openssl rand -hex 32`.",
         )
 
@@ -341,6 +373,7 @@ def check_env_config(
             status=CheckStatus.WARN,
             summary=f".env present with safety warnings: {'; '.join(warnings)}.",
             details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
+            readiness_tier="DEGRADED",
             remediation="Run `./malbox doctor --repair` to tighten `.env` to `0600` (secrets untouched) and verify configuration defaults.",
         )
 
@@ -355,6 +388,7 @@ def check_env_config(
         status=CheckStatus.PASS,
         summary=summary_text,
         details={"env_exists": True, "config": safe_summary, "keys_count": len(raw_env_values)},
+        readiness_tier="CONFIGURED",
     )
 
 
@@ -376,6 +410,7 @@ def check_directories(
             status=CheckStatus.FAIL,
             summary=f"Missing required runtime directories: {', '.join(missing)}.",
             details={"missing": missing},
+            readiness_tier="BLOCKED",
             remediation="Run `./malbox doctor --repair` to create data, quarantine (0700), artifacts, and .malbox directories.",
         )
 
@@ -399,6 +434,7 @@ def check_directories(
                 status=CheckStatus.WARN,
                 summary=f"Insecure directory/file permissions: {'; '.join(perm_warnings)}.",
                 details={"quarantine_dir": str(quarantine_dir), "runtime_dir": str(runtime_dir), "warnings": perm_warnings},
+                readiness_tier="DEGRADED",
                 remediation="Run `./malbox doctor --repair` to restrict quarantine/runtime dirs (0700) and PID/log files (0600).",
             )
 
@@ -413,6 +449,7 @@ def check_directories(
             "artifacts_dir": str(artifacts_dir),
             "runtime_dir": str(runtime_dir),
         },
+        readiness_tier="VERIFIED",
     )
 
 
@@ -430,6 +467,7 @@ def check_venv_backend(
             status=CheckStatus.FAIL,
             summary="Python virtual environment `.venv` is missing or broken.",
             details={"venv_dir": str(venv_dir), "python": str(venv_python)},
+            readiness_tier="BLOCKED",
             remediation="Run `./malbox doctor --repair` to create `.venv` and run `pip install -e \"backend[dev]\"`.",
         )
 
@@ -449,6 +487,7 @@ def check_venv_backend(
             status=CheckStatus.FAIL,
             summary=f"Backend dependencies incomplete in `.venv` ({last_line}).",
             details={"venv_python": str(venv_python), "error": last_line},
+            readiness_tier="BLOCKED",
             remediation="Run `./malbox doctor --repair` or `.venv/bin/pip install -e \"backend[dev]\"`.",
         )
 
@@ -458,6 +497,7 @@ def check_venv_backend(
         status=CheckStatus.PASS,
         summary="`.venv` healthy and all FastAPI/SQLAlchemy/PE/test packages import cleanly.",
         details={"venv_python": str(venv_python)},
+        readiness_tier="INSTALLED",
     )
 
 
@@ -471,6 +511,7 @@ def check_frontend(
             name="Frontend Dependencies & Build",
             status=CheckStatus.SKIP,
             summary="Skipped frontend check (--skip-frontend specified).",
+            readiness_tier="CONFIGURED",
         )
 
     frontend_dir = root_dir / "frontend"
@@ -484,6 +525,7 @@ def check_frontend(
             name="Frontend Dependencies & Build",
             status=CheckStatus.FAIL,
             summary="Missing `frontend/package.json`.",
+            readiness_tier="BLOCKED",
             remediation="Ensure you are in the repository root of `malbox`.",
         )
 
@@ -494,6 +536,7 @@ def check_frontend(
             status=CheckStatus.FAIL,
             summary="`frontend/node_modules` is missing or incomplete (Vite not installed).",
             details={"node_modules": str(node_modules)},
+            readiness_tier="BLOCKED",
             remediation="Run `./malbox doctor --repair` or `cd frontend && npm ci`.",
         )
 
@@ -504,6 +547,7 @@ def check_frontend(
             status=CheckStatus.WARN,
             summary="`frontend/node_modules` installed (`npm run dev` ready), but production bundle `frontend/dist` is not built yet.",
             details={"node_modules_present": True, "dist_built": False},
+            readiness_tier="DEGRADED",
             remediation="Optional: run `cd frontend && npm run build` or `./malbox doctor --repair`.",
         )
 
@@ -513,6 +557,7 @@ def check_frontend(
         status=CheckStatus.PASS,
         summary="Frontend dependencies and production bundle verified.",
         details={"node_modules_present": True, "dist_built": True},
+        readiness_tier="INSTALLED",
     )
 
 
@@ -530,6 +575,7 @@ def check_database(
             status=CheckStatus.PASS,
             summary=f"External/in-memory database configured ({db_desc}).",
             details={"database": db_desc},
+            readiness_tier="CONFIGURED",
         )
 
     if not db_path.is_file():
@@ -539,6 +585,7 @@ def check_database(
             status=CheckStatus.WARN,
             summary=f"SQLite database not yet initialized ({db_path}).",
             details={"db_path": str(db_path), "initialized": False},
+            readiness_tier="DEGRADED",
             remediation="Run `./malbox doctor --repair` (or `./malbox start`) to initialize schema tables.",
         )
 
@@ -553,6 +600,7 @@ def check_database(
                     status=CheckStatus.FAIL,
                     summary=f"SQLite integrity check failed on {db_path}: {quick}",
                     details={"db_path": str(db_path)},
+                    readiness_tier="BLOCKED",
                     remediation="Back up and inspect/remove the corrupt SQLite file, then run `./malbox doctor --repair`.",
                 )
             tables = {
@@ -570,6 +618,7 @@ def check_database(
             status=CheckStatus.FAIL,
             summary=f"Cannot open SQLite database {db_path}: {exc}",
             details={"db_path": str(db_path), "error": str(exc)},
+            readiness_tier="BLOCKED",
             remediation="Check file permissions or back up/recreate the corrupt SQLite file.",
         )
 
@@ -581,6 +630,7 @@ def check_database(
             status=CheckStatus.WARN,
             summary=f"SQLite file exists at {db_path}, but missing schema tables: {', '.join(missing_tables)}.",
             details={"db_path": str(db_path), "missing_tables": missing_tables},
+            readiness_tier="DEGRADED",
             remediation="Run `./malbox doctor --repair` to initialize schema tables.",
         )
 
@@ -590,6 +640,7 @@ def check_database(
         status=CheckStatus.PASS,
         summary=f"SQLite database healthy ({db_path}; {len(tables)} tables verified).",
         details={"db_path": str(db_path), "tables_count": len(tables)},
+        readiness_tier="VERIFIED",
     )
 
 
@@ -601,6 +652,7 @@ def check_replay_fixtures(root_dir: Path) -> CheckResult:
             name="Replay Mode Fixtures",
             status=CheckStatus.FAIL,
             summary=f"Replay fixtures directory missing: {fixtures_dir}",
+            readiness_tier="BLOCKED",
             remediation="Restore `fixtures/replay/*.json` from git (`git checkout -- fixtures/replay`).",
         )
 
@@ -634,6 +686,7 @@ def check_replay_fixtures(root_dir: Path) -> CheckResult:
             status=CheckStatus.FAIL,
             summary=f"Replay fixtures check failed ({'; '.join(issues)}).",
             details={"missing": missing, "invalid": invalid, "verified": verified},
+            readiness_tier="BLOCKED",
             remediation="Restore missing/corrupt fixtures via `git checkout -- fixtures/replay`.",
         )
 
@@ -643,6 +696,7 @@ def check_replay_fixtures(root_dir: Path) -> CheckResult:
         status=CheckStatus.PASS,
         summary=f"All {len(verified)} registered Replay scenarios valid ({', '.join(verified)}).",
         details={"verified_scenarios": verified, "fixtures_dir": str(fixtures_dir)},
+        readiness_tier="VERIFIED",
     )
 
 
@@ -662,6 +716,7 @@ def check_ports(
             status=CheckStatus.FAIL,
             summary=f"Cannot inspect ports due to invalid configuration: {'; '.join(port_errors)}",
             details={"port_errors": port_errors},
+            readiness_tier="BLOCKED",
             remediation="Configure valid ports (1-65535) for `MALBOX_PORT` and `MALBOX_FRONTEND_PORT`.",
         )
 
@@ -718,6 +773,7 @@ def check_ports(
             status=CheckStatus.WARN,
             summary=". ".join(msg_parts) + ".",
             details=details,
+            readiness_tier="BLOCKED",
             remediation="Stop the conflicting external process or update `MALBOX_PORT` / `MALBOX_FRONTEND_PORT` in `.env`. Inspect any unverified PID files in `.malbox/` manually.",
         )
 
@@ -728,6 +784,7 @@ def check_ports(
             status=CheckStatus.PASS,
             summary=f"Ports bound by verified malbox services: {', '.join(running_managed)}.",
             details=details,
+            readiness_tier="REACHABLE",
         )
 
     return CheckResult(
@@ -736,6 +793,7 @@ def check_ports(
         status=CheckStatus.PASS,
         summary=f"Ports clear (backend :{backend_port}" + ("" if skip_frontend else f", frontend :{frontend_port}") + ").",
         details=details,
+        readiness_tier="REACHABLE",
     )
 
 
@@ -903,6 +961,148 @@ def _probe_cape_readiness(cape_url: str, token: Optional[str] = None) -> Dict[st
         return {"classification": "UNREACHABLE", "error": str(e)}
 
 
+def check_cape_confinement_attestation(
+    root_dir: Path,
+    environ: Optional[Dict[str, str]] = None,
+) -> CheckResult:
+    config = resolve_effective_config(root_dir, environ=environ)
+    live_enabled = parse_bool(config.get("MALBOX_LIVE_MODE_ENABLED"), default=True)
+    if not live_enabled:
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.SKIP,
+            summary="Live analysis disabled; CAPE isolation attestation check skipped.",
+            readiness_tier="CONFIGURED",
+            details={"live_mode_enabled": False},
+        )
+
+    att_path_raw = (config.get("MALBOX_CAPE_ATTESTATION_PATH") or "").strip()
+    att_path = (
+        Path(att_path_raw)
+        if att_path_raw
+        else (root_dir / "data" / "cape_isolation_attestation.json")
+    )
+
+    expected_machine = (config.get("MALBOX_CAPE_MACHINE") or "win10_malbox").strip()
+    expected_route = (config.get("MALBOX_CAPE_ROUTE") or "host-only").strip()
+
+    if not att_path.is_file():
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.WARN,
+            summary=f"Mandatory CAPE isolation attestation missing ({att_path}). Live detonation blocked.",
+            readiness_tier="BLOCKED",
+            details={"attestation_path": str(att_path), "expected_machine": expected_machine, "expected_route": expected_route},
+            remediation=(
+                f"Verify host-only networking, default route blocking, firewall rules, and clean snapshot "
+                f"on guest '{expected_machine}', then run `./malbox setup --cape` to generate attestation."
+            ),
+        )
+
+    if os.name == "posix":
+        st_mode = att_path.stat().st_mode & 0o777
+        if st_mode & 0o077:
+            return CheckResult(
+                id="cape_attestation",
+                name="CAPE Confinement Attestation",
+                status=CheckStatus.FAIL,
+                summary=f"Insecure attestation permissions: {oct(st_mode)} (must not be group/world-writable; expected 0600).",
+                readiness_tier="BLOCKED",
+                details={"attestation_path": str(att_path), "permissions": oct(st_mode)},
+                remediation=f"Run `chmod 0600 {att_path}`.",
+            )
+
+    try:
+        data = json.loads(att_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.FAIL,
+            summary=f"Malformed attestation JSON: {exc}",
+            readiness_tier="BLOCKED",
+            details={"attestation_path": str(att_path), "error": str(exc)},
+            remediation="Regenerate attestation file with valid JSON structure.",
+        )
+
+    if not isinstance(data, dict):
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.FAIL,
+            summary="Attestation root must be a JSON object.",
+            readiness_tier="BLOCKED",
+        )
+
+    att_machine = str(data.get("machine") or "")
+    att_route = str(data.get("route") or "")
+    expires_at = data.get("attestation_expires_at")
+    assertions = data.get("manual_operator_assertions") or {}
+
+    if att_machine != expected_machine or att_route != expected_route:
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.FAIL,
+            summary=(
+                f"Attestation target mismatch: file targets machine='{att_machine}' route='{att_route}', "
+                f"but configuration specifies machine='{expected_machine}' route='{expected_route}'."
+            ),
+            readiness_tier="BLOCKED",
+            details={"file_machine": att_machine, "config_machine": expected_machine, "file_route": att_route, "config_route": expected_route},
+            remediation="Re-verify configured CAPE machine/route and regenerate the attestation file.",
+        )
+
+    import time
+    now = time.time()
+    if not isinstance(expires_at, (int, float)) or expires_at <= now:
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.FAIL,
+            summary=f"Attestation for machine '{expected_machine}' expired at {expires_at} (current: {int(now)}).",
+            readiness_tier="BLOCKED",
+            details={"expires_at": expires_at, "now": now},
+            remediation="Re-audit VM network isolation and renew attestation.",
+        )
+
+    required_assertions = [
+        "host_only_networking_verified",
+        "default_route_blocked",
+        "firewall_rules_verified",
+        "guest_snapshot_clean",
+    ]
+    unverified = [k for k in required_assertions if not assertions.get(k)]
+    if unverified:
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.FAIL,
+            summary=f"Unverified isolation assertions in attestation: {', '.join(unverified)}.",
+            readiness_tier="BLOCKED",
+            details={"unverified_assertions": unverified, "assertions": assertions},
+            remediation="Verify all 4 isolation invariants on the Windows guest and set them to true in attestation.",
+        )
+
+    hours_left = (expires_at - now) / 3600.0
+    return CheckResult(
+        id="cape_attestation",
+        name="CAPE Confinement Attestation",
+        status=CheckStatus.PASS,
+        summary=f"CAPE isolation verified for machine '{expected_machine}' on route '{expected_route}' (valid for {hours_left:.1f}h).",
+        readiness_tier="VERIFIED",
+        details={
+            "attestation_path": str(att_path),
+            "machine": expected_machine,
+            "route": expected_route,
+            "verifier": data.get("verifier"),
+            "hours_remaining": round(hours_left, 1),
+        },
+    )
+
+
 def check_optional_integrations(
     root_dir: Path,
     environ: Optional[Dict[str, str]] = None,
@@ -931,6 +1131,7 @@ def check_optional_integrations(
                 status=CheckStatus.PASS,
                 summary=f"CAPE Sandbox READY at {cape_url} (version: {probe.get('version', '2.x')}{vm_info}).",
                 details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe, "stage": "ready_for_analysis"},
+                readiness_tier="READY",
             ))
         elif classification == "UNAUTHORIZED":
             results.append(CheckResult(
@@ -939,6 +1140,7 @@ def check_optional_integrations(
                 status=CheckStatus.WARN,
                 summary=f"CAPE Sandbox UNAUTHORIZED at {cape_url} (HTTP 401/403). Check MALBOX_CAPE_API_TOKEN in .env.",
                 details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe},
+                readiness_tier="DEGRADED",
                 remediation="Ensure MALBOX_CAPE_API_TOKEN is set to a valid CAPE REST API bearer token.",
             ))
         else:
@@ -948,6 +1150,7 @@ def check_optional_integrations(
                 status=CheckStatus.WARN,
                 summary=f"CAPE Sandbox {classification} at {cape_url}: {probe.get('error', 'Service unavailable')}. Host app and static analysis remain operational.",
                 details={"cape_api_url": cape_url, "live_mode_enabled": True, "probe": probe},
+                readiness_tier="DEGRADED",
                 remediation="Verify CAPE API service is active (systemctl status cape-web or poetry run python manage.py runserver 0.0.0.0:8008).",
             ))
     else:
@@ -957,6 +1160,7 @@ def check_optional_integrations(
             status=CheckStatus.SKIP,
             summary=f"Optional live CAPE Sandbox disabled (configured URL: {cape_url}).",
             details={"cape_api_url": cape_url, "live_mode_enabled": False, "classification": "DISABLED"},
+            readiness_tier="CONFIGURED",
         ))
 
     # 2. Ghidra Headless & JDK (optional; missing Ghidra must never block Replay readiness)
@@ -976,6 +1180,7 @@ def check_optional_integrations(
                 status=CheckStatus.WARN,
                 summary="MALBOX_GHIDRA_ENABLED=true, but Ghidra analyzeHeadless was not found (Analysis pipeline remains operational).",
                 details={"ghidra_enabled": True, "ghidra_home": ghidra_home or None},
+                readiness_tier="DEGRADED",
                 remediation="Install Ghidra and set MALBOX_GHIDRA_HOME, or set MALBOX_GHIDRA_ENABLED=false.",
             ))
         else:
@@ -985,6 +1190,7 @@ def check_optional_integrations(
                 status=CheckStatus.SKIP,
                 summary="Optional Ghidra not installed/configured (static disassembly will be skipped).",
                 details={"ghidra_enabled": False},
+                readiness_tier="CONFIGURED",
             ))
     elif not g_info["jdk_compatible"]:
         results.append(CheckResult(
@@ -997,6 +1203,7 @@ def check_optional_integrations(
                 f"(detected Java={g_info['java_major'] or 'missing'}; static disassembly disabled)."
             ),
             details={**g_info, "ghidra_enabled": ghidra_enabled},
+            readiness_tier="DEGRADED",
             remediation=f"Install OpenJDK {g_info['required_java_major']}+ JDK package (including javac) without running doctor with sudo.",
         ))
     elif ghidra_enabled and (not g_info.get("bwrap_available") or (parse_bool(config.get("MALBOX_GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT"), default=True) and not g_info.get("cgroup_memory_supported"))):
@@ -1014,6 +1221,7 @@ def check_optional_integrations(
                 f"{', '.join(missing_parts)} (fail-closed; static analysis disabled)."
             ),
             details={**g_info, "ghidra_enabled": True},
+            readiness_tier="BLOCKED",
             remediation="Ensure bubblewrap and user systemd cgroup v2 delegation are active on this Linux host.",
         ))
     else:
@@ -1029,6 +1237,7 @@ def check_optional_integrations(
                 f"cgroup_mem={'ok' if g_info.get('cgroup_memory_supported') else 'unverified'})."
             ),
             details={**g_info, "ghidra_enabled": ghidra_enabled},
+            readiness_tier="READY",
         ))
 
     # 3. OpenCode CLI
@@ -1039,6 +1248,7 @@ def check_optional_integrations(
             name="Optional: OpenCode CLI",
             status=CheckStatus.PASS,
             summary=f"Optional OpenCode CLI detected at {opencode_bin}.",
+            readiness_tier="INSTALLED",
         ))
     else:
         results.append(CheckResult(
@@ -1046,27 +1256,78 @@ def check_optional_integrations(
             name="Optional: OpenCode CLI",
             status=CheckStatus.SKIP,
             summary="Optional OpenCode CLI not installed (not required for standard analysis).",
+            readiness_tier="CONFIGURED",
         ))
 
-    # 4. External AI Provider
-    ai_provider = (config.get("MALBOX_AI_PROVIDER") or "mock").strip()
+    # 4. External / Local AI Provider
+    ai_provider = (config.get("MALBOX_AI_PROVIDER") or "mock").strip().lower()
     ai_key_set = bool((config.get("MALBOX_AI_API_KEY") or "").strip())
-    if ai_provider == "mock" or not ai_key_set:
+    base_url = (config.get("MALBOX_AI_BASE_URL") or "http://127.0.0.1:11434/v1").strip()
+    has_consent = parse_bool(config.get("MALBOX_REPORTING_EXTERNAL_AI_CONSENT"), default=False)
+
+    if ai_provider in ("local", "ollama"):
+        # Probe local Ollama service reachability
+        ollama_reachable = False
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                # Parse host and port from base_url
+                m = re.search(r"://([^:/]+)(?::(\d+))?", base_url)
+                if m:
+                    p_host = m.group(1)
+                    p_port = int(m.group(2) or 11434)
+                    ollama_reachable = s.connect_ex((p_host, p_port)) == 0
+        except Exception:
+            ollama_reachable = False
+
+        if ollama_reachable:
+            results.append(CheckResult(
+                id="opt_ai_provider",
+                name="Optional: Local AI Service (Ollama)",
+                status=CheckStatus.PASS,
+                summary=f"Local AI endpoint ({ai_provider}) reachable at {base_url}.",
+                details={"ai_provider": ai_provider, "base_url": base_url, "reachable": True},
+                readiness_tier="READY",
+            ))
+        else:
+            results.append(CheckResult(
+                id="opt_ai_provider",
+                name="Optional: Local AI Service (Ollama)",
+                status=CheckStatus.WARN,
+                summary=f"Local AI endpoint ({ai_provider}) at {base_url} is unreachable (Non-AI technical report will be used).",
+                details={"ai_provider": ai_provider, "base_url": base_url, "reachable": False},
+                readiness_tier="DEGRADED",
+                remediation=f"Start local Ollama server (`ollama serve`) or check base URL in .env.",
+            ))
+    elif ai_provider == "mock" or not ai_key_set:
         results.append(CheckResult(
             id="opt_ai_provider",
-            name="Optional: External AI Credentials",
+            name="Optional: AI Provider",
             status=CheckStatus.SKIP,
             summary="Using deterministic MockLLMProvider (no external API key required for local reporting).",
             details={"ai_provider": ai_provider, "api_key_configured": ai_key_set},
+            readiness_tier="CONFIGURED",
         ))
     else:
-        results.append(CheckResult(
-            id="opt_ai_provider",
-            name="Optional: External AI Credentials",
-            status=CheckStatus.PASS,
-            summary=f"External AI provider configured (`{ai_provider}`, API key redacted).",
-            details={"ai_provider": ai_provider, "api_key_configured": True},
-        ))
+        if has_consent:
+            results.append(CheckResult(
+                id="opt_ai_provider",
+                name="Optional: External AI Credentials",
+                status=CheckStatus.PASS,
+                summary=f"External AI provider configured (`{ai_provider}`, API key redacted, external consent acknowledged).",
+                details={"ai_provider": ai_provider, "api_key_configured": True, "external_consent": True},
+                readiness_tier="READY",
+            ))
+        else:
+            results.append(CheckResult(
+                id="opt_ai_provider",
+                name="Optional: External AI Credentials",
+                status=CheckStatus.WARN,
+                summary=f"External AI configured (`{ai_provider}`), but MALBOX_REPORTING_EXTERNAL_AI_CONSENT is false (transmission blocked).",
+                details={"ai_provider": ai_provider, "api_key_configured": True, "external_consent": False},
+                readiness_tier="BLOCKED",
+                remediation="Set MALBOX_REPORTING_EXTERNAL_AI_CONSENT=true in .env to authorize external AI telemetry transmission.",
+            ))
 
     return results
 
@@ -1091,6 +1352,7 @@ def run_all_checks(
         check_database(root_dir, environ=environ),
         check_replay_fixtures(root_dir),
         check_ports(root_dir, skip_frontend=skip_frontend, environ=environ),
+        check_cape_confinement_attestation(root_dir, environ=environ),
     ]
     results.extend(check_optional_integrations(root_dir, environ=environ, which_fn=which_fn, runner=runner))
     return results

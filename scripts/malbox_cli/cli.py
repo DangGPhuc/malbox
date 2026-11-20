@@ -33,8 +33,10 @@ def _format_doctor_human(report: Dict[str, Any], verbose: bool = False) -> str:
 
     for item in report["checks"]:
         tag = TAG_LABELS.get(item["status"], f"[{item['status']}]")
+        tier = f"[{item['readiness_tier']}]" if item.get("readiness_tier") else ""
+        tier_str = f"{tier:<13} " if tier else ""
         repaired_badge = " (repaired)" if item.get("repaired") else ""
-        lines.append(f"{tag:<7} {item['name']}{repaired_badge}: {item['summary']}")
+        lines.append(f"{tag:<7} {tier_str}{item['name']}{repaired_badge}: {item['summary']}")
         if verbose and item.get("details"):
             lines.append(f"        details: {json.dumps(item['details'], default=str)}")
         if item["status"] in ("FAIL", "WARN") and item.get("remediation"):
@@ -64,6 +66,77 @@ def _format_doctor_human(report: Dict[str, Any], verbose: bool = False) -> str:
         lines.append("Diagnostics reported failures. Review `[FAIL]` items above before starting.")
 
     return "\n".join(lines)
+
+
+def _format_setup_human(res: Dict[str, Any]) -> None:
+    if "matrix" in res:
+        print("malbox-ai Deployment Readiness Matrix")
+        print("=" * 72)
+        for item in res["matrix"]:
+            tier = f"[{item.get('tier', 'UNKNOWN')}]"
+            tag = TAG_LABELS.get(item["status"], f"[{item['status']}]")
+            print(f"{tag:<7} {tier:<13} {item['name']}: {item['summary']}")
+            if item.get("remediation") and item["status"] in ("FAIL", "WARN"):
+                print(f"        fix: {item['remediation']}")
+        print("=" * 72)
+        c = res["counts"]
+        print(f"Overall: {res['status']} | PASS={c.get('PASS', 0)} WARN={c.get('WARN', 0)} FAIL={c.get('FAIL', 0)} SKIP={c.get('SKIP', 0)}")
+        return
+
+    if "profiles" in res:
+        print("malbox-ai Hardware & Deployment Planning")
+        print("=" * 72)
+        print(f"Recommended Profile: {res['recommended_profile']}")
+        virt_status = "DETECTED (/dev/kvm accessible)" if res.get("kvm_present") else "NOT DETECTED (Profile A single-host hypervisor disabled)"
+        print(f"Hardware Virtualization: {virt_status}")
+        print("-" * 72)
+        for key, p in res["profiles"].items():
+            sup = "[SUPPORTED]" if p.get("supported_on_current_host") else "[UNSUPPORTED ON CURRENT HOST]"
+            print(f"\n{p['name']} {sup}")
+            print(f"  Description: {p['description']}")
+            print(f"  Topology   : {p['network_topology']}")
+            print("  Prerequisites:")
+            for req in p["prerequisites"]:
+                print(f"    * {req}")
+            print("  Setup Steps:")
+            for cmd in p["setup_commands"]:
+                print(f"    $ {cmd}")
+        print("\n" + "=" * 72)
+        print(f"Next Action: {res.get('next_step')}")
+        return
+
+    if "configured_values" in res:
+        tag = "[DRY-RUN]" if res.get("dry_run") else "[CONFIGURED]"
+        print(f"{tag} malbox subsystem configuration updated successfully:")
+        for k, v in res.get("configured_values", {}).items():
+            val = "********" if "TOKEN" in k or "KEY" in k else v
+            print(f"  * {k} = {val}")
+        if res.get("backup_file"):
+            print(f"  * Backup created: {res['backup_file']}")
+        if res.get("attestation"):
+            att = res["attestation"]
+            print(f"  * Generated isolation attestation: {att['path']} (0600)")
+            print(f"    Machine: {att['machine']} | Route: {att['route']} | Valid: {att['expires_in_days']} days")
+        return
+
+    if "critical_issues" in res:
+        print(f"malbox-ai Setup Verification: [{res.get('overall_status', 'UNKNOWN')}]")
+        print("=" * 72)
+        c = res.get("counts", {})
+        print(f"Results: PASS={c.get('pass', 0)} WARN={c.get('warn', 0)} FAIL={c.get('fail', 0)} SKIP={c.get('skip', 0)}")
+        if res.get("critical_issues"):
+            print("-" * 72)
+            print("Critical Issues (Blocking Live Detonation):")
+            for iss in res["critical_issues"]:
+                print(f"  ! {iss}")
+        if res.get("warnings"):
+            print("-" * 72)
+            print("Warnings (Subsystems Degraded):")
+            for w in res["warnings"]:
+                print(f"  * {w}")
+        return
+
+    print(json.dumps(res, indent=2, default=str))
 
 
 def _format_start_human(res: Dict[str, Any]) -> str:
@@ -167,6 +240,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Inspect running status and health of malbox-ai services")
     p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
 
+    # setup
+    p_setup = sub.add_parser("setup", help="Configure and prepare Malbox subsystems (Profile A/B, Ghidra, CAPE, AI)")
+    setup_act = p_setup.add_mutually_exclusive_group()
+    setup_act.add_argument("--check", action="store_true", help="Inspect and display readiness matrix")
+    setup_act.add_argument("--plan", action="store_true", help="Display actionable Profile A / Profile B deployment plan")
+    setup_act.add_argument("--ghidra", action="store_true", help="Configure Ghidra Headless integration")
+    setup_act.add_argument("--cape", action="store_true", help="Configure CAPE Sandbox connection & isolation attestation")
+    setup_act.add_argument("--ai", action="store_true", help="Configure AI provider (local Ollama, cloud, or mock)")
+    setup_act.add_argument("--verify", action="store_true", help="Run post-setup validation checks")
+    p_setup.add_argument("--dry-run", action="store_true", help="Show proposed changes without writing .env or files")
+    p_setup.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
+    p_setup.add_argument("--url", type=str, help="API URL (for CAPE or AI)")
+    p_setup.add_argument("--token", type=str, help="API Bearer Token (for CAPE)")
+    p_setup.add_argument("--machine", type=str, help="CAPE guest VM machine name (default: win10_malbox)")
+    p_setup.add_argument("--route", type=str, help="CAPE network route (default: host-only)")
+    p_setup.add_argument("--provider", type=str, help="AI provider name (local, ollama, openai, mock)")
+    p_setup.add_argument("--api-key", type=str, help="AI API Key")
+    p_setup.add_argument("--model", type=str, help="AI model name")
+    p_setup.add_argument("--external-consent", action="store_true", help="Authorize external cloud AI transmission")
+    p_setup.add_argument("--ghidra-home", type=str, help="Path to Ghidra installation directory")
+
+    # logs
+    p_logs = sub.add_parser("logs", help="View logs from malbox backend and frontend services")
+    p_logs.add_argument("--backend", action="store_true", help="Show backend logs only")
+    p_logs.add_argument("--frontend", action="store_true", help="Show frontend logs only")
+    p_logs.add_argument("-n", "--lines", type=int, default=50, help="Number of recent log lines to display (default: 50)")
+    p_logs.add_argument("-f", "--follow", action="store_true", help="Follow log output")
+
     return parser
 
 
@@ -264,5 +365,69 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
         else:
             print(_format_status_human(res))
         return int(res["exit_code"])
+
+    if args.command == "setup":
+        from .setup import setup_ai, setup_cape, setup_check, setup_ghidra, setup_plan, setup_verify
+
+        if args.plan:
+            res = setup_plan(repo_root)
+        elif args.ghidra:
+            res = setup_ghidra(repo_root, ghidra_home=args.ghidra_home, dry_run=args.dry_run)
+        elif args.cape:
+            res = setup_cape(
+                repo_root,
+                api_url=args.url,
+                api_token=args.token,
+                machine=args.machine,
+                route=args.route,
+                dry_run=args.dry_run,
+            )
+        elif args.ai:
+            res = setup_ai(
+                repo_root,
+                provider=args.provider or "local",
+                base_url=args.url,
+                api_key=args.api_key,
+                model=args.model,
+                external_consent=args.external_consent,
+                dry_run=args.dry_run,
+            )
+        elif args.verify:
+            res = setup_verify(repo_root)
+        else:
+            res = setup_check(repo_root, json_mode=args.json)
+
+        if args.json:
+            print(json.dumps(res, indent=2, default=str))
+        else:
+            _format_setup_human(res)
+        return 0
+
+    if args.command == "logs":
+        runtime_dir = repo_root / ".malbox"
+        be_log = runtime_dir / "backend.log"
+        fe_log = runtime_dir / "frontend.log"
+        show_be = args.backend or (not args.backend and not args.frontend)
+        show_fe = args.frontend or (not args.backend and not args.frontend)
+        n = max(1, args.lines)
+
+        if show_be:
+            print("=== Backend Logs (.malbox/backend.log) ===")
+            if be_log.is_file():
+                lines = be_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in lines[-n:]:
+                    print(line)
+            else:
+                print("(No backend log file found)")
+
+        if show_fe:
+            print("\n=== Frontend Logs (.malbox/frontend.log) ===")
+            if fe_log.is_file():
+                lines = fe_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in lines[-n:]:
+                    print(line)
+            else:
+                print("(No frontend log file found)")
+        return 0
 
     return 1

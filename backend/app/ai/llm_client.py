@@ -100,7 +100,7 @@ class RealLLMProvider(LLMProvider):
             }
             return validated.model_dump()
         except Exception as e:
-            logger.warning(f"Real LLM plan generation failed: {e}. Falling back to MockLLMProvider.")
+            logger.warning(f"Real LLM plan generation failed: {e}. Falling back to deterministic MockLLMProvider.")
             self.last_call_meta = {
                 "provider": "mock_fallback",
                 "model": self.model,
@@ -109,7 +109,9 @@ class RealLLMProvider(LLMProvider):
                 "fallback_reason": str(e),
             }
             mock = MockLLMProvider()
-            return mock.generate_plan(sample_metadata)
+            plan = mock.generate_plan(sample_metadata)
+            plan["rationale"] = f"[AI PLANNER UNAVAILABLE: {e}] Deterministic static triage plan applied. " + plan.get("rationale", "")
+            return plan
 
     def evaluate_observations(
         self,
@@ -146,7 +148,7 @@ class RealLLMProvider(LLMProvider):
             }
             return validated.model_dump()
         except Exception as e:
-            logger.warning(f"Real LLM observation evaluation failed: {e}. Falling back to MockLLMProvider.")
+            logger.warning(f"Real LLM observation evaluation failed: {e}. Falling back to deterministic MockLLMProvider.")
             self.last_call_meta = {
                 "provider": "mock_fallback",
                 "model": self.model,
@@ -155,7 +157,9 @@ class RealLLMProvider(LLMProvider):
                 "fallback_reason": str(e),
             }
             mock = MockLLMProvider()
-            return mock.evaluate_observations(sample_metadata, telemetry_summary)
+            eval_res = mock.evaluate_observations(sample_metadata, telemetry_summary)
+            eval_res["rationale"] = f"[AI EVALUATOR UNAVAILABLE: {e}] Deterministic follow-up rules applied. " + eval_res.get("rationale", "")
+            return eval_res
 
     def generate_executive_summary(
         self,
@@ -181,7 +185,7 @@ class RealLLMProvider(LLMProvider):
             }
             return result["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.warning(f"Real LLM summary generation failed: {e}. Falling back to MockLLMProvider.")
+            logger.warning(f"Real LLM summary generation failed: {e}. Falling back to deterministic MockLLMProvider.")
             self.last_call_meta = {
                 "provider": "mock_fallback",
                 "model": self.model,
@@ -190,7 +194,8 @@ class RealLLMProvider(LLMProvider):
                 "fallback_reason": str(e),
             }
             mock = MockLLMProvider()
-            return mock.generate_executive_summary(sample_metadata, findings_summary, timeline)
+            summary = mock.generate_executive_summary(sample_metadata, findings_summary, timeline)
+            return f"[AI SUMMARY UNAVAILABLE: {e}] Non-AI technical summary: " + summary
 
 
     def generate_intelligence_report(
@@ -216,6 +221,13 @@ class RealLLMProvider(LLMProvider):
 
 def get_llm_provider() -> LLMProvider:
     """Factory returns active AI provider based on configuration."""
+    if settings.AI_PROVIDER in ("local", "ollama"):
+        return RealLLMProvider(
+            api_key=settings.AI_API_KEY or "ollama",
+            model=settings.AI_MODEL or "llama3",
+            base_url=settings.AI_BASE_URL or "http://127.0.0.1:11434/v1",
+            timeout=settings.AI_TIMEOUT_SECONDS,
+        )
     if settings.AI_PROVIDER != "mock" and settings.AI_API_KEY:
         return RealLLMProvider(
             api_key=settings.AI_API_KEY,
@@ -233,6 +245,7 @@ def get_reporting_llm_provider(
     """
     Returns reporting intelligence provider respecting AI_REPORTING_MODE and explicit
     external transmission consent. Defaults strictly to offline MockLLMProvider.
+    Local AI models (e.g. Ollama) execute locally on the host and do not require external consent.
     """
     mode = (
         (requested_mode or getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in")
@@ -243,6 +256,15 @@ def get_reporting_llm_provider(
 
     if mode == "deterministic":
         return MockLLMProvider()
+
+    # Local AI provider (Ollama / Local OpenAI-compatible server on localhost)
+    if mode in ("local", "ollama") or settings.AI_PROVIDER in ("local", "ollama"):
+        return RealLLMProvider(
+            api_key=settings.AI_API_KEY or "ollama",
+            model=settings.AI_MODEL or "llama3",
+            base_url=settings.AI_BASE_URL or "http://127.0.0.1:11434/v1",
+            timeout=settings.AI_TIMEOUT_SECONDS,
+        )
 
     if mode == "opencode" or (force_external and mode == "auto" and getattr(settings, "OPENCODE_ENABLED", False)):
         from app.ai.opencode_provider import OpenCodeReportProvider
