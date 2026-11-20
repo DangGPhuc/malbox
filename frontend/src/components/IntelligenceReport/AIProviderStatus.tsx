@@ -199,7 +199,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
                 onClick={() => setStagesOpen((prev) => !prev)}
                 style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
               >
-                {stagesOpen ? 'Hide Analyst Stages' : `Inspect 4 Analyst Stages (${providerMetadata.analyst_stages.length})`}
+                {stagesOpen ? 'Hide Analytical Sections' : `Inspect 4 Analytical Sections (${providerMetadata.analyst_stages.length} Sections, Consolidated Pass)`}
               </button>
               {stagesOpen && (
                 <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -218,7 +218,9 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
                         <strong style={{ color: 'var(--text-main)' }}>{stage.stage_name}</strong>
                         <span
                           className={`badge ${
-                            stage.validation_status === 'valid' ? 'badge-success' : 'badge-warning'
+                            stage.validation_status.includes('valid') || stage.validation_status.includes('verified')
+                              ? 'badge-success'
+                              : 'badge-warning'
                           }`}
                         >
                           {stage.validation_status}

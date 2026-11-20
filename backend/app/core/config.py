@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_TOKENS: int = 2048
     AI_TEMPERATURE: float = 0.1
+    TRUSTED_LOCAL_AI_HOSTS: str = ""  # Comma-separated list of approved non-loopback private hosts for local AI
 
     # Reporting & Correlation Security (No hardcoded secrets; fail closed)
     REPORTING_AUTH_TOKEN: str = ""  # Required via X-Reporting-Token for POST .../report/intelligence & .../correlation

@@ -563,4 +563,63 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
     expect(screen.getByText('CONFIRMED')).toBeInTheDocument();
     expect(screen.getByText(/Observed shadow copy deletion and mass encryption burst/i)).toBeInTheDocument();
   });
+
+  it('13: WorkspacePage supports transient operator token for live retry without localStorage/sessionStorage', async () => {
+    const liveFailedAnalysis = {
+      id: 'ana-live-fail-1',
+      sample_id: 'smp-live-1',
+      status: 'FAILED',
+      backend_type: 'cape',
+      profile: 'standard',
+      timeout_seconds: 120,
+      live_mode: true,
+      approved_by_user: true,
+      error_message: 'CAPE guest VM network check timed out.',
+      risk_score: 50,
+      risk_level: 'Suspicious',
+      sample_file_name: 'trojan_live.exe',
+      created_at: '2026-11-20T00:00:00Z',
+    };
+
+    vi.spyOn(api, 'getAnalysis').mockResolvedValue(liveFailedAnalysis as any);
+    vi.spyOn(api, 'getEvents').mockResolvedValue({ total: 0, page: 1, page_size: 150, items: [] });
+    vi.spyOn(api, 'getOrchestration').mockResolvedValue([]);
+    vi.spyOn(api, 'getArtifacts').mockResolvedValue([]);
+    const retrySpy = vi.spyOn(api, 'retryAnalysis').mockResolvedValue({
+      ...liveFailedAnalysis,
+      status: 'QUEUED',
+      error_message: null,
+    } as any);
+
+    render(<WorkspacePage analysisId="ana-live-fail-1" onNavigateTab={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Analysis FAILED/i)).toBeInTheDocument();
+    });
+
+    const retryBtn = screen.getByRole('button', { name: /Authorize & Retry|Retry Analysis/i });
+    fireEvent.click(retryBtn);
+
+    // Operator token prompt appears
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/Enter X-Operator-Token/i)).toBeInTheDocument();
+    });
+
+    const tokenInput = screen.getByPlaceholderText(/Enter X-Operator-Token/i);
+    fireEvent.change(tokenInput, { target: { value: 'transient-secret-op-token' } });
+
+    // Click Authorize & Retry
+    const authBtn = screen.getByRole('button', { name: /Authorize & Retry/i });
+    fireEvent.click(authBtn);
+
+    await waitFor(() => {
+      expect(retrySpy).toHaveBeenCalledWith('ana-live-fail-1', 'transient-secret-op-token');
+    });
+
+    // Verify token was NEVER stored in persistent storage
+    expect(localStorage.getItem('X-Operator-Token')).toBeNull();
+    expect(localStorage.getItem('operatorToken')).toBeNull();
+    expect(sessionStorage.getItem('X-Operator-Token')).toBeNull();
+    expect(sessionStorage.getItem('operatorToken')).toBeNull();
+  });
 });

@@ -296,6 +296,7 @@ class AIProviderMetadata(BaseModel):
     provider: str
     model: str
     tokens_used: int = 0
+    inference_type: str = "consolidated_single_pass"
     fallback_used: bool = False
     fallback_reason: Optional[str] = None
     rules_version: str = "2.0"

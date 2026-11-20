@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 import httpx
 
 from app.core.config import settings
@@ -10,6 +12,47 @@ from app.core.security import sanitize_untrusted_input_for_ai
 from app.schemas.orchestration import AnalysisPlan, FollowUpRecommendation
 
 logger = logging.getLogger(__name__)
+
+TRUSTED_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def validate_local_ai_endpoint(base_url: str) -> None:
+    """
+    Enforces trusted local endpoint policy: base_url must point strictly to loopback
+    (localhost, 127.0.0.1, ::1) or explicitly approved private inference hosts via
+    TRUSTED_LOCAL_AI_HOSTS. External/unauthorized hosts are strictly rejected when provider='local'.
+    """
+    if not base_url:
+        raise ValueError("Local AI base_url cannot be empty.")
+
+    try:
+        parsed = urlparse(base_url)
+        host = (parsed.hostname or "").strip().lower()
+    except Exception as exc:
+        raise ValueError(f"Invalid local AI base_url '{base_url}': {str(exc)}") from exc
+
+    if not host:
+        raise ValueError(f"Invalid local AI base_url '{base_url}': missing hostname.")
+
+    if host in TRUSTED_LOOPBACK_HOSTS:
+        return
+
+    # Check explicitly approved private inference hosts from configuration
+    allowed_raw = getattr(settings, "TRUSTED_LOCAL_AI_HOSTS", None) or os.environ.get("MALBOX_TRUSTED_LOCAL_AI_HOSTS", "")
+    allowed_list = (
+        [h.strip().lower() for h in allowed_raw.split(",") if h.strip()]
+        if isinstance(allowed_raw, str)
+        else [str(h).strip().lower() for h in allowed_raw]
+    )
+    if host in allowed_list:
+        return
+
+    raise ValueError(
+        f"Untrusted local AI endpoint host '{host}'. Local AI policy strictly requires loopback (localhost, 127.0.0.1, ::1) "
+        f"or explicitly approved private hosts in TRUSTED_LOCAL_AI_HOSTS ({allowed_list}). External or remote hosts "
+        f"cannot be accessed under local AI mode without cloud provider consent."
+    )
+
 
 class RealLLMProvider(LLMProvider):
     """
@@ -23,11 +66,15 @@ class RealLLMProvider(LLMProvider):
         model: str,
         base_url: Optional[str] = None,
         timeout: Optional[float] = None,
+        is_local: bool = False,
     ):
         self.api_key = api_key
         self.model = model
         self.base_url = (base_url or settings.AI_BASE_URL).rstrip("/")
         self.timeout = timeout or settings.AI_TIMEOUT_SECONDS
+        self.is_local = is_local
+        if self.is_local:
+            validate_local_ai_endpoint(self.base_url)
         self.provider_name = "real"
         self.last_call_meta: Dict[str, Any] = {
             "provider": "real",
@@ -219,14 +266,24 @@ class RealLLMProvider(LLMProvider):
         return report
 
 
+def get_local_ai_base_url() -> str:
+    """Returns local AI endpoint URL, defaulting to loopback Ollama if unconfigured or default cloud URL."""
+    url = getattr(settings, "AI_BASE_URL", "") or ""
+    if not url or "api.openai.com" in url.lower():
+        return "http://127.0.0.1:11434/v1"
+    return url
+
+
 def get_llm_provider() -> LLMProvider:
     """Factory returns active AI provider based on configuration."""
     if settings.AI_PROVIDER in ("local", "ollama"):
+        url = get_local_ai_base_url()
         return RealLLMProvider(
             api_key=settings.AI_API_KEY or "ollama",
             model=settings.AI_MODEL or "llama3",
-            base_url=settings.AI_BASE_URL or "http://127.0.0.1:11434/v1",
+            base_url=url,
             timeout=settings.AI_TIMEOUT_SECONDS,
+            is_local=True,
         )
     if settings.AI_PROVIDER != "mock" and settings.AI_API_KEY:
         return RealLLMProvider(
@@ -234,6 +291,7 @@ def get_llm_provider() -> LLMProvider:
             model=settings.AI_MODEL,
             base_url=settings.AI_BASE_URL,
             timeout=settings.AI_TIMEOUT_SECONDS,
+            is_local=False,
         )
     return MockLLMProvider()
 
@@ -269,11 +327,13 @@ def get_reporting_llm_provider(
 
     # Local AI provider (Ollama / Local OpenAI-compatible server on localhost)
     if mode in ("local", "ollama") or cfg_prov in ("local", "ollama"):
+        url = get_local_ai_base_url()
         return RealLLMProvider(
             api_key=settings.AI_API_KEY or "ollama",
             model=settings.AI_MODEL or "llama3",
-            base_url=settings.AI_BASE_URL or "http://127.0.0.1:11434/v1",
+            base_url=url,
             timeout=settings.AI_TIMEOUT_SECONDS,
+            is_local=True,
         )
 
     if mode == "opencode" or (force_external and mode == "auto" and getattr(settings, "OPENCODE_ENABLED", False)):

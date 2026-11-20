@@ -300,7 +300,9 @@ export interface AnalystStage {
   output_summary: Record<string, any>;
   validation_status: string;
   error?: string | null;
-  tokens_used: number;
+  tokens_used?: number;
+  execution_nature?: string;
+  inference_mode?: string;
 }
 
 export interface AIProviderMetadata {
@@ -308,6 +310,7 @@ export interface AIProviderMetadata {
   provider: string;
   model: string;
   tokens_used: number;
+  inference_type?: string;
   fallback_used: boolean;
   fallback_reason?: string | null;
   rules_version: string;

@@ -539,6 +539,8 @@ def build_analyst_stages_execution(
     s1 = {
         "stage_id": "stage_1_static_code_analyst",
         "stage_name": "Static Code Analysis",
+        "inference_mode": "consolidated_single_pass",
+        "execution_nature": "consolidated_single_pass_section",
         "inputs_summary": {
             "file_name": bundle.sample_identity.file_name,
             "sha256": bundle.sample_identity.sha256,
@@ -552,14 +554,16 @@ def build_analyst_stages_execution(
             "static_status": bundle.static_analysis.status,
             "static_evidence_id": bundle.sample_identity.evidence_id,
         },
-        "validation_status": "valid" if not is_fallback else "fallback",
+        "validation_status": "deterministic_extracted" if is_fallback else "schema_validated_static_section",
         "error": error_msg if is_fallback else None,
-        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+        "tokens_used": 0,
     }
 
     s2 = {
         "stage_id": "stage_2_dynamic_behavior_analyst",
         "stage_name": "Dynamic Behavior Analysis",
+        "inference_mode": "consolidated_single_pass",
+        "execution_nature": "consolidated_single_pass_section",
         "inputs_summary": {
             "backend_type": bundle.provenance.backend_type,
             "is_replay": bundle.provenance.is_replay,
@@ -573,14 +577,16 @@ def build_analyst_stages_execution(
             "timeline_interpretations_count": len(proposed_intel.timeline_interpretations) if proposed_intel else 0,
             "behavioral_findings_count": len(bundle.findings),
         },
-        "validation_status": "valid" if not is_fallback else "fallback",
+        "validation_status": "deterministic_extracted" if is_fallback else "schema_validated_behavioral_section",
         "error": error_msg if is_fallback else None,
-        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+        "tokens_used": 0,
     }
 
     s3 = {
         "stage_id": "stage_3_threat_classification_analyst",
         "stage_name": "Threat Classification",
+        "inference_mode": "consolidated_single_pass",
+        "execution_nature": "consolidated_single_pass_section",
         "inputs_summary": {
             "deterministic_risk_score": bundle.deterministic_risk_score,
             "deterministic_risk_level": bundle.deterministic_risk_level,
@@ -594,14 +600,16 @@ def build_analyst_stages_execution(
             "overall_confidence": proposed_intel.confidence_assessment.overall_confidence if proposed_intel else 0.5,
             "evidence_completeness": proposed_intel.confidence_assessment.evidence_completeness if proposed_intel else "low",
         },
-        "validation_status": "valid" if not is_fallback else "fallback",
+        "validation_status": "deterministic_extracted" if is_fallback else "epistemic_standard_verified",
         "error": error_msg if is_fallback else None,
-        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+        "tokens_used": 0,
     }
 
     s4 = {
         "stage_id": "stage_4_report_composer",
         "stage_name": "Intelligence Report Composition",
+        "inference_mode": "consolidated_single_pass",
+        "execution_nature": "consolidated_single_pass_section",
         "inputs_summary": {
             "target_schema": "AIProposedIntelligence",
             "epistemic_standards": "FACT / INFERENCE / HYPOTHESIS",
@@ -614,9 +622,9 @@ def build_analyst_stages_execution(
             "iocs_interpreted_count": len(proposed_intel.ioc_interpretations) if proposed_intel else 0,
             "deterministic_score_preserved": True,
         },
-        "validation_status": "valid" if not is_fallback else "fallback",
+        "validation_status": "deterministic_template" if is_fallback else "schema_validated_composition",
         "error": error_msg if is_fallback else None,
-        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+        "tokens_used": 0,
     }
 
     return [s1, s2, s3, s4]
