@@ -1,0 +1,14 @@
+[Unit]
+Description=CAPE Sandbox Rooter Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/CAPEv2
+ExecStart=/opt/CAPEv2/.venv/bin/python3 utils/rooter.py -g cape
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

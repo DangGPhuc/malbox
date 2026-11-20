@@ -76,6 +76,36 @@ def _format_doctor_human(report: Dict[str, Any], verbose: bool = False) -> str:
 
 
 def _format_setup_human(res: Dict[str, Any]) -> None:
+    if "verdict" in res:
+        print(f"malbox-ai Benign End-to-End Acceptance: [{res['verdict']}]")
+        print("=" * 72)
+        print(f"Fixture SHA-256: {res.get('fixture_sha256')}")
+        print(f"Report Digest  : {res.get('report_digest')}")
+        print("-" * 72)
+        for st in res.get("stages", []):
+            label = f"[{st.get('label', 'UNKNOWN')}]"
+            tag = f"[{st.get('status', 'INFO')}]"
+            print(f"{tag:<8} {label:<21} {st['stage']}: {st['details']}")
+        print("=" * 72)
+        print(f"Summary: {res.get('summary')}")
+        return
+
+    if "checklist" in res or "plan" in res and isinstance(res.get("plan"), dict) and "checklist" in res.get("plan", {}):
+        p = res.get("plan", res)
+        print(f"malbox-ai Windows Guest Provisioning — [{res.get('readiness_tier', 'PLAN')}]")
+        print("=" * 72)
+        print(f"Target VM  : {p.get('vm_name')} (Hypervisor: {p.get('hypervisor')})")
+        print(f"Guest IP   : {p.get('guest_ip')}")
+        specs = p.get("specs", {})
+        print(f"Specs      : {specs.get('vcpus')} vCPUs | {specs.get('ram_mb')} MB RAM | {specs.get('disk_gb')} GB disk")
+        print("-" * 72)
+        print("Operator Setup Checklist:")
+        for chk in p.get("checklist", []):
+            print(f"  {chk}")
+        print("=" * 72)
+        print(f"Notice: {res.get('notice', 'Follow checklist to complete provisioning.')}")
+        return
+
     if "matrix" in res:
         print("malbox-ai Deployment Readiness Matrix")
         print("=" * 72)
@@ -94,8 +124,47 @@ def _format_setup_human(res: Dict[str, Any]) -> None:
         print("malbox-ai Hardware & Deployment Planning")
         print("=" * 72)
         print(f"Recommended Profile: {res['recommended_profile']}")
-        virt_status = "DETECTED (/dev/kvm accessible)" if res.get("kvm_present") else "NOT DETECTED (Profile A single-host hypervisor disabled)"
+        virt_status = "DETECTED (/dev/kvm accessible)" if res.get("kvm_present") else "NOT DETECTED"
         print(f"Hardware Virtualization: {virt_status}")
+        hw = res.get("hardware", {})
+        if hw:
+            mem = hw.get("memory", {})
+            dsk = hw.get("disk", {})
+            print(f"Host Specs: RAM={mem.get('total_mb', 0)} MB total | Free Disk={dsk.get('free_gb', 0)} GB")
+        print("-" * 72)
+        for key, p in res["profiles"].items():
+            sup = "[SUPPORTED]" if p.get("supported_on_current_host") else "[UNSUPPORTED ON CURRENT HOST]"
+            print(f"\n{p['name']} {sup}")
+            print(f"  Description: {p['description']}")
+            print(f"  Topology   : {p['network_topology']}")
+            if p.get("warnings"):
+                for w in p["warnings"]:
+                    print(f"  ! Warning: {w}")
+            print("  Prerequisites:")
+            for req in p["prerequisites"]:
+                print(f"    * {req}")
+            print("  Setup Steps:")
+            for cmd in p["setup_commands"]:
+                print(f"    $ {cmd}")
+        print("\n" + "=" * 72)
+        print(f"Next Action: {res.get('next_step')}")
+        return
+
+    if "steps" in res:
+        tag = f"[{res.get('status', 'COMPLETE')}]"
+        print(f"{tag} malbox setup execution completed:")
+        print("=" * 72)
+        for st in res.get("steps", []):
+            st_tag = f"[{st.get('status', 'INFO')}]"
+            msg = st.get("details") or st.get("error") or st.get("warning") or ""
+            print(f"  * {st_tag:<8} {st['step']}: {msg}")
+        if res.get("remediation"):
+            print("-" * 72)
+            print(f"  Remediation command: {res['remediation']}")
+        if res.get("backup_file"):
+            print(f"  Backup created: {res['backup_file']}")
+        print("=" * 72)
+        return
         print("-" * 72)
         for key, p in res["profiles"].items():
             sup = "[SUPPORTED]" if p.get("supported_on_current_host") else "[UNSUPPORTED ON CURRENT HOST]"
@@ -270,17 +339,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
 
     # setup
-    p_setup = sub.add_parser("setup", help="Configure and prepare Malbox subsystems (Profile A/B, Ghidra, CAPE, AI)")
+    p_setup = sub.add_parser("setup", help="Configure and prepare Malbox subsystems (Profiles A/B/C, Ghidra, CAPE, AI, Guest)")
     setup_act = p_setup.add_mutually_exclusive_group()
     setup_act.add_argument("--check", action="store_true", help="Inspect and display readiness matrix")
-    setup_act.add_argument("--plan", action="store_true", help="Display actionable Profile A / Profile B deployment plan")
+    setup_act.add_argument("--plan", action="store_true", help="Display actionable Profile A / Profile B / Profile C deployment plan")
+    setup_act.add_argument("--install-core", action="store_true", help="Install core backend venv, frontend build, database, and directories")
     setup_act.add_argument("--ghidra", action="store_true", help="Configure Ghidra Headless integration")
-    setup_act.add_argument("--cape", action="store_true", help="Configure CAPE Sandbox connection parameters")
+    setup_act.add_argument("--install-ghidra", action="store_true", help="Install/verify Ghidra Headless integration and smoke test")
+    setup_act.add_argument("--ai", action="store_true", help="Configure AI provider settings")
+    setup_act.add_argument("--install-ai", action="store_true", help="Install/configure AI provider (local Ollama, cloud, or mock)")
+    setup_act.add_argument("--cape", action="store_true", help="Configure CAPE Sandbox Controller connection")
+    setup_act.add_argument("--provision-cape", action="store_true", help="Provision and connect CAPE Sandbox Controller")
+    setup_act.add_argument("--provision-guest", action="store_true", help="Provision and verify Windows Analysis Guest VM")
     setup_act.add_argument("--attest-isolation", action="store_true", help="Explicit manual operator isolation attestation workflow")
-    setup_act.add_argument("--ai", action="store_true", help="Configure AI provider (local Ollama, cloud, or mock)")
-    setup_act.add_argument("--verify", action="store_true", help="Run post-setup validation checks")
+    setup_act.add_argument("--verify", action="store_true", help="Run post-setup validation checks across all 7 readiness tiers")
+    setup_act.add_argument("--benign-e2e", action="store_true", help="Run safe benign non-malicious end-to-end acceptance test")
     p_setup.add_argument("--dry-run", action="store_true", help="Show proposed changes without writing .env or files")
     p_setup.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
+    p_setup.add_argument("--profile", type=str, choices=["A", "B", "C", "a", "b", "c"], help="Target deployment profile (A: Single-Host, B: Distributed, C: Constrained VM)")
+    p_setup.add_argument("--iso", type=str, help="Path to user-supplied Windows ISO image")
+    p_setup.add_argument("--vm-name", type=str, default="win10_analyst", help="Windows guest VM name (default: win10_analyst)")
+    p_setup.add_argument("--hypervisor", type=str, choices=["kvm", "virtualbox", "vbox"], help="Hypervisor to target (kvm or virtualbox)")
+    p_setup.add_argument("--live", action="store_true", help="Attempt live CAPE submission during benign e2e test (if verified)")
+    p_setup.add_argument("--non-interactive", action="store_true", help="Run without interactive operator prompts")
+    p_setup.add_argument("--skip-frontend", action="store_true", help="Skip frontend build in install-core")
+    p_setup.add_argument("--no-build", action="store_true", help="Skip building frontend distribution")
     p_setup.add_argument("--url", type=str, help="API URL (for CAPE or AI)")
     p_setup.add_argument("--token", type=str, help="API Bearer Token (for CAPE)")
     p_setup.add_argument("--machine", type=str, help="CAPE guest VM machine name (default: win10_analyst)")
@@ -405,12 +488,70 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
         return int(res["exit_code"])
 
     if args.command == "setup":
-        from .setup import setup_ai, setup_attest_isolation, setup_cape, setup_check, setup_ghidra, setup_plan, setup_verify
+        from .setup import (
+            setup_ai,
+            setup_attest_isolation,
+            setup_benign_e2e,
+            setup_cape,
+            setup_check,
+            setup_ghidra,
+            setup_install_ai,
+            setup_install_core,
+            setup_install_ghidra,
+            setup_plan,
+            setup_provision_cape,
+            setup_provision_guest,
+            setup_verify,
+        )
 
         if args.plan:
-            res = setup_plan(repo_root)
+            res = setup_plan(repo_root, profile_override=args.profile)
+        elif getattr(args, "install_core", False):
+            res = setup_install_core(
+                repo_root,
+                skip_frontend=args.skip_frontend,
+                no_build=args.no_build,
+                dry_run=args.dry_run,
+                non_interactive=args.non_interactive,
+            )
         elif args.ghidra:
             res = setup_ghidra(repo_root, ghidra_home=args.ghidra_home, dry_run=args.dry_run)
+        elif getattr(args, "install_ghidra", False):
+            res = setup_install_ghidra(
+                repo_root,
+                ghidra_home=args.ghidra_home,
+                dry_run=args.dry_run,
+                non_interactive=args.non_interactive,
+            )
+        elif args.ai:
+            key_val = args.api_key
+            if key_val == "-":
+                import getpass
+                key_val = getpass.getpass("Enter AI API Key: ").strip()
+            res = setup_ai(
+                repo_root,
+                provider=args.provider or "local",
+                base_url=args.url,
+                api_key=key_val,
+                model=args.model,
+                external_consent=args.external_consent,
+                dry_run=args.dry_run,
+            )
+        elif getattr(args, "install_ai", False):
+            key_val = args.api_key
+            if key_val == "-":
+                import getpass
+                key_val = getpass.getpass("Enter AI API Key: ").strip()
+            res = setup_install_ai(
+                repo_root,
+                provider=args.provider or "local",
+                base_url=args.url,
+                api_key=key_val,
+                model=args.model,
+                external_consent=args.external_consent,
+                dry_run=args.dry_run,
+                non_interactive=args.non_interactive,
+            )
         elif args.cape:
             token_val = args.token
             if token_val == "-":
@@ -422,6 +563,37 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
                 api_token=token_val,
                 machine=args.machine,
                 route=args.route,
+                dry_run=args.dry_run,
+            )
+        elif getattr(args, "provision_cape", False):
+            token_val = args.token
+            if token_val == "-":
+                import getpass
+                token_val = getpass.getpass("Enter CAPE API Token: ").strip()
+            res = setup_provision_cape(
+                repo_root,
+                profile=args.profile or "B",
+                api_url=args.url,
+                api_token=token_val,
+                machine=args.machine,
+                route=args.route,
+                dry_run=args.dry_run,
+                non_interactive=args.non_interactive,
+            )
+        elif getattr(args, "provision_guest", False):
+            res = setup_provision_guest(
+                repo_root,
+                hypervisor=args.hypervisor,
+                vm_name=args.vm_name,
+                iso_path=args.iso,
+                dry_run=args.dry_run,
+                non_interactive=args.non_interactive,
+            )
+        elif getattr(args, "benign_e2e", False):
+            res = setup_benign_e2e(
+                repo_root,
+                operator_token=args.token,
+                allow_live=args.live,
                 dry_run=args.dry_run,
             )
         elif args.attest_isolation:
@@ -454,20 +626,6 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
                 evidence_refs=refs,
                 notes=args.notes,
                 assertions=assertions,
-                dry_run=args.dry_run,
-            )
-        elif args.ai:
-            key_val = args.api_key
-            if key_val == "-":
-                import getpass
-                key_val = getpass.getpass("Enter AI API Key: ").strip()
-            res = setup_ai(
-                repo_root,
-                provider=args.provider or "local",
-                base_url=args.url,
-                api_key=key_val,
-                model=args.model,
-                external_consent=args.external_consent,
                 dry_run=args.dry_run,
             )
         elif args.verify:

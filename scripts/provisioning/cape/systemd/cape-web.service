@@ -1,0 +1,17 @@
+[Unit]
+Description=CAPE Sandbox REST API and Web Interface
+After=network.target cape.service
+Wants=cape.service
+
+[Service]
+Type=simple
+User=cape
+Group=cape
+WorkingDirectory=/opt/CAPEv2/web
+Environment="PYTHONPATH=/opt/CAPEv2"
+ExecStart=/opt/CAPEv2/.venv/bin/python3 manage.py runserver 127.0.0.1:8008
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

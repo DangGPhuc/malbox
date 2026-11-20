@@ -98,76 +98,146 @@ def setup_check(root_dir: Path, json_mode: bool = False) -> Dict[str, Any]:
     }
 
 
-def setup_plan(root_dir: Path) -> Dict[str, Any]:
+from .discovery import discover_all_hardware, evaluate_deployment_profiles
+
+
+def setup_plan(root_dir: Path, profile_override: Optional[str] = None) -> Dict[str, Any]:
     """
     Analyzes host hardware/configuration and generates a structured deployment plan
-    for Profile A (Kali Single-Host) vs Profile B (Distributed Sandbox).
+    for Profile A (Kali Single-Host), Profile B (Distributed Sandbox), and Profile C (Resource-Constrained VM).
     """
-    config = resolve_effective_config(root_dir)
-    kvm_ok = Path("/dev/kvm").exists()
-    cpuinfo = Path("/proc/cpuinfo")
-    virt_flags: List[str] = []
-    if cpuinfo.is_file():
-        try:
-            content = cpuinfo.read_text(encoding="utf-8", errors="replace").lower()
-            for flag in ("vmx", "svm"):
-                import re
-                if re.search(r"\b" + flag + r"\b", content):
-                    virt_flags.append(flag)
-        except Exception:
-            pass
+    hardware = discover_all_hardware(root_dir)
+    evaluation = evaluate_deployment_profiles(hardware)
+    evaluation["hardware"] = hardware
 
-    has_hardware_virt = kvm_ok or bool(virt_flags)
+    if profile_override:
+        p_key = f"profile_{profile_override.lower()}"
+        matched = [k for k in evaluation["profiles"] if k.startswith(p_key)]
+        if matched:
+            evaluation["recommended_key"] = matched[0]
+            evaluation["recommended_profile"] = evaluation["profiles"][matched[0]]["name"]
 
-    profile_a_supported = has_hardware_virt
-    recommended_profile = "Profile A (Kali Single-Host)" if profile_a_supported else "Profile B (Distributed Sandbox)"
+    return evaluation
 
-    plan_details = {
-        "recommended_profile": recommended_profile,
-        "hardware_virtualization_detected": has_hardware_virt,
-        "kvm_present": kvm_ok,
-        "virt_flags": virt_flags,
-        "profiles": {
-            "profile_a_single_host": {
-                "name": "Profile A: Kali Single-Host Sandbox",
-                "supported_on_current_host": profile_a_supported,
-                "description": "FastAPI + Vite frontend + CAPE root + VirtualBox/KVM run on this single Kali machine.",
-                "prerequisites": [
-                    "Host OS: Physical bare-metal Kali Linux (or nested-virt enabled VM)",
-                    "Virtualization: /dev/kvm active and accessible",
-                    "Hypervisor: VirtualBox 7.x or KVM/libvirt",
-                    "RAM: >= 16 GB recommended (minimum 8 GB)",
-                    "Disk: >= 80 GB free SSD storage",
-                ],
-                "network_topology": "Host-only virtual network (e.g. vboxnet0 at 192.168.56.1/24; guest at 192.168.56.101; no default gateway, no NAT).",
-                "setup_commands": [
-                    "./malbox setup --ghidra",
-                    "./malbox setup --cape",
-                    "./malbox setup --ai",
-                    "./malbox setup --verify",
-                ],
-            },
-            "profile_b_distributed": {
-                "name": "Profile B: Distributed Sandbox (Controller + External CAPE)",
-                "supported_on_current_host": True,
-                "description": "FastAPI + Vite run on Kali host; Windows guest VMs run on dedicated remote CAPE hypervisor node.",
-                "prerequisites": [
-                    "Controller Host: Kali Linux / Debian with Malbox backend & frontend",
-                    "Sandbox Node: Dedicated physical hypervisor running CAPE Sandbox v2 REST API",
-                    "Network: Dedicated private management VLAN between Malbox and CAPE API (:8008)",
-                    "Isolation: Windows guest network confined entirely on the CAPE hypervisor node",
-                ],
-                "network_topology": "Host-only network local to external CAPE server. Controller communicates via REST API over TLS / VPN.",
-                "setup_commands": [
-                    "./malbox setup --cape",
-                    "./malbox setup --ai",
-                    "./malbox setup --verify",
-                ],
-            },
-        },
-        "next_step": "Run `./malbox setup --cape` or `./malbox setup --ai` to configure specific subsystems.",
-    }
-    return plan_details
+
+def setup_install_core(
+    root_dir: Path,
+    skip_frontend: bool = False,
+    no_build: bool = False,
+    dry_run: bool = False,
+    non_interactive: bool = False,
+) -> Dict[str, Any]:
+    """Automated installation and verification of core Malbox environment."""
+    from .provisioning.core import install_core
+    return install_core(
+        root_dir,
+        skip_frontend=skip_frontend,
+        no_build=no_build,
+        dry_run=dry_run,
+        non_interactive=non_interactive,
+    )
+
+
+def setup_install_ghidra(
+    root_dir: Path,
+    ghidra_home: Optional[str] = None,
+    dry_run: bool = False,
+    non_interactive: bool = False,
+) -> Dict[str, Any]:
+    """Automated package installation, verification, and smoke test of Ghidra Headless."""
+    from .provisioning.ghidra import install_and_verify_ghidra
+    return install_and_verify_ghidra(
+        root_dir,
+        ghidra_home_override=ghidra_home,
+        dry_run=dry_run,
+        non_interactive=non_interactive,
+    )
+
+
+def setup_install_ai(
+    root_dir: Path,
+    provider: str = "local",
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    external_consent: bool = False,
+    dry_run: bool = False,
+    non_interactive: bool = False,
+) -> Dict[str, Any]:
+    """Automated installation and configuration of local Ollama / AI inference subsystem."""
+    from .provisioning.ai import install_and_configure_ai
+    return install_and_configure_ai(
+        root_dir,
+        provider=provider,
+        model_override=model,
+        base_url_override=base_url,
+        api_key=api_key,
+        external_consent=external_consent,
+        dry_run=dry_run,
+        non_interactive=non_interactive,
+    )
+
+
+def setup_provision_cape(
+    root_dir: Path,
+    profile: str = "B",
+    api_url: Optional[str] = None,
+    api_token: Optional[str] = None,
+    machine: str = "win10_analyst",
+    route: str = "drop",
+    dry_run: bool = False,
+    non_interactive: bool = False,
+) -> Dict[str, Any]:
+    """Configures and provisions connection to CAPE Sandbox Controller."""
+    from .provisioning.cape import provision_and_connect_cape
+    return provision_and_connect_cape(
+        root_dir,
+        profile=profile,
+        api_url=api_url,
+        api_token=api_token,
+        machine=machine,
+        route=route,
+        dry_run=dry_run,
+        non_interactive=non_interactive,
+    )
+
+
+def setup_provision_guest(
+    root_dir: Path,
+    hypervisor: Optional[str] = None,
+    vm_name: str = "win10_analyst",
+    guest_ip: str = "192.168.100.10",
+    iso_path: Optional[str] = None,
+    dry_run: bool = False,
+    non_interactive: bool = False,
+) -> Dict[str, Any]:
+    """Provisions and verifies Windows Analysis Guest VM."""
+    from .provisioning.guest import provision_and_verify_guest
+    return provision_and_verify_guest(
+        root_dir,
+        hypervisor=hypervisor,
+        vm_name=vm_name,
+        guest_ip=guest_ip,
+        iso_path=iso_path,
+        dry_run=dry_run,
+        non_interactive=non_interactive,
+    )
+
+
+def setup_benign_e2e(
+    root_dir: Path,
+    operator_token: Optional[str] = None,
+    allow_live: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Runs a non-malicious benign end-to-end acceptance test across all subsystems."""
+    from .provisioning.acceptance import run_benign_acceptance_e2e
+    return run_benign_acceptance_e2e(
+        root_dir,
+        operator_token=operator_token,
+        allow_live=allow_live,
+        dry_run=dry_run,
+    )
 
 
 def setup_ghidra(
