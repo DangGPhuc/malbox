@@ -37,7 +37,7 @@ router = APIRouter()
 class IntelligenceEnrichRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["auto", "deterministic", "llm", "opencode"] = "deterministic"
+    mode: Literal["auto", "deterministic", "llm", "opencode", "local", "ollama"] = "deterministic"
     external_transmission_consent: bool = False
 
 
@@ -160,7 +160,13 @@ def generate_report_intelligence(
     requested_mode = req.mode
     if requested_mode == "auto":
         cfg_mode = (getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in").strip().lower()
-        target_mode = cfg_mode if cfg_mode in ("llm", "opencode") else "deterministic"
+        cfg_prov = (getattr(settings, "AI_PROVIDER", "mock") or "mock").strip().lower()
+        if cfg_mode in ("local", "ollama") or cfg_prov in ("local", "ollama"):
+            target_mode = "local"
+        elif cfg_mode in ("llm", "opencode"):
+            target_mode = cfg_mode
+        else:
+            target_mode = "deterministic"
     else:
         target_mode = requested_mode
 
@@ -248,6 +254,10 @@ def generate_report_intelligence(
         provider = MockLLMProvider()
     elif target_mode == "opencode":
         provider = OpenCodeReportProvider(timeout=min(timeout_budget, float(settings.OPENCODE_TIMEOUT_SECONDS)))
+    elif target_mode in ("local", "ollama"):
+        provider = get_reporting_llm_provider(requested_mode="local")
+        if hasattr(provider, "timeout"):
+            provider.timeout = min(timeout_budget, float(getattr(provider, "timeout", timeout_budget)))
     else:
         provider = get_reporting_llm_provider(force_external=True, requested_mode="llm")
         if hasattr(provider, "timeout"):

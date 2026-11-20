@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.ai.intelligence_helper import build_deterministic_proposed_intelligence
+from app.ai.intelligence_helper import (
+    build_deterministic_proposed_intelligence,
+    build_analyst_stages_execution,
+)
 from app.ai.mock_provider import MockLLMProvider
 from app.ai.opencode_sandbox import (
     ApprovedProviderProxy,
@@ -254,12 +257,21 @@ class OpenCodeReportProvider(LLMProvider):
                 provider_meta=provider_meta,
                 fallback_fn=build_deterministic_proposed_intelligence,
             )
+            stages = build_analyst_stages_execution(
+                bundle=bundle,
+                proposed_intel=report,
+                is_fallback=report.provider_metadata.fallback_used,
+                error_msg=report.provider_metadata.fallback_reason,
+                tokens_used=tokens_used,
+            )
+            report.provider_metadata.analyst_stages = stages
             self.last_call_meta = {
                 "provider": report.provider_metadata.provider,
                 "model": report.provider_metadata.model,
                 "tokens_used": report.provider_metadata.tokens_used,
                 "fallback": report.provider_metadata.fallback_used,
                 "fallback_reason": report.provider_metadata.fallback_reason,
+                "analyst_stages": stages,
                 "cli_version": detected_version,
                 "tested_opencode_version": TESTED_OPENCODE_VERSION,
                 "os_sandbox": "bwrap",
@@ -293,12 +305,21 @@ class OpenCodeReportProvider(LLMProvider):
                 provider_meta=provider_meta,
                 fallback_fn=build_deterministic_proposed_intelligence,
             )
+            stages = build_analyst_stages_execution(
+                bundle=bundle,
+                proposed_intel=fallback_proposed,
+                is_fallback=True,
+                error_msg=safe_reason,
+                tokens_used=0,
+            )
+            report.provider_metadata.analyst_stages = stages
             self.last_call_meta = {
                 "provider": "mock_fallback",
                 "model": model_label,
                 "tokens_used": 0,
                 "fallback": True,
                 "fallback_reason": safe_reason,
+                "analyst_stages": stages,
                 "cli_version": detected_version,
                 "tested_opencode_version": TESTED_OPENCODE_VERSION,
                 "os_sandbox": "bwrap",

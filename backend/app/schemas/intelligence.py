@@ -300,6 +300,7 @@ class AIProviderMetadata(BaseModel):
     fallback_reason: Optional[str] = None
     rules_version: str = "2.0"
     generated_at: str
+    analyst_stages: Optional[List[Dict[str, Any]]] = None
 
 
 class ValidationSummary(BaseModel):

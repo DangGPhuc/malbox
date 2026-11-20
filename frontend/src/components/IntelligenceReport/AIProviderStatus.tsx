@@ -95,6 +95,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
   onEnrichmentSuccess,
 }) => {
   const [panelOpen, setPanelOpen] = useState(false);
+  const [stagesOpen, setStagesOpen] = useState(false);
   const [mode, setMode] = useState<IntelligenceEnrichMode>('deterministic');
   const [consentChecked, setConsentChecked] = useState(false);
   // Kept strictly in ephemeral React component state — never persisted in localStorage/URLs/logs.
@@ -190,6 +191,51 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
               </span>
             </div>
           )}
+          {providerMetadata?.analyst_stages && providerMetadata.analyst_stages.length > 0 && (
+            <div style={{ marginTop: '0.65rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setStagesOpen((prev) => !prev)}
+                style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+              >
+                {stagesOpen ? 'Hide Analyst Stages' : `Inspect 4 Analyst Stages (${providerMetadata.analyst_stages.length})`}
+              </button>
+              {stagesOpen && (
+                <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {providerMetadata.analyst_stages.map((stage) => (
+                    <div
+                      key={stage.stage_id}
+                      style={{
+                        background: 'var(--bg-surface)',
+                        border: '1px solid var(--border-light)',
+                        borderRadius: '6px',
+                        padding: '0.5rem 0.75rem',
+                        fontSize: '0.75rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <strong style={{ color: 'var(--text-main)' }}>{stage.stage_name}</strong>
+                        <span
+                          className={`badge ${
+                            stage.validation_status === 'valid' ? 'badge-success' : 'badge-warning'
+                          }`}
+                        >
+                          {stage.validation_status}
+                        </span>
+                      </div>
+                      <div style={{ color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        Inputs: <code className="mono">{JSON.stringify(stage.inputs_summary)}</code>
+                      </div>
+                      <div style={{ color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+                        Outputs: <code className="mono">{JSON.stringify(stage.output_summary)}</code>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <button
@@ -237,6 +283,7 @@ export const AIProviderStatus: React.FC<AIProviderStatusProps> = ({
                 disabled={submitting}
               >
                 <option value="deterministic">Deterministic (Offline Mock Engine — No Egress)</option>
+                <option value="local">Local AI Model (Ollama / Local OpenAI — Host Only)</option>
                 <option value="llm">External LLM API (/chat/completions — Consent Required)</option>
                 <option value="opencode">OpenCode Sandboxed Agent (Disabled by Default — bwrap)</option>
                 <option value="auto">Auto (Follow Server AI_REPORTING_MODE Policy)</option>

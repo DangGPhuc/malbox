@@ -247,18 +247,28 @@ def get_reporting_llm_provider(
     external transmission consent. Defaults strictly to offline MockLLMProvider.
     Local AI models (e.g. Ollama) execute locally on the host and do not require external consent.
     """
-    mode = (
-        (requested_mode or getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in")
-        .strip()
-        .lower()
-    )
-    has_consent = bool(getattr(settings, "REPORTING_EXTERNAL_AI_CONSENT", False))
+    cfg_mode = (getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in").strip().lower()
+    cfg_prov = (getattr(settings, "AI_PROVIDER", "mock") or "mock").strip().lower()
+
+    req_mode = (requested_mode or "").strip().lower()
+    if not req_mode or req_mode in ("auto", "opt_in"):
+        if cfg_mode in ("local", "ollama") or cfg_prov in ("local", "ollama"):
+            mode = "local"
+        elif cfg_mode == "opt_in":
+            if cfg_prov != "mock" and getattr(settings, "AI_API_KEY", ""):
+                mode = "llm"
+            else:
+                mode = "deterministic"
+        else:
+            mode = cfg_mode
+    else:
+        mode = req_mode
 
     if mode == "deterministic":
         return MockLLMProvider()
 
     # Local AI provider (Ollama / Local OpenAI-compatible server on localhost)
-    if mode in ("local", "ollama") or settings.AI_PROVIDER in ("local", "ollama"):
+    if mode in ("local", "ollama") or cfg_prov in ("local", "ollama"):
         return RealLLMProvider(
             api_key=settings.AI_API_KEY or "ollama",
             model=settings.AI_MODEL or "llama3",
@@ -271,6 +281,7 @@ def get_reporting_llm_provider(
 
         return OpenCodeReportProvider()
 
+    has_consent = bool(getattr(settings, "REPORTING_EXTERNAL_AI_CONSENT", False))
     if (
         (mode == "llm" or (force_external and mode == "auto"))
         and has_consent

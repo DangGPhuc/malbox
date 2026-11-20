@@ -517,6 +517,111 @@ def _build_follow_up_actions(bundle: VerifiedEvidenceBundle) -> List[FollowUpAct
     return actions
 
 
+def build_analyst_stages_execution(
+    bundle: VerifiedEvidenceBundle,
+    proposed_intel: Optional[AIProposedIntelligence] = None,
+    is_fallback: bool = False,
+    error_msg: Optional[str] = None,
+    tokens_used: int = 0,
+) -> List[Dict[str, Any]]:
+    """
+    Constructs independently inspectable stage execution records for the 4-stage analyst workflow:
+    - Stage 1: Static Code Analysis
+    - Stage 2: Dynamic Behavior Analysis
+    - Stage 3: Threat Classification
+    - Stage 4: Intelligence Report Composition
+    """
+    claims = proposed_intel.technical_claims if proposed_intel else []
+    facts_count = len([c for c in claims if c.classification == "FACT"])
+    inferences_count = len([c for c in claims if c.classification == "INFERENCE"])
+    hypotheses_count = len([c for c in claims if c.classification == "HYPOTHESIS"])
+
+    s1 = {
+        "stage_id": "stage_1_static_code_analyst",
+        "stage_name": "Static Code Analysis",
+        "inputs_summary": {
+            "file_name": bundle.sample_identity.file_name,
+            "sha256": bundle.sample_identity.sha256,
+            "file_size": bundle.sample_identity.file_size,
+            "is_pe": bundle.sample_identity.is_pe,
+            "static_analysis_status": bundle.static_analysis.status,
+            "functions_decompiled": getattr(bundle.static_analysis, "decompiled_count", 0),
+        },
+        "output_summary": {
+            "is_pe": bundle.sample_identity.is_pe,
+            "static_status": bundle.static_analysis.status,
+            "static_evidence_id": bundle.sample_identity.evidence_id,
+        },
+        "validation_status": "valid" if not is_fallback else "fallback",
+        "error": error_msg if is_fallback else None,
+        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+    }
+
+    s2 = {
+        "stage_id": "stage_2_dynamic_behavior_analyst",
+        "stage_name": "Dynamic Behavior Analysis",
+        "inputs_summary": {
+            "backend_type": bundle.provenance.backend_type,
+            "is_replay": bundle.provenance.is_replay,
+            "events_included": bundle.truncation.events_included,
+            "total_events_available": bundle.truncation.total_events_available,
+            "process_nodes": len(bundle.process_relationships),
+            "network_flows": len(bundle.network_relationships),
+            "matched_rules_count": len(bundle.findings),
+        },
+        "output_summary": {
+            "timeline_interpretations_count": len(proposed_intel.timeline_interpretations) if proposed_intel else 0,
+            "behavioral_findings_count": len(bundle.findings),
+        },
+        "validation_status": "valid" if not is_fallback else "fallback",
+        "error": error_msg if is_fallback else None,
+        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+    }
+
+    s3 = {
+        "stage_id": "stage_3_threat_classification_analyst",
+        "stage_name": "Threat Classification",
+        "inputs_summary": {
+            "deterministic_risk_score": bundle.deterministic_risk_score,
+            "deterministic_risk_level": bundle.deterministic_risk_level,
+            "rule_ids": [f.rule_id for f in bundle.findings[:8]],
+            "valid_evidence_ids_count": len(bundle.valid_evidence_ids),
+        },
+        "output_summary": {
+            "facts_count": facts_count,
+            "inferences_count": inferences_count,
+            "hypotheses_count": hypotheses_count,
+            "overall_confidence": proposed_intel.confidence_assessment.overall_confidence if proposed_intel else 0.5,
+            "evidence_completeness": proposed_intel.confidence_assessment.evidence_completeness if proposed_intel else "low",
+        },
+        "validation_status": "valid" if not is_fallback else "fallback",
+        "error": error_msg if is_fallback else None,
+        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+    }
+
+    s4 = {
+        "stage_id": "stage_4_report_composer",
+        "stage_name": "Intelligence Report Composition",
+        "inputs_summary": {
+            "target_schema": "AIProposedIntelligence",
+            "epistemic_standards": "FACT / INFERENCE / HYPOTHESIS",
+            "preserve_authoritative_score": bundle.deterministic_risk_score,
+        },
+        "output_summary": {
+            "executive_assessment_length": len(proposed_intel.executive_assessment) if proposed_intel else 0,
+            "behavioral_narrative_length": len(proposed_intel.behavioral_narrative) if proposed_intel else 0,
+            "follow_up_actions_count": len(proposed_intel.recommended_follow_up_actions) if proposed_intel else 0,
+            "iocs_interpreted_count": len(proposed_intel.ioc_interpretations) if proposed_intel else 0,
+            "deterministic_score_preserved": True,
+        },
+        "validation_status": "valid" if not is_fallback else "fallback",
+        "error": error_msg if is_fallback else None,
+        "tokens_used": int(tokens_used * 0.25) if tokens_used else 0,
+    }
+
+    return [s1, s2, s3, s4]
+
+
 def run_bounded_llm_intelligence(
     bundle: VerifiedEvidenceBundle,
     api_key: str,
@@ -613,12 +718,21 @@ def run_bounded_llm_intelligence(
             provider_meta=provider_meta,
             fallback_fn=build_deterministic_proposed_intelligence,
         )
+        stages = build_analyst_stages_execution(
+            bundle=bundle,
+            proposed_intel=report,
+            is_fallback=report.provider_metadata.fallback_used,
+            error_msg=report.provider_metadata.fallback_reason,
+            tokens_used=tokens_used,
+        )
+        report.provider_metadata.analyst_stages = stages
         call_meta = {
             "provider": report.provider_metadata.provider,
             "model": report.provider_metadata.model,
             "tokens_used": report.provider_metadata.tokens_used,
             "fallback": report.provider_metadata.fallback_used,
             "fallback_reason": report.provider_metadata.fallback_reason,
+            "analyst_stages": stages,
         }
         return report, call_meta
 
@@ -649,12 +763,21 @@ def run_bounded_llm_intelligence(
             provider_meta=provider_meta,
             fallback_fn=build_deterministic_proposed_intelligence,
         )
+        stages = build_analyst_stages_execution(
+            bundle=bundle,
+            proposed_intel=fallback_proposed,
+            is_fallback=True,
+            error_msg=reason,
+            tokens_used=0,
+        )
+        report.provider_metadata.analyst_stages = stages
         call_meta = {
             "provider": "mock_fallback",
             "model": model,
             "tokens_used": 0,
             "fallback": True,
             "fallback_reason": reason,
+            "analyst_stages": stages,
         }
         return report, call_meta
 

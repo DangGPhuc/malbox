@@ -140,11 +140,20 @@ class MockLLMProvider(LLMProvider):
         cancel_event: "Optional[Any]" = None,
     ) -> "IntelligenceReport":
         from datetime import datetime, timezone
-        from app.ai.intelligence_helper import build_deterministic_proposed_intelligence
+        from app.ai.intelligence_helper import (
+            build_deterministic_proposed_intelligence,
+            build_analyst_stages_execution,
+        )
         from app.schemas.intelligence import AIProviderMetadata
         from app.services.intelligence.validator import EvidenceValidator
 
         proposed = build_deterministic_proposed_intelligence(bundle)
+        stages = build_analyst_stages_execution(
+            bundle=bundle,
+            proposed_intel=proposed,
+            is_fallback=False,
+            tokens_used=0,
+        )
         provider_meta = AIProviderMetadata(
             mode="deterministic_mock",
             provider="mock",
@@ -154,6 +163,7 @@ class MockLLMProvider(LLMProvider):
             fallback_reason=None,
             rules_version="2.0",
             generated_at=datetime.now(timezone.utc).isoformat(),
+            analyst_stages=stages,
         )
         return EvidenceValidator().validate_and_finalize(
             raw_output=proposed,

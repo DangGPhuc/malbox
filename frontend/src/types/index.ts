@@ -293,6 +293,16 @@ export interface FollowUpAction {
   requires_manual_approval: boolean;
 }
 
+export interface AnalystStage {
+  stage_id: string;
+  stage_name: string;
+  inputs_summary: Record<string, any>;
+  output_summary: Record<string, any>;
+  validation_status: string;
+  error?: string | null;
+  tokens_used: number;
+}
+
 export interface AIProviderMetadata {
   mode: string;
   provider: string;
@@ -302,6 +312,7 @@ export interface AIProviderMetadata {
   fallback_reason?: string | null;
   rules_version: string;
   generated_at: string;
+  analyst_stages?: AnalystStage[] | null;
 }
 
 export interface ValidationSummary {
@@ -356,7 +367,7 @@ export interface IntelligenceReport {
   validation_summary: ValidationSummary;
 }
 
-export type IntelligenceEnrichMode = 'deterministic' | 'llm' | 'opencode' | 'auto';
+export type IntelligenceEnrichMode = 'deterministic' | 'llm' | 'opencode' | 'auto' | 'local' | 'ollama';
 
 export interface IntelligenceEnrichRequest {
   mode: IntelligenceEnrichMode;
