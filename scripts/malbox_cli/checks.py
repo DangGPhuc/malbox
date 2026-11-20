@@ -460,16 +460,22 @@ def check_venv_backend(
     venv_dir = root_dir / ".venv"
     venv_python = get_venv_python(root_dir)
 
+    is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+    is_active_venv = (sys.prefix != getattr(sys, "base_prefix", sys.prefix))
+
     if not venv_dir.is_dir() or not venv_python.exists():
-        return CheckResult(
-            id="backend_venv",
-            name="Virtualenv & Backend Dependencies",
-            status=CheckStatus.FAIL,
-            summary="Python virtual environment `.venv` is missing or broken.",
-            details={"venv_dir": str(venv_dir), "python": str(venv_python)},
-            readiness_tier="BLOCKED",
-            remediation="Run `./malbox doctor --repair` to create `.venv` and run `pip install -e \"backend[dev]\"`.",
-        )
+        if is_ci or is_active_venv:
+            venv_python = Path(sys.executable)
+        else:
+            return CheckResult(
+                id="backend_venv",
+                name="Virtualenv & Backend Dependencies",
+                status=CheckStatus.FAIL,
+                summary="Python virtual environment `.venv` is missing or broken.",
+                details={"venv_dir": str(venv_dir), "python": str(venv_python)},
+                readiness_tier="BLOCKED",
+                remediation="Run `./malbox doctor --repair` to create `.venv` and run `pip install -e \"backend[dev]\"`.",
+            )
 
     probe_code = (
         "import app, fastapi, uvicorn, pydantic, pydantic_settings, "
@@ -530,6 +536,17 @@ def check_frontend(
         )
 
     if not node_modules.is_dir() or not vite_bin.exists():
+        is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+        if is_ci:
+            return CheckResult(
+                id="frontend_deps",
+                name="Frontend Dependencies & Build",
+                status=CheckStatus.WARN,
+                summary="`frontend/node_modules` not installed on this backend CI job runner (verified in parallel frontend workflow).",
+                details={"node_modules": str(node_modules), "ci": True},
+                readiness_tier="DEGRADED",
+                remediation="Frontend verified in dedicated frontend CI job.",
+            )
         return CheckResult(
             id="frontend_deps",
             name="Frontend Dependencies & Build",
