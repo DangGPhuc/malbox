@@ -92,13 +92,42 @@ class MalwareClassificationEngine:
             valid_ids.add(str(sample_sha256))
 
         synthetic_prefixes = ("event:", "pe:", "mock:", "placeholder:", "rule:")
+        category_allowed_finding_prefixes = {
+            "ransomware": ("RULE_RANSOM", "RULE_SHADOW", "RULE_RECOVERY", "RULE_MASS_FILE"),
+            "stealer": ("RULE_CREDENTIAL", "RULE_BROWSER", "RULE_DATA_EXFILTRATION", "RULE_INFOSTEALER", "RULE_C2_HTTP_EXFILTRATION"),
+            "injector": ("RULE_PROCESS_INJECTION", "RULE_REMOTE_THREAD", "RULE_PROCESS_HOLLOWING"),
+            "dropper": ("RULE_DROPPED_EXECUTABLE_PAYLOAD",),
+            "downloader": ("RULE_DOWNLOAD_PAYLOAD", "RULE_DROPPED_EXECUTABLE_PAYLOAD"),
+            "launcher": ("RULE_SUSPICIOUS_LAUNCHER", "RULE_POWERSHELL_OBFUSCATED"),
+            "rootkit": ("RULE_ROOTKIT", "RULE_DRIVER"),
+            "backdoor": ("RULE_REVERSE_SHELL", "RULE_BACKDOOR"),
+            "rat": ("RULE_RAT", "RULE_SCREEN_CAPTURE"),
+            "c2_agent": ("RULE_C2_BEACONING", "RULE_C2_DNS", "RULE_C2_HTTP"),
+            "miner": ("RULE_MINER", "RULE_STRATUM"),
+            "adware": ("RULE_ADWARE",),
+            "spyware": ("RULE_SPYWARE", "RULE_KEYLOGGER", "RULE_CLIPBOARD"),
+        }
+
+        # Map each valid ID to rule_id if finding
+        id_rules: Dict[str, str] = {}
+        for f in input_findings:
+            fid = str(getattr(f, "id", None) or (f.get("id") if isinstance(f, dict) else "") or "")
+            rid = str(getattr(f, "rule_id", None) or (f.get("rule_id") if isinstance(f, dict) else "") or "")
+            if fid and rid:
+                id_rules[fid] = rid
+
         for a in assessments:
             filtered = []
+            allowed_prefixes = category_allowed_finding_prefixes.get(a.category_id, ())
             for eid in a.evidence_ids:
                 eid_str = str(eid).strip()
                 if any(eid_str.lower().startswith(p) for p in synthetic_prefixes):
                     continue  # Purge synthetic placeholder
                 if eid_str in valid_ids:
+                    # Reject unrelated finding IDs if rule does not match category
+                    rid = id_rules.get(eid_str)
+                    if rid and allowed_prefixes and not any(rid.startswith(p) for p in allowed_prefixes):
+                        continue
                     filtered.append(eid_str)
 
             a.evidence_ids = filtered
@@ -156,7 +185,7 @@ class MalwareClassificationEngine:
         if is_replay:
             limitations.append("Classification evaluated against historical/synthetic replay telemetry; not live host detonation.")
 
-        if telemetry_completeness in ("PARTIAL", "TRUNCATED", "UNVERIFIED"):
+        if telemetry_completeness in ("PARTIAL", "TRUNCATED", "UNVERIFIED", "INCOMPLETE"):
             limitations.append(f"Telemetry completeness is {telemetry_completeness}; unobserved behaviors may have occurred outside capture window.")
 
         # Helper to extract real IDs from findings
@@ -252,31 +281,108 @@ class MalwareClassificationEngine:
                 explanation="Access to sensitive browser/credential file paths observed without confirmed exfiltration channel.",
             ))
 
+        # Helpers for Injector and Downloader contextual validation
+        def _get_ev_attr(e: Any, attr_name: str, default: Any = None) -> Any:
+            if isinstance(e, dict):
+                attrs = e.get("attributes") or {}
+                if isinstance(attrs, dict) and attr_name in attrs:
+                    return attrs[attr_name]
+                return e.get(attr_name, default)
+            attrs = getattr(e, "attributes", None) or {}
+            if isinstance(attrs, dict) and attr_name in attrs:
+                return attrs[attr_name]
+            return getattr(e, attr_name, default)
+
+        def _is_api_successful(e: Any) -> bool:
+            status = str(_get_ev_attr(e, "status", "")).lower()
+            if status in ("failed", "failure", "error"):
+                return False
+            success = _get_ev_attr(e, "success", None)
+            if success is False:
+                return False
+            ret_val = _get_ev_attr(e, "return_value", None)
+            if ret_val in (0, "0", "0x0", "NULL", "null", False):
+                act = str(getattr(e, "action", "") or (e.get("action") if isinstance(e, dict) else "")).lower()
+                if any(x in act for x in ("createremotethread", "virtualallocex", "writeprocessmemory", "ntcreatethread")):
+                    return False
+            return True
+
+        def _is_remote_process_event(e: Any) -> bool:
+            act = str(getattr(e, "action", "") or (e.get("action") if isinstance(e, dict) else "")).lower()
+            # Local VirtualAlloc without 'ex' is strictly local
+            if "virtualalloc" in act and "virtualallocex" not in act:
+                return False
+            tgt_pid = _get_ev_attr(e, "target_pid")
+            src_pid = _get_ev_attr(e, "pid") or _get_ev_attr(e, "source_pid") or _get_ev_attr(e, "process_id")
+            if tgt_pid is not None and src_pid is not None:
+                try:
+                    if int(tgt_pid) == int(src_pid):
+                        return False
+                    return True
+                except (ValueError, TypeError):
+                    pass
+            is_remote = _get_ev_attr(e, "is_remote")
+            if is_remote is not None:
+                return bool(is_remote)
+            cross_process = _get_ev_attr(e, "cross_process")
+            if cross_process is not None:
+                return bool(cross_process)
+            if tgt_pid is not None:
+                return True
+            if "createremotethread" in act or "ntcreatethreadex" in act:
+                tgt_p = str(_get_ev_attr(e, "target_process", "")).lower()
+                src_p = str(_get_ev_attr(e, "process_name", "")).lower()
+                if tgt_p and src_p and tgt_p == src_p:
+                    return False
+                return True
+            return False
+
         # 3. Injector
         # Must require verified remote thread execution evidence (remote memory allocation + write alone is not confirmed injector)
+        # Requires validated process-instance sequence, API success, and remote execution evidence (not local VirtualAlloc or failed CreateRemoteThread).
         injector_rules = {"RULE_PROCESS_INJECTION_TECHNIQUE", "RULE_PROCESS_HOLLOWING", "RULE_REMOTE_THREAD_CREATION"}
         matched_injector_rules = set(rule_ids.intersection(injector_rules))
 
-        remote_thread_events = [
+        raw_remote_thread_events = [
             e for e in proc_events
             if "createremotethread" in str(getattr(e, "action", "") or (e.get("action") if isinstance(e, dict) else "")).lower()
+            or "ntcreatethreadex" in str(getattr(e, "action", "") or (e.get("action") if isinstance(e, dict) else "")).lower()
             or bool((getattr(e, "attributes", None) or (e.get("attributes") if isinstance(e, dict) else {})).get("remote_thread"))
         ]
 
-        staging_events = [
+        valid_remote_thread_events = [
+            e for e in raw_remote_thread_events
+            if _is_remote_process_event(e) and _is_api_successful(e)
+        ]
+
+        raw_staging_events = [
             e for e in proc_events
             if "virtualallocex" in str(getattr(e, "action", "") or (e.get("action") if isinstance(e, dict) else "")).lower()
             or "writeprocessmemory" in str(getattr(e, "action", "") or (e.get("action") if isinstance(e, dict) else "")).lower()
+            or bool((getattr(e, "attributes", None) or (e.get("attributes") if isinstance(e, dict) else {})).get("cross_process_write"))
         ]
-        has_remote_mem_staging = bool(staging_events)
+
+        valid_staging_events = [
+            e for e in raw_staging_events
+            if _is_remote_process_event(e) and _is_api_successful(e)
+        ]
+
+        has_remote_mem_staging = bool(valid_staging_events)
 
         inj_evidence_ids = get_finding_ids(matched_injector_rules)
-        for pe in remote_thread_events:
+        for pe in valid_remote_thread_events:
+            eid = get_event_id(pe)
+            if eid and eid not in inj_evidence_ids:
+                inj_evidence_ids.append(eid)
+        for pe in valid_staging_events:
             eid = get_event_id(pe)
             if eid and eid not in inj_evidence_ids:
                 inj_evidence_ids.append(eid)
 
-        if (matched_injector_rules or remote_thread_events) and inj_evidence_ids:
+        has_remote_execution = bool(valid_remote_thread_events) or (bool(matched_injector_rules) and not (raw_remote_thread_events and not valid_remote_thread_events))
+        has_remote_staging = bool(valid_staging_events) or bool(matched_injector_rules)
+
+        if has_remote_execution and has_remote_staging and inj_evidence_ids:
             assessments.append(CategoryAssessment(
                 category_id="injector",
                 category_name="Injector",
@@ -287,7 +393,10 @@ class MalwareClassificationEngine:
                 explanation="Verified remote process memory manipulation with confirmed remote thread execution evidence (VirtualAllocEx / WriteProcessMemory / CreateRemoteThread).",
             ))
         elif has_remote_mem_staging:
-            staging_ids = [get_event_id(pe) for pe in staging_events if get_event_id(pe)]
+            staging_ids = [get_event_id(pe) for pe in valid_staging_events if get_event_id(pe)]
+            inj_limits = ["No successful remote thread execution was observed following memory staging."]
+            if raw_remote_thread_events and not valid_remote_thread_events:
+                inj_limits.append("Attempted remote thread creation failed or targeted local process.")
             assessments.append(CategoryAssessment(
                 category_id="injector",
                 category_name="Injector",
@@ -296,7 +405,19 @@ class MalwareClassificationEngine:
                 confidence=0.50,
                 evidence_ids=staging_ids,
                 explanation="Remote memory allocation or modification observed without confirmed remote thread execution (memory staging only).",
-                limitations=["No remote thread execution was observed following memory staging."],
+                limitations=inj_limits,
+            ))
+        elif valid_remote_thread_events:
+            thread_ids = [get_event_id(pe) for pe in valid_remote_thread_events if get_event_id(pe)]
+            assessments.append(CategoryAssessment(
+                category_id="injector",
+                category_name="Injector",
+                category_type="behavior",
+                classification_status="SUSPECTED",
+                confidence=0.55,
+                evidence_ids=thread_ids,
+                explanation="Remote thread creation observed without confirmed prior cross-process memory allocation/staging.",
+                limitations=["No prior remote memory staging or code write was observed before thread creation."],
             ))
 
         # 4. Dropper
@@ -326,36 +447,75 @@ class MalwareClassificationEngine:
             ))
 
         # 5. Downloader
-        # Must require evidence linking file transfer to saved binary or executed secondary payload
+        # Must require verified relationship linking network transfer to saved binary or executed secondary payload
+        import os
         downloader_rules = {"RULE_DOWNLOAD_PAYLOAD"}
         matched_dl_rules = set(rule_ids.intersection(downloader_rules))
-        download_net_events = [
-            e for e in net_events
-            if "get" in str((getattr(e, "attributes", None) or (e.get("attributes") if isinstance(e, dict) else {})).get("method", "")).lower()
-            or any(ext in str(getattr(e, "target_path", "") or (e.get("target_path") if isinstance(e, dict) else "")).lower() for ext in [".exe", ".bin", ".dll", ".ps1", ".vbs", ".zip", ".msi"])
-        ]
-        has_network_download = bool(matched_dl_rules) or bool(download_net_events)
-        has_saved_or_executed_payload = has_dropped_exe or "RULE_DROPPED_EXECUTABLE_PAYLOAD" in rule_ids
 
-        dl_evidence_ids = get_finding_ids(matched_dl_rules)
-        if "RULE_DROPPED_EXECUTABLE_PAYLOAD" in rule_ids:
-            for fid in get_finding_ids({"RULE_DROPPED_EXECUTABLE_PAYLOAD"}):
-                if fid not in dl_evidence_ids:
-                    dl_evidence_ids.append(fid)
+        payload_exts = (".exe", ".dll", ".bin", ".sys", ".ps1", ".vbs", ".zip", ".msi", ".scr", ".cpl", ".tar", ".gz")
+        download_net_events = []
+        for e in net_events:
+            target_p = str(getattr(e, "target_path", "") or (e.get("target_path") if isinstance(e, dict) else "")).lower()
+            method = str(_get_ev_attr(e, "method", "")).lower()
+            is_dl = (
+                method in ("get", "head")
+                or any(ext in target_p for ext in payload_exts)
+                or bool(_get_ev_attr(e, "is_payload_download"))
+                or bool(_get_ev_attr(e, "is_download"))
+            )
+            if is_dl and (any(ext in target_p for ext in payload_exts) or bool(_get_ev_attr(e, "is_payload_download")) or bool(matched_dl_rules)):
+                download_net_events.append(e)
+
+        correlated_net_events = []
+        correlated_drop_events = []
 
         for ne in download_net_events:
+            ne_target = str(getattr(ne, "target_path", "") or (ne.get("target_path") if isinstance(ne, dict) else "")).lower()
+            ne_dest = str(_get_ev_attr(ne, "destination_path", "") or _get_ev_attr(ne, "saved_path", "")).lower()
+            ne_base = os.path.basename(ne_target.split("?")[0]) if "/" in ne_target else ne_target
+
+            for fe in dropped_exe_events:
+                fe_target = str(getattr(fe, "target_path", "") or (fe.get("target_path") if isinstance(fe, dict) else "")).lower()
+                fe_src = str(_get_ev_attr(fe, "source_url", "") or _get_ev_attr(fe, "downloaded_from", "")).lower()
+                fe_base = os.path.basename(fe_target.replace("\\", "/"))
+
+                is_linked = False
+                if ne_base and fe_base and ne_base == fe_base:
+                    is_linked = True
+                elif ne_dest and fe_target and ne_dest == fe_target:
+                    is_linked = True
+                elif fe_src and (fe_src in ne_target or ne_target in fe_src):
+                    is_linked = True
+                elif bool(_get_ev_attr(fe, "is_downloaded")):
+                    is_linked = True
+
+                if is_linked:
+                    if ne not in correlated_net_events:
+                        correlated_net_events.append(ne)
+                    if fe not in correlated_drop_events:
+                        correlated_drop_events.append(fe)
+
+        if matched_dl_rules and download_net_events and dropped_exe_events:
+            for ne in download_net_events:
+                if ne not in correlated_net_events:
+                    correlated_net_events.append(ne)
+            for fe in dropped_exe_events:
+                if fe not in correlated_drop_events:
+                    correlated_drop_events.append(fe)
+
+        has_verified_relationship = bool(correlated_net_events and correlated_drop_events)
+
+        dl_evidence_ids = get_finding_ids(matched_dl_rules)
+        for ne in correlated_net_events:
             eid = get_event_id(ne)
             if eid and eid not in dl_evidence_ids:
                 dl_evidence_ids.append(eid)
-                break
-
-        for fe in dropped_exe_events:
+        for fe in correlated_drop_events:
             eid = get_event_id(fe)
             if eid and eid not in dl_evidence_ids:
                 dl_evidence_ids.append(eid)
-                break
 
-        if has_network_download and has_saved_or_executed_payload and dl_evidence_ids:
+        if has_verified_relationship and dl_evidence_ids:
             assessments.append(CategoryAssessment(
                 category_id="downloader",
                 category_name="Downloader",
@@ -365,7 +525,7 @@ class MalwareClassificationEngine:
                 evidence_ids=dl_evidence_ids,
                 explanation="Observed network file transfer directly correlated with saved binary or executed secondary payload.",
             ))
-        elif has_network_download:
+        elif download_net_events:
             suspected_net_ids = [get_event_id(ne) for ne in download_net_events if get_event_id(ne)]
             assessments.append(CategoryAssessment(
                 category_id="downloader",
@@ -581,7 +741,7 @@ class MalwareClassificationEngine:
         )
 
         # Constrain confidence when telemetry is partial or truncated
-        if telemetry_completeness in ("PARTIAL", "TRUNCATED", "UNVERIFIED"):
+        if telemetry_completeness in ("PARTIAL", "TRUNCATED", "UNVERIFIED", "INCOMPLETE"):
             for a in assessments:
                 if a.classification_status != "UNSUPPORTED":
                     a.confidence = round(min(0.65, a.confidence * 0.7), 2)

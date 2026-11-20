@@ -30,6 +30,7 @@ def health_check():
         "ghidra_installed": readiness["ghidra_installed"],
         "rules_loaded": readiness["rules_loaded"],
         "readiness_details": readiness["details"],
+        "prerequisites_missing": readiness.get("prerequisites_missing", []),
     }
 
 @router.get("/readiness", tags=["Health"])

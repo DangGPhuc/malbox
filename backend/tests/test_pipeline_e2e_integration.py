@@ -21,7 +21,7 @@ def setup_test_isolation_attestation(tmp_path, monkeypatch):
     att_file = tmp_path / "test_attestation.json"
     monkeypatch.setattr(settings, "CAPE_ISOLATION_ATTESTATION_PATH", str(att_file))
     create_isolation_attestation(
-        verified_machine="*",
+        verified_machine="win10_analyst",
         verified_route="drop",
         attestation_path=att_file,
     )

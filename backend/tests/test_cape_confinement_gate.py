@@ -38,7 +38,7 @@ def test_missing_machine_metadata_fails_closed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(httpx.Client, "get", lambda *args, **kwargs: MockResponse())
     att_file = tmp_path / "test_att.json"
-    create_isolation_attestation("*", "drop", attestation_path=att_file)
+    create_isolation_attestation("win10_analyst", "drop", attestation_path=att_file)
     monkeypatch.setattr("app.services.sandbox.confinement.get_attestation_path", lambda: att_file)
 
     res = backend.check_readiness()
@@ -66,7 +66,7 @@ def test_zero_available_guests_fails_closed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(httpx.Client, "get", lambda *args, **kwargs: MockResponseZeroTotal())
     att_file = tmp_path / "test_att.json"
-    create_isolation_attestation("*", "drop", attestation_path=att_file)
+    create_isolation_attestation("win10_analyst", "drop", attestation_path=att_file)
     monkeypatch.setattr("app.services.sandbox.confinement.get_attestation_path", lambda: att_file)
 
     r1 = backend.check_readiness()
@@ -115,7 +115,7 @@ def test_missing_isolation_evidence_fails_closed(monkeypatch, tmp_path):
 
     res = backend.check_readiness()
     assert res["ready"] is False
-    assert res["status"] == "unverified_confinement"
+    assert res["status"] in ("unverified_confinement", "missing_isolation_evidence")
     assert res["confinement_verified"] is False
     assert res["confinement_status"] == "missing_isolation_evidence"
 
@@ -153,7 +153,7 @@ def test_expired_stale_readiness_evidence_fails_closed(tmp_path):
     """An expired attestation timestamp must be rejected as stale readiness evidence."""
     att_file = tmp_path / "expired_att.json"
     create_isolation_attestation(
-        verified_machine="*",
+        verified_machine="win10_analyst",
         verified_route="drop",
         validity_seconds=1,
         attestation_path=att_file,
@@ -165,7 +165,7 @@ def test_expired_stale_readiness_evidence_fails_closed(tmp_path):
     data["expires_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     att_file.write_text(json.dumps(data), encoding="utf-8")
 
-    res = verify_cape_confinement(target_machine="cape1", target_route="drop", attestation_path=att_file)
+    res = verify_cape_confinement(target_machine="win10_analyst", target_route="drop", attestation_path=att_file)
     assert res.is_verified is False
     assert res.status == "expired_attestation"
     assert "stale readiness evidence" in res.error
@@ -205,7 +205,7 @@ def test_api_healthy_but_execution_unsafe(monkeypatch, tmp_path):
 
     # Case B: Attestation verified -> execution safe
     valid_file = tmp_path / "valid.json"
-    create_isolation_attestation("*", "drop", attestation_path=valid_file)
+    create_isolation_attestation("win10_analyst", "drop", attestation_path=valid_file)
     monkeypatch.setattr("app.services.sandbox.confinement.get_attestation_path", lambda: valid_file)
 
     readiness_ok = check_system_readiness(check_cape=True)
@@ -286,3 +286,48 @@ def test_public_health_endpoints_never_leak_secrets(monkeypatch, tmp_path):
     ready_text = r_ready.text
     assert secret_token not in ready_text
     assert "cape-internal-secret-token-999" not in ready_text
+
+
+def test_wildcard_machine_and_route_rejected(tmp_path):
+    """Wildcard '*' and empty values for machine or route must be rejected."""
+    with pytest.raises(ValueError, match="Cannot attest wildcard"):
+        create_isolation_attestation("*", "drop", attestation_path=tmp_path / "w1.json")
+
+    with pytest.raises(ValueError, match="Cannot attest wildcard"):
+        create_isolation_attestation("win10_analyst", "*", attestation_path=tmp_path / "w2.json")
+
+    with pytest.raises(ValueError, match="Cannot attest wildcard"):
+        create_isolation_attestation("", "drop", attestation_path=tmp_path / "w3.json")
+
+
+def test_missing_operator_assertions_rejected(tmp_path):
+    """Missing any mandatory manual operator assertions must fail closed."""
+    incomplete_assertions = {
+        "host_only_networking_verified": True,
+        # missing routing_isolation_verified, firewall_rules_verified, guest_snapshot_clean_verified
+    }
+    with pytest.raises(ValueError, match="Missing mandatory operator assertions"):
+        create_isolation_attestation(
+            "win10_analyst",
+            "drop",
+            attestation_path=tmp_path / "inc.json",
+            operator_assertions=incomplete_assertions,
+        )
+
+
+def test_untrusted_world_writable_attestation_rejected(tmp_path):
+    """Attestation file with group/other write permissions must be rejected as untrusted."""
+    import os
+    att_file = tmp_path / "untrusted_att.json"
+    create_isolation_attestation(
+        "win10_analyst",
+        "drop",
+        attestation_path=att_file,
+    )
+    # Set world-writable permission (0o666)
+    os.chmod(att_file, 0o666)
+
+    res = verify_cape_confinement("win10_analyst", "drop", attestation_path=att_file)
+    assert res.is_verified is False
+    assert res.status == "untrusted_attestation_file"
+    assert "group/world writable" in res.error

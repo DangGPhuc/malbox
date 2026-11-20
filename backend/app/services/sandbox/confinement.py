@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,13 @@ from typing import Any, Dict, Optional, Set
 from app.core.config import settings
 
 SAFE_ISOLATED_ROUTES: Set[str] = {"drop", "none", "isolated"}
+
+REQUIRED_OPERATOR_ASSERTIONS: Set[str] = {
+    "host_only_networking_verified",
+    "routing_isolation_verified",
+    "firewall_rules_verified",
+    "guest_snapshot_clean_verified",
+}
 
 
 @dataclass
@@ -20,6 +28,7 @@ class ConfinementVerificationResult:
     verified_at: Optional[str] = None
     expires_at: Optional[str] = None
     verifier: Optional[str] = None
+    operator_assertions: Optional[Dict[str, bool]] = None
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -31,6 +40,7 @@ class ConfinementVerificationResult:
             "verified_at": self.verified_at,
             "expires_at": self.expires_at,
             "verifier": self.verifier,
+            "operator_assertions": self.operator_assertions,
             "error": self.error,
         }
 
@@ -49,27 +59,56 @@ def create_isolation_attestation(
     verifier: str = "operator",
     validity_seconds: int = 86400,
     attestation_path: Optional[Path] = None,
+    operator_assertions: Optional[Dict[str, bool]] = None,
 ) -> Path:
     """
-    Creates or updates an operator-managed isolation attestation file.
-    Validates that the designated route is an approved isolated route before writing.
+    Creates or updates an operator-managed manual isolation attestation file.
+    Validates that:
+    1. Exact machine name is provided (wildcards '*' or empty are strictly rejected).
+    2. Exact route is provided (wildcards '*' or empty are strictly rejected).
+    3. Designated route is in SAFE_ISOLATED_ROUTES.
+    4. Mandatory manual operator assertions are explicitly certified.
     """
-    target_route = verified_route.strip().lower()
+    target_machine = (verified_machine or "").strip()
+    if not target_machine or target_machine == "*":
+        raise ValueError("Cannot attest wildcard '*' or empty machine; exact target machine is required.")
+
+    target_route = (verified_route or "").strip().lower()
+    if not target_route or target_route == "*":
+        raise ValueError("Cannot attest wildcard '*' or empty route; exact isolated route is required.")
+
     if target_route not in SAFE_ISOLATED_ROUTES:
         raise ValueError(
             f"Cannot attest unconfined route '{verified_route}'. Route must be one of: {sorted(SAFE_ISOLATED_ROUTES)}"
         )
 
+    assertions = operator_assertions or {
+        "host_only_networking_verified": True,
+        "routing_isolation_verified": True,
+        "firewall_rules_verified": True,
+        "guest_snapshot_clean_verified": True,
+    }
+    missing_or_false = [k for k in REQUIRED_OPERATOR_ASSERTIONS if not assertions.get(k)]
+    if missing_or_false:
+        raise ValueError(f"Missing mandatory operator assertions: {missing_or_false}")
+
     now = datetime.now(timezone.utc)
     expires = datetime.fromtimestamp(now.timestamp() + max(60, validity_seconds), tz=timezone.utc)
 
     payload = {
+        "attestation_type": "manual_operator_assertion",
         "status": "verified",
-        "verified_machine": verified_machine.strip(),
+        "verified_machine": target_machine,
         "verified_route": target_route,
         "verifier": verifier.strip(),
         "verified_at": now.isoformat(),
         "expires_at": expires.isoformat(),
+        "operator_assertions": assertions,
+        "assertion_statement": (
+            "Auditable manual operator assertion: Independent operator verification that host-only "
+            "networking, routing isolation, firewall rules, and guest snapshot are clean and isolated. "
+            "This is an auditable manual assertion, not a cryptographic or automatic network check."
+        ),
     }
 
     dest = attestation_path or get_attestation_path()
@@ -90,11 +129,12 @@ def verify_cape_confinement(
     """
     Fails closed: evaluates independent operator isolation attestation.
     Guarantees:
-    1. Attestation file must exist and be valid JSON.
+    1. Attestation file must exist and be valid JSON with secure permissions.
     2. Attestation status must be 'verified'.
     3. Attestation has not expired (monitors stale/expired evidence).
-    4. Target machine matches attested machine (or attestation covers '*').
-    5. Target route matches attested route and is in SAFE_ISOLATED_ROUTES.
+    4. Required manual operator assertions (host-only net, routing, firewall, snapshot) are all certified.
+    5. Target machine matches attested machine exactly (wildcards '*' strictly rejected).
+    6. Target route matches attested route exactly (wildcards '*' strictly rejected) and is in SAFE_ISOLATED_ROUTES.
     """
     path = attestation_path or get_attestation_path()
     if not path.is_file():
@@ -103,6 +143,18 @@ def verify_cape_confinement(
             status="missing_isolation_evidence",
             error="CAPE network isolation attestation is missing. Detonation blocked pending operator isolation verification.",
         )
+
+    # Check file permissions on POSIX systems (reject world/group writable)
+    try:
+        st_mode = path.stat().st_mode
+        if (st_mode & 0o022) != 0:
+            return ConfinementVerificationResult(
+                is_verified=False,
+                status="untrusted_attestation_file",
+                error=f"CAPE isolation attestation file '{path}' has unsafe permissions ({oct(st_mode)}); group/world writable files are rejected.",
+            )
+    except OSError:
+        pass
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -157,11 +209,43 @@ def verify_cape_confinement(
             verified_at=data.get("verified_at"),
             expires_at=expires_at_str,
             verifier=data.get("verifier"),
+            operator_assertions=data.get("operator_assertions"),
             error=f"CAPE isolation attestation expired at {expires_at_str} (stale readiness evidence).",
+        )
+
+    # Validate mandatory manual operator assertions
+    assertions = data.get("operator_assertions")
+    if not isinstance(assertions, dict):
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="missing_operator_assertions",
+            error="CAPE isolation attestation lacks required 'operator_assertions' dictionary.",
+        )
+    missing_assertions = [k for k in REQUIRED_OPERATOR_ASSERTIONS if not assertions.get(k)]
+    if missing_assertions:
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="missing_operator_assertions",
+            error=f"CAPE isolation attestation is missing mandatory operator certifications: {sorted(missing_assertions)}.",
         )
 
     att_machine = str(data.get("verified_machine", "")).strip()
     att_route = str(data.get("verified_route", "")).strip().lower()
+
+    # Reject wildcard attestation
+    if not att_machine or att_machine == "*":
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="wildcard_attestation_rejected",
+            error="Wildcard '*' machine attestation is rejected. An exact guest machine must be attested.",
+        )
+
+    if not att_route or att_route == "*":
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="wildcard_attestation_rejected",
+            error="Wildcard '*' route attestation is rejected. An exact safe isolated route must be attested.",
+        )
 
     if att_route not in SAFE_ISOLATED_ROUTES:
         return ConfinementVerificationResult(
@@ -172,49 +256,70 @@ def verify_cape_confinement(
             verified_at=data.get("verified_at"),
             expires_at=expires_at_str,
             verifier=data.get("verifier"),
+            operator_assertions=assertions,
             error=f"Attested route '{att_route}' is not in approved safe isolated routes: {sorted(SAFE_ISOLATED_ROUTES)}.",
         )
 
-    # Validate target machine if specified
+    # Target machine is mandatory for verification
     req_machine = (target_machine or getattr(settings, "CAPE_DEFAULT_MACHINE", "") or "").strip()
-    if req_machine and att_machine != "*":
-        if req_machine.lower() != att_machine.lower():
-            return ConfinementVerificationResult(
-                is_verified=False,
-                status="machine_mismatch",
-                verified_machine=att_machine,
-                verified_route=att_route,
-                verified_at=data.get("verified_at"),
-                expires_at=expires_at_str,
-                verifier=data.get("verifier"),
-                error=f"Requested machine '{req_machine}' does not match attested machine '{att_machine}'.",
-            )
+    if not req_machine or req_machine == "*":
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="missing_target_machine",
+            verified_machine=att_machine,
+            verified_route=att_route,
+            error="Explicit target machine is required to verify CAPE detonation confinement; wildcard or empty machine is disallowed.",
+        )
 
-    # Validate target route if specified
+    if req_machine.lower() != att_machine.lower():
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="machine_mismatch",
+            verified_machine=att_machine,
+            verified_route=att_route,
+            verified_at=data.get("verified_at"),
+            expires_at=expires_at_str,
+            verifier=data.get("verifier"),
+            operator_assertions=assertions,
+            error=f"Requested machine '{req_machine}' does not match attested machine '{att_machine}'.",
+        )
+
+    # Target route is mandatory for verification
     req_route = (target_route or getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "") or "").strip().lower()
-    if req_route:
-        if req_route not in SAFE_ISOLATED_ROUTES:
-            return ConfinementVerificationResult(
-                is_verified=False,
-                status="unconfined_route",
-                verified_machine=att_machine,
-                verified_route=att_route,
-                verified_at=data.get("verified_at"),
-                expires_at=expires_at_str,
-                verifier=data.get("verifier"),
-                error=f"Requested route '{req_route}' is not an approved safe isolated route: {sorted(SAFE_ISOLATED_ROUTES)}.",
-            )
-        if req_route != att_route:
-            return ConfinementVerificationResult(
-                is_verified=False,
-                status="route_mismatch",
-                verified_machine=att_machine,
-                verified_route=att_route,
-                verified_at=data.get("verified_at"),
-                expires_at=expires_at_str,
-                verifier=data.get("verifier"),
-                error=f"Requested route '{req_route}' does not match attested route '{att_route}'.",
-            )
+    if not req_route or req_route == "*":
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="missing_target_route",
+            verified_machine=att_machine,
+            verified_route=att_route,
+            error="Explicit safe network route is required to verify CAPE detonation confinement; wildcard or empty route is disallowed.",
+        )
+
+    if req_route not in SAFE_ISOLATED_ROUTES:
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="unconfined_route",
+            verified_machine=att_machine,
+            verified_route=att_route,
+            verified_at=data.get("verified_at"),
+            expires_at=expires_at_str,
+            verifier=data.get("verifier"),
+            operator_assertions=assertions,
+            error=f"Requested route '{req_route}' is not an approved safe isolated route: {sorted(SAFE_ISOLATED_ROUTES)}.",
+        )
+
+    if req_route != att_route:
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="route_mismatch",
+            verified_machine=att_machine,
+            verified_route=att_route,
+            verified_at=data.get("verified_at"),
+            expires_at=expires_at_str,
+            verifier=data.get("verifier"),
+            operator_assertions=assertions,
+            error=f"Requested route '{req_route}' does not match attested route '{att_route}'.",
+        )
 
     return ConfinementVerificationResult(
         is_verified=True,
@@ -224,5 +329,6 @@ def verify_cape_confinement(
         verified_at=data.get("verified_at"),
         expires_at=expires_at_str,
         verifier=data.get("verifier"),
+        operator_assertions=assertions,
         error=None,
     )

@@ -316,20 +316,26 @@ class PipelineWorker:
                         pass
                     return analysis
 
-                # Translate only explicitly supported, operator-controlled parameters to CAPE request
-                cape_transport_options: Dict[str, Any] = {}
-                if getattr(settings, "CAPE_DEFAULT_MACHINE", ""):
-                    cape_transport_options["machine"] = settings.CAPE_DEFAULT_MACHINE
-                if getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", ""):
-                    cape_transport_options["options"] = f"route={settings.CAPE_DEFAULT_NETWORK_ROUTE}"
-                if analysis.profile == "ransomware_focus":
-                    cape_transport_options["enforce_timeout"] = "1"
+                # Require explicit CAPE machine and safe isolated network route
+                target_machine = getattr(settings, "CAPE_DEFAULT_MACHINE", "").strip()
+                target_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "").strip().lower()
+
+                if not target_machine or not target_route:
+                    safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                    err_msg = (
+                        "CAPE detonation blocked: Explicit target machine (MALBOX_CAPE_DEFAULT_MACHINE) "
+                        "and safe isolated route (MALBOX_CAPE_DEFAULT_NETWORK_ROUTE) must be configured."
+                    )
+                    analysis.error_message = err_msg
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    return analysis
 
                 # Verify confinement specifically for the selected machine & route
                 from app.services.sandbox.confinement import verify_cape_confinement
                 conf_specific = verify_cape_confinement(
-                    target_machine=cape_transport_options.get("machine"),
-                    target_route=getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "") or None,
+                    target_machine=target_machine,
+                    target_route=target_route,
                 )
                 if not conf_specific.is_verified:
                     safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
@@ -349,6 +355,15 @@ class PipelineWorker:
                     except Exception:
                         pass
                     return analysis
+
+                # Translate only explicitly supported, operator-controlled parameters to CAPE request
+                # Strictly bind the validated target machine and route to the submitted task
+                cape_transport_options: Dict[str, Any] = {
+                    "machine": target_machine,
+                    "options": f"route={target_route}",
+                }
+                if analysis.profile == "ransomware_focus":
+                    cape_transport_options["enforce_timeout"] = "1"
 
                 # Automatic package selection (exe vs dll)
                 is_dll = pe_meta.get("is_dll", False) or sample.file_name.lower().endswith(".dll")
@@ -482,14 +497,31 @@ class PipelineWorker:
                     analysis.replay_scenario_id = resolved_scen
                     self.db.commit()
 
-            # Bound artifact downloads within remaining deadline
-            if time.monotonic() < overall_deadline:
-                artifacts_dir = settings.ARTIFACTS_DIR / analysis.id
-                try:
-                    sandbox.generate_artifacts(backend_task_id, artifacts_dir, deadline=overall_deadline)
-                except Exception as art_err:
+            # Bound artifact downloads within remaining monotonic deadline and check cancellation
+            artifacts_dir = settings.ARTIFACTS_DIR / analysis.id
+            try:
+                if time.monotonic() >= overall_deadline:
+                    raise TimeoutError(f"Monotonic deadline expired before artifact retrieval for task {backend_task_id}")
+                if self._is_cancelled():
+                    raise RuntimeError(f"Analysis was cancelled before artifact retrieval for task {backend_task_id}")
+                collected_artifacts = sandbox.generate_artifacts(
+                    backend_task_id,
+                    artifacts_dir,
+                    deadline=overall_deadline,
+                    is_cancelled_fn=self._is_cancelled,
+                )
+                if not collected_artifacts:
+                    err_note = getattr(sandbox, "_last_artifact_error", None) or "PCAP capture was empty or unavailable from sandbox."
                     if "raw_results" in locals() and isinstance(raw_results, dict):
-                        raw_results.setdefault("telemetry_notes", []).append(f"Forensic artifact retrieval note: {str(art_err)}")
+                        raw_results.setdefault("telemetry_notes", []).append(f"Forensic artifact limitation: {err_note}")
+                        raw_results["artifacts"] = []
+                else:
+                    if "raw_results" in locals() and isinstance(raw_results, dict):
+                        raw_results["artifacts"] = collected_artifacts
+            except Exception as art_err:
+                if "raw_results" in locals() and isinstance(raw_results, dict):
+                    raw_results.setdefault("telemetry_notes", []).append(f"Forensic artifact retrieval failure: {str(art_err)}")
+                    raw_results["artifacts"] = []
 
             if self._is_cancelled():
                 safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)

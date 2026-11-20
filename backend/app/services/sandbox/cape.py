@@ -139,16 +139,46 @@ class CapeSandboxBackend(SandboxBackend):
                     from app.services.sandbox.confinement import verify_cape_confinement
                     from app.core.config import settings
 
+                    target_machine = getattr(settings, "CAPE_DEFAULT_MACHINE", "").strip()
+                    target_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "").strip().lower()
+
+                    if ready_flag and (not target_machine or not target_route):
+                        has_guest_vms = False
+                        ready_flag = False
+                        status_str = "missing_target_configuration"
+                        err_msg = (
+                            "Explicit CAPE target machine (MALBOX_CAPE_DEFAULT_MACHINE) "
+                            "and safe isolated route (MALBOX_CAPE_DEFAULT_NETWORK_ROUTE) must be configured."
+                        )
+
+                    # If detailed machine list is provided in cuckoo status, validate target_machine existence
+                    if ready_flag and isinstance(machines_info, dict):
+                        known_machines = []
+                        if "list" in machines_info and isinstance(machines_info["list"], list):
+                            known_machines = [str(m).lower() for m in machines_info["list"]]
+                        elif "machines" in machines_info and isinstance(machines_info["machines"], list):
+                            known_machines = [str(m.get("name") if isinstance(m, dict) else m).lower() for m in machines_info["machines"]]
+                        else:
+                            non_metric_keys = [k.lower() for k in machines_info.keys() if k not in ("total", "available")]
+                            if non_metric_keys:
+                                known_machines = non_metric_keys
+
+                        if known_machines and target_machine.lower() not in known_machines:
+                            has_guest_vms = False
+                            ready_flag = False
+                            status_str = "target_machine_not_found"
+                            err_msg = f"Target machine '{target_machine}' is not in registered CAPE machines: {sorted(known_machines)}."
+
                     conf_res = verify_cape_confinement(
-                        target_machine=getattr(settings, "CAPE_DEFAULT_MACHINE", "") or None,
-                        target_route=getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "") or None,
+                        target_machine=target_machine or None,
+                        target_route=target_route or None,
                     )
                     confinement_ok = conf_res.is_verified
 
                     # If guest VMs are available but confinement is unverified, readiness fails closed
                     if ready_flag and not confinement_ok:
                         ready_flag = False
-                        status_str = "unverified_confinement"
+                        status_str = conf_res.status if conf_res.status != "verified" else "unverified_confinement"
                         err_msg = conf_res.error or "Guest network isolation is unverified; live detonation blocked."
 
                     return {
@@ -270,6 +300,29 @@ class CapeSandboxBackend(SandboxBackend):
                     validated_options[k] = clock_str
                 else:
                     validated_options[k] = str(v)
+
+        # Strict Confinement Binding: Ensure explicit machine and safe route are set
+        req_machine = validated_options.get("machine") or getattr(settings, "CAPE_DEFAULT_MACHINE", "")
+        if not req_machine or req_machine == "*":
+            raise ValueError("Explicit target machine is required for CAPE submission; wildcard or empty machine is disallowed.")
+        validated_options["machine"] = req_machine
+
+        req_options_str = validated_options.get("options", "")
+        if "route=" not in req_options_str:
+            def_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "")
+            if not def_route or def_route == "*":
+                raise ValueError("Explicit safe network route (route=drop|none|isolated) is required in CAPE submission options.")
+            req_options_str = f"route={def_route}" if not req_options_str else f"{req_options_str},route={def_route}"
+            validated_options["options"] = req_options_str
+
+        import re
+        route_match = re.search(r"route=([a-zA-Z0-9_\-]+)", req_options_str)
+        if not route_match:
+            raise ValueError(f"Invalid route format in CAPE options: {req_options_str}")
+        sub_route = route_match.group(1).lower()
+        from app.services.sandbox.confinement import SAFE_ISOLATED_ROUTES
+        if sub_route not in SAFE_ISOLATED_ROUTES:
+            raise ValueError(f"Disallowed route '{sub_route}' in submission options. Must be one of: {sorted(SAFE_ISOLATED_ROUTES)}")
 
         # Build form data
         data: Dict[str, str] = {
@@ -512,7 +565,7 @@ class CapeSandboxBackend(SandboxBackend):
                         stream_cm = client.stream("GET", endpoint)
                         resp = stream_cm.__enter__()
                     except (httpx.RequestError, AttributeError, TypeError):
-                        # Fallback to standard client.get for test environments mocking client.get
+                        # Fallback for test/mock environments where client.get is patched
                         stream_cm = None
                         resp = client.get(endpoint)
 
@@ -543,6 +596,8 @@ class CapeSandboxBackend(SandboxBackend):
                                 for chunk in resp.iter_bytes(chunk_size=65536):
                                     if is_cancelled_fn and is_cancelled_fn():
                                         raise RuntimeError(f"Report collection cancelled for task {backend_task_id}")
+                                    if time.monotonic() >= deadline:
+                                        raise TimeoutError(f"Monotonic deadline exceeded while streaming CAPE report for task {backend_task_id}")
                                     total_bytes += len(chunk)
                                     if total_bytes > MAX_REPORT_BYTES:
                                         raise ValueError(
@@ -565,6 +620,11 @@ class CapeSandboxBackend(SandboxBackend):
                                 if hasattr(resp, "json") and callable(resp.json):
                                     cape_report = resp.json()
                             elif cape_report is None and hasattr(resp, "json") and callable(resp.json):
+                                raw_text = getattr(resp, "text", "")
+                                if raw_text and len(raw_text.encode("utf-8")) > MAX_REPORT_BYTES:
+                                    raise ValueError(
+                                        f"CAPE report text ({len(raw_text)} chars) exceeded maximum allowed size of {MAX_REPORT_BYTES} bytes."
+                                    )
                                 cape_report = resp.json()
 
                             if cape_report is None:
@@ -631,6 +691,8 @@ class CapeSandboxBackend(SandboxBackend):
         dest_dir: Path,
         max_timeout: Optional[float] = None,
         deadline: Optional[float] = None,
+        is_cancelled_fn: Optional[Any] = None,
+        **kwargs: Any,
     ) -> List[Dict[str, Any]]:
         """
         Fetches official forensic artifacts (PCAP) from CAPE using bounded streaming,
@@ -640,6 +702,7 @@ class CapeSandboxBackend(SandboxBackend):
         import shutil
         import hashlib
 
+        self._last_artifact_error: Optional[str] = None
         dest_dir.mkdir(parents=True, exist_ok=True)
         artifacts = []
         pcap_endpoint = f"{self.api_url}/apiv2/tasks/get/pcap/{backend_task_id}/"
@@ -653,10 +716,12 @@ class CapeSandboxBackend(SandboxBackend):
             effective_deadline = time.monotonic() + 30.0
 
         if time.monotonic() >= effective_deadline:
+            self._last_artifact_error = f"Monotonic deadline expired before artifact download could begin for task {backend_task_id}."
             return artifacts
 
         remaining_time = effective_deadline - time.monotonic()
         if remaining_time <= 0:
+            self._last_artifact_error = f"Monotonic deadline expired before artifact download could begin for task {backend_task_id}."
             return artifacts
 
         timeout_per_request = min(30.0, remaining_time)
@@ -666,49 +731,62 @@ class CapeSandboxBackend(SandboxBackend):
             try:
                 free_disk_bytes = shutil.disk_usage(dest_dir).free
                 if free_disk_bytes < 200 * 1024 * 1024:
+                    self._last_artifact_error = f"Insufficient disk space ({free_disk_bytes // (1024*1024)}MB free; >= 200MB required) to download PCAP."
                     return artifacts
             except OSError:
                 pass
 
             with httpx.Client(timeout=timeout_per_request, headers=self._get_headers()) as client:
                 with client.stream("GET", pcap_endpoint) as resp:
-                    if resp.status_code == 200:
-                        cl_header = resp.headers.get("content-length")
-                        if cl_header:
-                            try:
-                                if int(cl_header) > MAX_ARTIFACT_BYTES:
-                                    raise ValueError(
-                                        f"CAPE artifact Content-Length ({cl_header} bytes) exceeded maximum allowed limit of {MAX_ARTIFACT_BYTES} bytes."
-                                    )
-                            except ValueError as e:
-                                if "exceeded" in str(e):
-                                    raise
+                    if resp.status_code == 404:
+                        self._last_artifact_error = f"CAPE returned HTTP 404: No PCAP artifact available for task {backend_task_id}."
+                        return artifacts
+                    if resp.status_code != 200:
+                        self._last_artifact_error = f"CAPE artifact download failed with HTTP {resp.status_code} for task {backend_task_id}."
+                        return artifacts
 
-                        written_bytes = 0
-                        hasher = hashlib.sha256()
-                        with open(tmp_pcap, "wb") as f:
-                            for chunk in resp.iter_bytes(chunk_size=65536):
-                                if time.monotonic() >= effective_deadline:
-                                    raise TimeoutError("Monotonic deadline exceeded while streaming artifact.")
-                                written_bytes += len(chunk)
-                                if written_bytes > MAX_ARTIFACT_BYTES:
-                                    raise ValueError(
-                                        f"CAPE artifact stream exceeded maximum allowed size of {MAX_ARTIFACT_BYTES} bytes."
-                                    )
-                                hasher.update(chunk)
-                                f.write(chunk)
+                    cl_header = resp.headers.get("content-length")
+                    if cl_header:
+                        try:
+                            if int(cl_header) > MAX_ARTIFACT_BYTES:
+                                raise ValueError(
+                                    f"CAPE artifact Content-Length ({cl_header} bytes) exceeded maximum allowed limit of {MAX_ARTIFACT_BYTES} bytes."
+                                )
+                        except ValueError as e:
+                            if "exceeded" in str(e):
+                                raise
 
-                        if written_bytes > 0:
-                            final_pcap = dest_dir / "traffic.pcap"
-                            tmp_pcap.replace(final_pcap)
-                            artifacts.append({
-                                "name": "traffic.pcap",
-                                "type": "pcap",
-                                "size_bytes": written_bytes,
-                                "sha256": hasher.hexdigest(),
-                                "path": str(final_pcap),
-                            })
-        except Exception:
+                    written_bytes = 0
+                    hasher = hashlib.sha256()
+                    with open(tmp_pcap, "wb") as f:
+                        for chunk in resp.iter_bytes(chunk_size=65536):
+                            if is_cancelled_fn and is_cancelled_fn():
+                                raise RuntimeError(f"Artifact collection cancelled for task {backend_task_id}")
+                            if time.monotonic() >= effective_deadline:
+                                raise TimeoutError("Monotonic deadline exceeded while streaming artifact.")
+                            written_bytes += len(chunk)
+                            if written_bytes > MAX_ARTIFACT_BYTES:
+                                raise ValueError(
+                                    f"CAPE artifact stream exceeded maximum allowed size of {MAX_ARTIFACT_BYTES} bytes."
+                                )
+                            hasher.update(chunk)
+                            f.write(chunk)
+
+                    if written_bytes == 0:
+                        self._last_artifact_error = f"CAPE PCAP stream was empty (0 bytes) for task {backend_task_id}."
+                        return artifacts
+
+                    final_pcap = dest_dir / "traffic.pcap"
+                    tmp_pcap.replace(final_pcap)
+                    artifacts.append({
+                        "name": "traffic.pcap",
+                        "type": "pcap",
+                        "size_bytes": written_bytes,
+                        "sha256": hasher.hexdigest(),
+                        "path": str(final_pcap),
+                    })
+        except Exception as exc:
+            self._last_artifact_error = str(exc)
             if tmp_pcap.exists():
                 try:
                     tmp_pcap.unlink()

@@ -29,15 +29,18 @@ version_check = no
 delete_original = off
 delete_bin_copy = off
 
-# Storage and disk management (Fix for ISSUE-09 / freespace issues)
-# Lower freespace limit if running in a constrained virtualized lab
-freespace = 10240
+# Storage and disk management:
+# Maintain at least 20GB of verified free capacity on the analysis storage volume.
+# Check actual host storage: df -h /opt/CAPE
+# Never arbitrarily lower freespace below 20480 without capacity validation.
+freespace = 20480
 
 [resultserver]
 # Resultserver IP binding:
-# CRITICAL: Set to 0.0.0.0 or the exact host-only gateway IP (e.g. 192.168.56.1).
-# Do not hardcode an unroutable external IP.
-ip = 0.0.0.0
+# CRITICAL: Bind ONLY to the host-only interface IP (e.g. 192.168.56.1).
+# NEVER bind to 0.0.0.0 as this exposes the resultserver API and analysis uploads
+# to all external host interfaces and local network segments.
+ip = 192.168.56.1
 port = 2042
 force_port = no
 upload_max_size = 104857600
@@ -89,7 +92,8 @@ To prevent guest analyzer crashes and ensure telemetry fidelity:
 
 3. **Security Countermeasures in Guest:**
    - Permanently disable Windows Defender Real-time Protection, Tamper Protection, and Cloud-delivered protection.
-   - Disable Windows Firewall for Domain, Private, and Public profiles (`netsh advfirewall set allprofiles state off`).
+   - Configure a least-privilege Windows Firewall rule on the Private profile allowing inbound traffic to the guest agent port (port 8000) strictly from the host-only interface (`192.168.56.1`), rather than disabling the firewall globally:
+     `netsh advfirewall firewall add rule name="CAPE Agent" dir=in action=allow protocol=TCP localport=8000 remoteip=192.168.56.1 profile=private`
    - Disable Windows Update and User Account Control (UAC: Never Notify).
 
 4. **Static IP Configuration:**
@@ -133,9 +137,16 @@ If CAPE is online and responsive, the doctor output will confirm:
 Configuring `route = drop` or `route = none` in `cuckoo.conf` or `.env` is **not sufficient proof of network isolation**. Misconfigurations, host routing table changes, or hypervisor bridge bypasses could permit guest VM outbound traffic to the local network or internet.
 
 To enforce fail-closed isolation safety, Malbox implements an **Independent Operator Attestation Contract** (`verify_cape_confinement`):
-- Dynamic detonation is **blocked** unless an operator has independently verified network confinement and written an attestation.
-- The attestation must specify the verified guest machine (or `*`), a permitted safe isolated route (`drop`, `none`, or `isolated`), and an unexpired `expires_at` ISO-8601 timestamp.
-- If the attestation is missing, expired, or mismatches the requested submission machine/route, the pipeline immediately halts with status `FAILED` and error `"CAPE confinement check failed"`.
+- Dynamic detonation is **strictly blocked** unless an operator has independently verified network confinement and written an attestation.
+- The attestation must specify the exact verified guest machine name (e.g. `win10_analyst`) and an exact permitted safe isolated route (`drop`, `none`, or `isolated`).
+- **Wildcard (`*`) or missing machine and route values are strictly rejected.**
+- The operator must explicitly certify all four mandatory manual assertions:
+  1. `host_only_networking_verified`: Host-only virtual adapter (`vboxnet0`) configured with no physical bridging.
+  2. `routing_isolation_verified`: Host kernel routing table has no NAT/forwarding enabled for the guest subnet (`sysctl net.ipv4.ip_forward` is `0` or iptables FORWARD drops guest packets).
+  3. `firewall_rules_verified`: Host firewall rules enforce DROP for all guest subnet outbound traffic to external networks.
+  4. `guest_snapshot_clean_verified`: Guest VM revert snapshot was captured in an uninfected, pristine state.
+- The attestation file must have secure file permissions (e.g. `chmod 600` or `chmod 644`); world-writable or group-writable files are rejected as untrusted (`untrusted_attestation_file`).
+- If the attestation is missing, expired, permissions are unsafe, or targets mismatch the requested submission machine/route, detonation immediately halts with status `FAILED` and fails closed.
 
 ### 5.2 Generating or Renewing Operator Attestation
 
@@ -149,10 +160,16 @@ To generate or renew the attestation file using Python:
 python3 -c "
 from app.services.sandbox.confinement import create_isolation_attestation
 p = create_isolation_attestation(
-    verified_machine='win10_analyst', # or '*' for all machines
-    verified_route='drop',             # must be 'drop', 'none', or 'isolated'
+    verified_machine='win10_analyst', # Exact target machine (wildcards rejected)
+    verified_route='drop',            # Must be 'drop', 'none', or 'isolated'
     verifier='analyst@secops',
-    validity_seconds=86400             # 24-hour expiration
+    validity_seconds=86400,           # 24-hour expiration
+    operator_assertions={
+        'host_only_networking_verified': True,
+        'routing_isolation_verified': True,
+        'firewall_rules_verified': True,
+        'guest_snapshot_clean_verified': True,
+    }
 )
 print(f'Confinement attestation active at {p}')
 "
@@ -160,7 +177,7 @@ print(f'Confinement attestation active at {p}')
 
 ### 5.3 Three Operational Readiness States
 
-1. **Mocked Unit/E2E Testing:** Uses synthetic responses and ephemeral test attestations in pytest fixtures (`create_isolation_attestation(verified_machine='*', verified_route='drop')`).
+1. **Mocked Unit/E2E Testing:** Uses synthetic responses and isolated test attestations targeting `win10_analyst` with `route=drop` in pytest fixtures (`create_isolation_attestation(verified_machine='win10_analyst', verified_route='drop')`).
 2. **Benign Acceptance Verification:** Real benign PE binaries (e.g., standard Windows sysinternals or compilers) detonated on an attested isolated guest machine to verify the live integration lifecycle.
 3. **Host Safety Failsafe:** Real malware execution remains strictly blocked pending explicit operator verification, operator token authentication, and signed attestation.
 

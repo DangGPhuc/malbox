@@ -541,7 +541,7 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                   <CheckCircle2 size={16} color="#15803d" />
                   <span style={{ fontWeight: 600, color: '#15803d' }}>CAPE Sandbox Ready:</span>
                   <span style={{ color: 'var(--text-secondary)' }}>
-                    Isolated guest environment and network confinement verified for live automated detonation.
+                    Operator-attested guest environment and safe network route verified for live automated detonation.
                   </span>
                 </>
               ) : isConfinementUnverified ? (
@@ -658,15 +658,15 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
             <button
               type="button"
               onClick={handleAnalyze}
-              disabled={submitting || !approvedByUser || !operatorToken.trim()}
+              disabled={submitting || !approvedByUser || !operatorToken.trim() || !isCapeReady}
               className="btn btn-primary"
               style={{
                 width: '100%',
                 padding: '12px',
                 fontSize: '1rem',
                 fontWeight: 600,
-                opacity: submitting || !approvedByUser || !operatorToken.trim() ? 0.6 : 1,
-                cursor: submitting || !approvedByUser || !operatorToken.trim() ? 'not-allowed' : 'pointer',
+                opacity: submitting || !approvedByUser || !operatorToken.trim() || !isCapeReady ? 0.6 : 1,
+                cursor: submitting || !approvedByUser || !operatorToken.trim() || !isCapeReady ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -682,6 +682,33 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                 </>
               )}
             </button>
+
+            {!isCapeReady && (
+              <div
+                style={{
+                  marginTop: '12px',
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  backgroundColor: 'rgba(246, 73, 50, 0.08)',
+                  border: '1px solid rgba(246, 73, 50, 0.25)',
+                  color: 'var(--danger)',
+                  fontSize: '0.82rem',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '8px',
+                }}
+              >
+                <AlertTriangle size={16} style={{ marginTop: '2px', flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontWeight: 600 }}>Live Detonation Blocked — Missing Prerequisites:</div>
+                  <div style={{ marginTop: '2px', color: 'var(--text-secondary)' }}>
+                    {health?.prerequisites_missing && health.prerequisites_missing.length > 0
+                      ? health.prerequisites_missing.join('; ')
+                      : health?.readiness_details || 'Live sandbox readiness is unconfirmed or guest network isolation is unverified.'}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -204,7 +204,7 @@ def test_ghidra_timeout_records_timed_out_status_accurately(db_session, monkeypa
 
     monkeypatch.setattr("app.services.sandbox.cape.CapeSandboxBackend", MockCapeSandbox)
     from app.services.sandbox.confinement import create_isolation_attestation
-    create_isolation_attestation("*", "drop")
+    create_isolation_attestation("win10_analyst", "drop")
 
     worker = PipelineWorker(db_session)
     result = worker.execute_pipeline(analysis.id)
@@ -270,7 +270,7 @@ def test_correlation_failure_does_not_break_pipeline(db_session, monkeypatch, tm
 
     monkeypatch.setattr("app.services.sandbox.cape.CapeSandboxBackend", MockCapeSandbox)
     from app.services.sandbox.confinement import create_isolation_attestation
-    create_isolation_attestation("*", "drop")
+    create_isolation_attestation("win10_analyst", "drop")
 
     # Mock correlation service to throw an error
     class BrokenCorrelationService:

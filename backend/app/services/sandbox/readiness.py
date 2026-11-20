@@ -63,7 +63,14 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
                 network_isolation_verified = bool(probe.get("confinement_verified", False))
                 readiness_status = "ready"
                 details = f"CAPE API ready (version {cape_version}); {guest_vms_available}/{guest_vms_total} guest VMs available. Confinement verified."
-            elif status_probe == "unverified_confinement":
+            elif status_probe in (
+                "unverified_confinement",
+                "missing_isolation_evidence",
+                "machine_mismatch",
+                "route_mismatch",
+                "expired_attestation",
+                "untrusted_attestation_file",
+            ) or (not probe.get("confinement_verified", False) and probe.get("guest_vm_ready", False)):
                 cape_reachable = True
                 cape_authenticated = True
                 cape_compatible = True
@@ -132,6 +139,22 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
         and network_isolation_verified
     )
 
+    prerequisites_missing = []
+    if not live_configured:
+        prerequisites_missing.append("Live analysis disabled by server policy (MALBOX_LIVE_MODE_ENABLED=false)")
+    if not op_auth_configured:
+        prerequisites_missing.append("Operator authorization token unconfigured or too short (MALBOX_OPERATOR_TOKEN)")
+    if not cape_configured:
+        prerequisites_missing.append("CAPE API URL unconfigured (MALBOX_CAPE_API_URL)")
+    elif not cape_reachable:
+        prerequisites_missing.append(f"CAPE API unreachable at {settings.CAPE_API_URL}")
+    elif not cape_authenticated:
+        prerequisites_missing.append("CAPE API authentication failed")
+    elif not guest_vm_ready:
+        prerequisites_missing.append(details or "No guest analysis machines are registered or available")
+    elif not network_isolation_verified:
+        prerequisites_missing.append(details or "CAPE network isolation attestation unverified")
+
     return {
         "ready_for_analysis": ready_for_analysis,
         "status": readiness_status,
@@ -149,5 +172,6 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
         "ghidra_installed": ghidra_installed,
         "rules_loaded": rules_loaded,
         "details": details,
+        "prerequisites_missing": prerequisites_missing,
     }
 

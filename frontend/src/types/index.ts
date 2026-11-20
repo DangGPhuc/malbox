@@ -20,6 +20,7 @@ export interface HealthStatus {
   ghidra_installed?: boolean;
   rules_loaded?: number;
   readiness_details?: string;
+  prerequisites_missing?: string[];
 }
 
 export interface SectionInfo {

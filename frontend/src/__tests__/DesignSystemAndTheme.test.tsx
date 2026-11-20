@@ -229,6 +229,8 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
       live_mode_enabled: true,
       default_backend: 'cape',
       ai_provider: 'deterministic',
+      ready_for_analysis: true,
+      network_isolation_verified: true,
     });
 
     vi.spyOn(api, 'listAnalyses').mockResolvedValue([
@@ -361,6 +363,8 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
       live_mode_enabled: true,
       default_backend: 'cape',
       ai_provider: 'deterministic',
+      ready_for_analysis: true,
+      network_isolation_verified: true,
     });
 
     vi.spyOn(api, 'uploadSample').mockResolvedValue({
@@ -490,6 +494,8 @@ describe('Notion Design System & UI/UX Redesign Coverage', () => {
       live_mode_enabled: false,
       default_backend: 'cape',
       ai_provider: 'deterministic',
+      ready_for_analysis: true,
+      network_isolation_verified: true,
     });
     vi.spyOn(api, 'listAnalyses').mockResolvedValue([]);
 
