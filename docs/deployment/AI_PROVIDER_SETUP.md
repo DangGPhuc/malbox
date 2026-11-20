@@ -24,7 +24,9 @@ The AI system is strictly bounded by clear architectural safeguards:
 
 ## 3. Option A: Local Ollama Setup (Recommended for Privacy & Offline Labs)
 
-Deploying a local LLM ensures that suspicious file hashes, extracted strings, and forensic telemetry **never leave the local machine**.
+Deploying a local LLM ensures that suspicious file hashes, extracted strings, and forensic telemetry **never leave the local host**:
+- **Zero Egress**: Executes strictly on localhost (`127.0.0.1`).
+- **No External Consent Gate Needed**: Because telemetry stays host-local, local AI generation does not require `MALBOX_REPORTING_EXTERNAL_AI_CONSENT=true`.
 
 1. **Install Ollama on Kali Linux**:
    ```bash
@@ -93,14 +95,25 @@ When using commercial cloud LLM APIs, explicit transmission consent is required 
    ```
 
 2. **Consent Policy**:
-   If `MALBOX_REPORTING_EXTERNAL_AI_CONSENT=false`, Malbox **blocks** all cloud API calls, marks the AI check `[BLOCKED]` in doctor, and falls back to deterministic technical reporting.
+   If `MALBOX_REPORTING_EXTERNAL_AI_CONSENT=false`, Malbox **blocks** all cloud API calls, marks the AI check `[BLOCKED]` in doctor, and falls back to deterministic technical reporting. Local models (`local`/`ollama`) are exempted from this external consent requirement.
 
 ---
 
 ## 6. 4-Stage Multi-Analyst Investigation Workflow
 
-When generating intelligence reports, the engine prompts the LLM through four analytical roles:
-1. **Analyst A (Static Code Analyst)**: Evaluates PE headers, imports, sections, entropy, and Ghidra decompilation.
-2. **Analyst B (Dynamic Behavior Analyst)**: Reconstructs execution flow, process spawn trees, registry/file writes, and socket traffic.
-3. **Analyst C (Threat Classification Analyst)**: Correlates telemetry against behavioral detection rules and maps MITRE ATT&CK techniques.
-4. **Analyst D (Intelligence Report Composer)**: Synthesizes authoritative executive summary and technical claims with grounded evidence IDs.
+When generating intelligence reports, the engine structures the analysis into four distinct, independently inspectable stages recorded in `report.provider_metadata.analyst_stages`:
+
+1. **Stage 1 — Static Code Analysis (`stage_1_static_code_analyst`)**:
+   - *Inputs*: PE header integrity, section characteristics, entropy, import tables, and Ghidra decompilation metrics.
+   - *Outputs*: Grounded capability flags, compiler metadata, and static evidence IDs.
+2. **Stage 2 — Dynamic Behavior Analysis (`stage_2_dynamic_behavior_analyst`)**:
+   - *Inputs*: Process spawn tree, process injection relationships, network socket events, filesystem and registry modifications.
+   - *Outputs*: Timeline interpretations and behavioral findings linked to execution evidence.
+3. **Stage 3 — Threat Classification (`stage_3_threat_classification_analyst`)**:
+   - *Inputs*: Authoritative deterministic risk score, rule detections, and verified evidence inventory.
+   - *Outputs*: Epistemic classification of technical claims (`FACT`, `INFERENCE`, `HYPOTHESIS`) and confidence assessment.
+4. **Stage 4 — Intelligence Report Composition (`stage_4_report_composer`)**:
+   - *Inputs*: Analytical claims, MITRE techniques, and forensic bundle limitations.
+   - *Outputs*: Synthesized executive assessment, behavioral narrative, recommended follow-up actions, and IOC interpretations with preserved deterministic scores.
+
+Each stage record contains `inputs_summary`, `output_summary`, `validation_status` (`valid` or `fallback`), `error` (if any), and `tokens_used`, allowing operators to inspect intermediate analytical steps in the UI.

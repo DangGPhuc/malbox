@@ -2,12 +2,14 @@
 
 ## 1. Scope & Target Environment
 
-This guide covers the deployment of Malbox-AI on a fresh physical bare-metal installation of **Kali Linux Rolling (2024.x/2025.x/2026.x)**.
+This guide covers the deployment of Malbox-AI on **Kali Linux Rolling (2024.x/2025.x/2026.x)**.
 
-This baseline guarantees:
-- Native access to hardware virtualization extensions (`/dev/kvm`).
-- Unmodified Linux kernel network namespace isolation and cgroup v2 support.
-- Pre-packaged security dependencies (Ghidra, Python 3.11+, OpenJDK 21+, Bubblewrap, tcpdump).
+### Hardware Virtualization & KVM Prerequisites
+Physical hardware does **not** automatically guarantee available virtualization extensions:
+- **BIOS/UEFI Configuration**: Intel VT-x (`vmx`) or AMD-V (`svm`) must be explicitly enabled in your motherboard firmware.
+- **Verification Command**: Run `egrep -c '(vmx|svm)' /proc/cpuinfo`. A count greater than 0 confirms CPU support.
+- **KVM Device**: Confirm `/dev/kvm` exists and the current operator is in the `kvm` user group (`ls -l /dev/kvm`).
+- **Nested Virtualization Notice**: If Kali Linux itself is hosted inside a hypervisor (e.g., VMware Workstation/ESXi, Proxmox, or Hyper-V), **nested virtualization** must be explicitly enabled in the hypervisor VM settings (e.g. "Virtualize Intel VT-x/EPT or AMD-V/RVI"), otherwise `/dev/kvm` will not be exposed to the guest.
 
 ---
 

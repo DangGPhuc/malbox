@@ -63,13 +63,18 @@ Before signing or generating `data/cape_isolation_attestation.json`, the operato
 
 ## 3. Auditable Isolation Attestation File Contract
 
-When all four invariants are verified, generate the auditable attestation file:
+When all four invariants are verified, the operator signs the manual attestation using the Malbox CLI:
 
 ```bash
-./malbox setup --cape --machine win10_malbox --route host-only
+./malbox setup --attest-isolation \
+    --operator "secops-analyst" \
+    --machine win10_malbox \
+    --route drop \
+    --evidence-refs "vboxnet0-rules.v4,clean_snap-verified" \
+    --notes "Audited host-only interface, drop forward rules, and snapshot clean_snap"
 ```
 
-This writes `data/cape_isolation_attestation.json`:
+This writes `data/cape_isolation_attestation.json` with canonical schema v1.0 and permissions `0600`:
 
 ```json
 {
@@ -77,20 +82,26 @@ This writes `data/cape_isolation_attestation.json`:
   "attestation_timestamp": 1772648400,
   "attestation_expires_at": 1775240400,
   "machine": "win10_malbox",
-  "route": "host-only",
-  "verifier": "operator-setup-assistant",
+  "route": "drop",
+  "verifier": "secops-analyst",
   "manual_operator_assertions": {
     "host_only_networking_verified": true,
     "default_route_blocked": true,
     "firewall_rules_verified": true,
     "guest_snapshot_clean": true
   },
-  "operator_notes": "Configured via ./malbox setup --cape assistant. Host-only confinement verified."
+  "evidence_references": [
+    "vboxnet0-rules.v4",
+    "clean_snap-verified"
+  ],
+  "operator_notes": "Audited host-only interface, drop forward rules, and snapshot clean_snap"
 }
 ```
 
 ### Security Properties Enforced by Malbox Engine
 - **POSIX Permissions**: `0600` (read-write strictly for owner, unreadable by group or world).
-- **Exact Machine & Route Binding**: The attestation must match `MALBOX_CAPE_MACHINE` and `MALBOX_CAPE_ROUTE`. Wildcards (`*`) or mismatched names are rejected.
+- **Exact Machine & Route Binding**: The attestation must match `MALBOX_CAPE_DEFAULT_MACHINE` and `MALBOX_CAPE_DEFAULT_NETWORK_ROUTE`. Wildcards (`*`) or mismatched names are rejected.
+- **Allowed Confinement Routes**: Route must be in `{"drop", "none", "isolated"}`. Insecure routes (e.g. `internet`) or misconfigured labels (e.g. `host-only`) are rejected.
+- **Required Evidence References**: The `evidence_references` list must not be empty.
 - **Expiration Limit**: Attestations expire after 30 days, requiring operator re-verification.
 - **Fail-Closed Gate**: If the attestation is missing, mismatched, or expired, the backend rejects live dynamic execution and sets analysis state to `FAILED`.

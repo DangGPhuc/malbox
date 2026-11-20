@@ -5,8 +5,10 @@
 In **Profile A (Single-Host Sandbox)**, all software layers run concurrently on the physical Kali Linux bare-metal machine:
 1. **Malbox Platform**: FastAPI backend (:8000), Vite frontend (:5173), SQLite DB (`data/malbox.db`), and Ghidra Headless static analyzer.
 2. **CAPE Sandbox Backend**: CAPE daemon (`cuckoo.py`), rooter service, and Django REST API (:8008).
-3. **Hypervisor Subsystem**: KVM/QEMU or VirtualBox 7.x hosting an isolated Windows 10 64-bit guest VM.
-4. **Isolated Virtual Network**: Host-only virtual bridge (`vboxnet0` or `virbr1`) strictly blocked from reaching the external LAN or WAN.
+3. **Hypervisor Subsystem**: KVM/QEMU or VirtualBox 7.x hosting an isolated Windows 10 64-bit guest VM. Requires **80 GB – 120 GB SSD disk headroom** to accommodate base virtual disk images (40-60 GB), memory dump captures, multiple snapshot states, and packet logs.
+4. **Isolated Virtual Network vs. CAPE Routing Policy**:
+   - **Hypervisor Network Layer**: Host-only virtual bridge (`vboxnet0` or `virbr1`) strictly isolated with no default gateway and zero WAN egress.
+   - **CAPE Execution Routing Policy**: Configured strictly to `drop` or `none` (safe non-egress execution policies). Routing policy `host-only` is rejected by the backend.
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -175,18 +177,29 @@ sudo netfilter-persistent save || sudo iptables-save | sudo tee /etc/iptables/ru
 ## 6. Malbox Integration & Confinement Attestation
 
 1. **Configure Malbox Settings**:
-   Run the Malbox setup assistant:
+   Run the Malbox setup assistant to configure CAPE endpoint and default target parameters:
    ```bash
    ./malbox setup --cape \
        --url http://127.0.0.1:8008 \
        --machine win10_malbox \
-       --route host-only
+       --route drop
    ```
 
-2. **Verify Confinement Attestation**:
-   The setup command creates `data/cape_isolation_attestation.json` with permissions `0600`.
+2. **Operator Isolation Attestation Certification**:
+   Malbox enforces a fail-closed confinement gate. The platform **never auto-generates** false attestations. The operator must independently audit network isolation, firewall rules, and guest snapshot integrity, then certify the configuration with verified evidence references:
+   ```bash
+   ./malbox setup --attest-isolation \
+       --operator "secops-analyst" \
+       --machine win10_malbox \
+       --route drop \
+       --evidence-refs "vboxnet0-rules.v4,clean_snap-verified" \
+       --notes "Audited host-only interface, drop forward rules, and snapshot clean_snap"
+   ```
+   This creates `data/cape_isolation_attestation.json` with strict POSIX permissions `0600`.
+
+3. **Verify Confinement Attestation & Readiness**:
    Verify platform readiness:
    ```bash
    ./malbox doctor --check
    ```
-   *Expected output: `[PASS] [VERIFIED] CAPE Confinement Attestation: CAPE isolation verified for machine 'win10_malbox' on route 'host-only'`.*
+   *Expected output: `[PASS] [VERIFIED] CAPE Confinement Attestation: CAPE isolation verified for machine 'win10_malbox' on route 'drop'`.*

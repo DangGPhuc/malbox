@@ -7,8 +7,8 @@ In **Profile B (Distributed Sandbox)**, Malbox is decoupled from the hypervisor 
    - Hosts the FastAPI backend, Vite UI, static triage engine (PE metadata, Ghidra), evidence correlation engine, and AI reporting.
    - Requires no virtualization extensions (`/dev/kvm` not required on this node).
 2. **Dedicated CAPE Sandbox Node (Physical Bare-Metal Hypervisor)**:
-   - Runs on a dedicated server (e.g. Ubuntu Server or Debian) equipped with KVM/VirtualBox.
-   - Hosts Windows analysis VMs and manages network confinement, disk snapshots, and execution tracing.
+   - Runs on a dedicated server (e.g. Ubuntu Server or Debian) equipped with KVM/VirtualBox. Requires **80 GB – 120 GB SSD disk headroom** for guest disk images, memory captures, and snapshots.
+   - Hosts Windows analysis VMs on an isolated host-only virtual adapter (`vboxnet0`) and enforces execution routing policies (`drop`/`none`).
    - Exposes the CAPE REST API (:8008) exclusively over an isolated management network.
 
 ```
@@ -73,7 +73,7 @@ On the Kali Linux Malbox controller:
        --url http://10.10.20.50:8008 \
        --token 4f9b2c8a1e3d5f7b8c9d0e1f2a3b4c5d \
        --machine win10_remote_01 \
-       --route host-only
+       --route drop
    ```
 
 2. **Verify Network Reachability & Token**:
@@ -83,12 +83,17 @@ On the Kali Linux Malbox controller:
    ```
    *Expected response: HTTP 200 with JSON payload reporting available machines and tasks.*
 
-3. **Operator Confinement Attestation**:
-   Because guest VM isolation occurs on the remote hypervisor, the operator must verify the remote node's network topology and generate the attestation file on the controller:
+3. **Operator Confinement Attestation Certification**:
+   Because guest VM isolation occurs on the remote hypervisor, the operator must verify the remote node's network topology (host-only adapter, drop routing policy, clean snapshot) and certify the attestation file on the controller with audit evidence references:
    ```bash
-   # Attestation created at data/cape_isolation_attestation.json
-   ./malbox setup --cape --machine win10_remote_01 --route host-only
+   ./malbox setup --attest-isolation \
+       --operator "secops-analyst" \
+       --machine win10_remote_01 \
+       --route drop \
+       --evidence-refs "remote-vboxnet0-audit,clean_snap-sha256" \
+       --notes "Audited dedicated hypervisor node 10.10.20.50 network isolation and drop routing"
    ```
+   *Attestation file is stored at `data/cape_isolation_attestation.json` with permissions `0600`.*
 
 4. **Verify Controller Doctor Status**:
    ```bash

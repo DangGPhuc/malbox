@@ -11,13 +11,16 @@
 
 ## 2. Guest OS Installation Steps
 
+> [!CAUTION]
+> The security relaxations below (disabling Windows Defender, UAC, and Firewall) must **ONLY** be executed inside an isolated guest VM dedicated to malware detonation. Never apply these changes to a production system or host operating system.
+
 1. **Install Clean Windows OS**:
-   - Create local administrator user account: `malbox` / password `malbox`.
+   - Create a dedicated local administrator user account with a strong password (e.g., `analyst` or custom lab account; avoid reusable passwords).
    - Set Computer Name: `WIN-ANALYST-01`.
    - Install Guest Additions / VirtIO drivers.
 
-2. **Disable Security Interferences**:
-   Malware analysis requires observing authentic malicious execution without Windows Defender or SmartScreen blocking samples before detonation:
+2. **Isolated-Lab Analysis Configuration (Disable Antivirus Interferences)**:
+   In a dedicated malware detonation VM, security suites must be disabled to observe authentic execution behavior rather than having samples quarantined prematurely:
    - **Disable Windows Defender Antivirus**:
      Open PowerShell as Administrator:
      ```powershell
@@ -53,7 +56,7 @@ Install realistic target software to provide realistic attack surfaces for troja
 - **.NET Framework 3.5 & 4.8**: Enable via Windows Features.
 - **Realistic User Decoy Data**:
   - Chrome / Firefox browser profile with history.
-  - Decoy `.docx`, `.pdf`, and `.txt` files in `C:\Users\malbox\Desktop` and `Documents`.
+  - Decoy `.docx`, `.pdf`, and `.txt` files in `C:\Users\$env:USERNAME\Desktop` and `Documents`.
   - Fake registry keys and credential placeholders.
 
 ---
@@ -72,7 +75,7 @@ Install realistic target software to provide realistic attack surfaces for troja
    ```powershell
    $Action = New-ScheduledTaskAction -Execute "C:\Python310\python.exe" -Argument "C:\agent\agent.py"
    $Trigger = New-ScheduledTaskTrigger -AtLogOn
-   $Principal = New-ScheduledTaskPrincipal -UserId "malbox" -LogonType Interactive -RunLevel Highest
+   $Principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Highest
    Register-ScheduledTask -TaskName "CapeAgent" -Action $Action -Trigger $Trigger -Principal $Principal
    ```
 
