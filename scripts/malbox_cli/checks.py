@@ -977,129 +977,99 @@ def check_cape_confinement_attestation(
             details={"live_mode_enabled": False},
         )
 
-    att_path_raw = (config.get("MALBOX_CAPE_ATTESTATION_PATH") or "").strip()
+    att_path_raw = (
+        config.get("MALBOX_CAPE_ISOLATION_ATTESTATION_PATH")
+        or config.get("MALBOX_CAPE_ATTESTATION_PATH")
+        or ""
+    ).strip()
     att_path = (
         Path(att_path_raw)
         if att_path_raw
         else (root_dir / "data" / "cape_isolation_attestation.json")
     )
 
-    expected_machine = (config.get("MALBOX_CAPE_MACHINE") or "win10_malbox").strip()
-    expected_route = (config.get("MALBOX_CAPE_ROUTE") or "host-only").strip()
+    expected_machine = (
+        config.get("MALBOX_CAPE_DEFAULT_MACHINE")
+        or config.get("MALBOX_CAPE_MACHINE")
+        or "win10_analyst"
+    ).strip()
+    expected_route = (
+        config.get("MALBOX_CAPE_DEFAULT_NETWORK_ROUTE")
+        or config.get("MALBOX_CAPE_ROUTE")
+        or "drop"
+    ).strip().lower()
 
-    if not att_path.is_file():
+    backend_path = str(root_dir / "backend")
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+
+    from app.services.sandbox.confinement import verify_cape_confinement
+
+    res = verify_cape_confinement(
+        target_machine=expected_machine,
+        target_route=expected_route,
+        attestation_path=att_path,
+    )
+
+    if res.is_verified:
+        hours_left = 0.0
+        if res.expires_at:
+            try:
+                from datetime import datetime, timezone
+                exp_dt = datetime.fromisoformat(res.expires_at)
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                hours_left = max(0.0, (exp_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0)
+            except Exception:
+                pass
+        return CheckResult(
+            id="cape_attestation",
+            name="CAPE Confinement Attestation",
+            status=CheckStatus.PASS,
+            summary=f"CAPE isolation verified for machine '{expected_machine}' on route '{expected_route}' (valid for {hours_left:.1f}h).",
+            readiness_tier="VERIFIED",
+            details={
+                "attestation_path": str(att_path),
+                "machine": expected_machine,
+                "route": expected_route,
+                "verifier": res.verifier,
+                "hours_remaining": round(hours_left, 1),
+                "evidence_references": res.evidence_references,
+            },
+        )
+
+    if res.status == "missing_isolation_evidence" and not att_path.is_file():
         return CheckResult(
             id="cape_attestation",
             name="CAPE Confinement Attestation",
             status=CheckStatus.WARN,
             summary=f"Mandatory CAPE isolation attestation missing ({att_path}). Live detonation blocked.",
             readiness_tier="BLOCKED",
-            details={"attestation_path": str(att_path), "expected_machine": expected_machine, "expected_route": expected_route},
+            details={
+                "attestation_path": str(att_path),
+                "expected_machine": expected_machine,
+                "expected_route": expected_route,
+            },
             remediation=(
-                f"Verify host-only networking, default route blocking, firewall rules, and clean snapshot "
-                f"on guest '{expected_machine}', then run `./malbox setup --cape` to generate attestation."
+                f"Verify host-only networking, routing isolation, firewall rules, and clean snapshot "
+                f"on guest '{expected_machine}', then run `./malbox setup --attest-isolation` to generate attestation."
             ),
         )
 
-    if os.name == "posix":
-        st_mode = att_path.stat().st_mode & 0o777
-        if st_mode & 0o077:
-            return CheckResult(
-                id="cape_attestation",
-                name="CAPE Confinement Attestation",
-                status=CheckStatus.FAIL,
-                summary=f"Insecure attestation permissions: {oct(st_mode)} (must not be group/world-writable; expected 0600).",
-                readiness_tier="BLOCKED",
-                details={"attestation_path": str(att_path), "permissions": oct(st_mode)},
-                remediation=f"Run `chmod 0600 {att_path}`.",
-            )
-
-    try:
-        data = json.loads(att_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return CheckResult(
-            id="cape_attestation",
-            name="CAPE Confinement Attestation",
-            status=CheckStatus.FAIL,
-            summary=f"Malformed attestation JSON: {exc}",
-            readiness_tier="BLOCKED",
-            details={"attestation_path": str(att_path), "error": str(exc)},
-            remediation="Regenerate attestation file with valid JSON structure.",
-        )
-
-    if not isinstance(data, dict):
-        return CheckResult(
-            id="cape_attestation",
-            name="CAPE Confinement Attestation",
-            status=CheckStatus.FAIL,
-            summary="Attestation root must be a JSON object.",
-            readiness_tier="BLOCKED",
-        )
-
-    att_machine = str(data.get("machine") or "")
-    att_route = str(data.get("route") or "")
-    expires_at = data.get("attestation_expires_at")
-    assertions = data.get("manual_operator_assertions") or {}
-
-    if att_machine != expected_machine or att_route != expected_route:
-        return CheckResult(
-            id="cape_attestation",
-            name="CAPE Confinement Attestation",
-            status=CheckStatus.FAIL,
-            summary=(
-                f"Attestation target mismatch: file targets machine='{att_machine}' route='{att_route}', "
-                f"but configuration specifies machine='{expected_machine}' route='{expected_route}'."
-            ),
-            readiness_tier="BLOCKED",
-            details={"file_machine": att_machine, "config_machine": expected_machine, "file_route": att_route, "config_route": expected_route},
-            remediation="Re-verify configured CAPE machine/route and regenerate the attestation file.",
-        )
-
-    import time
-    now = time.time()
-    if not isinstance(expires_at, (int, float)) or expires_at <= now:
-        return CheckResult(
-            id="cape_attestation",
-            name="CAPE Confinement Attestation",
-            status=CheckStatus.FAIL,
-            summary=f"Attestation for machine '{expected_machine}' expired at {expires_at} (current: {int(now)}).",
-            readiness_tier="BLOCKED",
-            details={"expires_at": expires_at, "now": now},
-            remediation="Re-audit VM network isolation and renew attestation.",
-        )
-
-    required_assertions = [
-        "host_only_networking_verified",
-        "default_route_blocked",
-        "firewall_rules_verified",
-        "guest_snapshot_clean",
-    ]
-    unverified = [k for k in required_assertions if not assertions.get(k)]
-    if unverified:
-        return CheckResult(
-            id="cape_attestation",
-            name="CAPE Confinement Attestation",
-            status=CheckStatus.FAIL,
-            summary=f"Unverified isolation assertions in attestation: {', '.join(unverified)}.",
-            readiness_tier="BLOCKED",
-            details={"unverified_assertions": unverified, "assertions": assertions},
-            remediation="Verify all 4 isolation invariants on the Windows guest and set them to true in attestation.",
-        )
-
-    hours_left = (expires_at - now) / 3600.0
     return CheckResult(
         id="cape_attestation",
         name="CAPE Confinement Attestation",
-        status=CheckStatus.PASS,
-        summary=f"CAPE isolation verified for machine '{expected_machine}' on route '{expected_route}' (valid for {hours_left:.1f}h).",
-        readiness_tier="VERIFIED",
+        status=CheckStatus.FAIL,
+        summary=f"CAPE confinement verification rejected: {res.error or res.status}",
+        readiness_tier="BLOCKED",
         details={
             "attestation_path": str(att_path),
-            "machine": expected_machine,
-            "route": expected_route,
-            "verifier": data.get("verifier"),
-            "hours_remaining": round(hours_left, 1),
+            "status": res.status,
+            "error": res.error,
+            "expected_machine": expected_machine,
+            "expected_route": expected_route,
         },
+        remediation="Re-verify VM network isolation, ensure route is in ('drop', 'none', 'isolated'), and regenerate attestation via `./malbox setup --attest-isolation`.",
     )
 
 

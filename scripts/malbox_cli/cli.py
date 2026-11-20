@@ -246,15 +246,19 @@ def build_parser() -> argparse.ArgumentParser:
     setup_act.add_argument("--check", action="store_true", help="Inspect and display readiness matrix")
     setup_act.add_argument("--plan", action="store_true", help="Display actionable Profile A / Profile B deployment plan")
     setup_act.add_argument("--ghidra", action="store_true", help="Configure Ghidra Headless integration")
-    setup_act.add_argument("--cape", action="store_true", help="Configure CAPE Sandbox connection & isolation attestation")
+    setup_act.add_argument("--cape", action="store_true", help="Configure CAPE Sandbox connection parameters")
+    setup_act.add_argument("--attest-isolation", action="store_true", help="Explicit manual operator isolation attestation workflow")
     setup_act.add_argument("--ai", action="store_true", help="Configure AI provider (local Ollama, cloud, or mock)")
     setup_act.add_argument("--verify", action="store_true", help="Run post-setup validation checks")
     p_setup.add_argument("--dry-run", action="store_true", help="Show proposed changes without writing .env or files")
     p_setup.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
     p_setup.add_argument("--url", type=str, help="API URL (for CAPE or AI)")
     p_setup.add_argument("--token", type=str, help="API Bearer Token (for CAPE)")
-    p_setup.add_argument("--machine", type=str, help="CAPE guest VM machine name (default: win10_malbox)")
-    p_setup.add_argument("--route", type=str, help="CAPE network route (default: host-only)")
+    p_setup.add_argument("--machine", type=str, help="CAPE guest VM machine name (default: win10_analyst)")
+    p_setup.add_argument("--route", type=str, help="CAPE network route (default: drop)")
+    p_setup.add_argument("--operator", type=str, help="Operator name for isolation attestation")
+    p_setup.add_argument("--evidence-refs", type=str, help="Comma-separated evidence references (e.g. pcap:no-leak,iptables:drop-verified)")
+    p_setup.add_argument("--notes", type=str, help="Operator notes for attestation")
     p_setup.add_argument("--provider", type=str, help="AI provider name (local, ollama, openai, mock)")
     p_setup.add_argument("--api-key", type=str, help="AI API Key")
     p_setup.add_argument("--model", type=str, help="AI model name")
@@ -367,7 +371,7 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
         return int(res["exit_code"])
 
     if args.command == "setup":
-        from .setup import setup_ai, setup_cape, setup_check, setup_ghidra, setup_plan, setup_verify
+        from .setup import setup_ai, setup_attest_isolation, setup_cape, setup_check, setup_ghidra, setup_plan, setup_verify
 
         if args.plan:
             res = setup_plan(repo_root)
@@ -380,6 +384,17 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
                 api_token=args.token,
                 machine=args.machine,
                 route=args.route,
+                dry_run=args.dry_run,
+            )
+        elif args.attest_isolation:
+            refs = [r.strip() for r in (args.evidence_refs or "").split(",") if r.strip()]
+            res = setup_attest_isolation(
+                repo_root,
+                operator=args.operator,
+                machine=args.machine,
+                route=args.route,
+                evidence_refs=refs,
+                notes=args.notes,
                 dry_run=args.dry_run,
             )
         elif args.ai:

@@ -103,49 +103,40 @@ def test_cape_confinement_attestation_insecure_permissions(isolated_workspace: P
 
 
 def test_cape_confinement_attestation_mismatched_target(isolated_workspace: Path):
+    from app.services.sandbox.confinement import create_isolation_attestation
     att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
-    att_data = {
-        "machine": "other_machine",
-        "route": "host-only",
-        "attestation_expires_at": int(time.time() + 3600),
-        "manual_operator_assertions": {
-            "host_only_networking_verified": True,
-            "default_route_blocked": True,
-            "firewall_rules_verified": True,
-            "guest_snapshot_clean": True,
-        },
-    }
-    att_file.write_text(json.dumps(att_data), encoding="utf-8")
-    att_file.chmod(0o600)
+    create_isolation_attestation(
+        verified_machine="other_machine",
+        verified_route="drop",
+        verifier="test_op",
+        attestation_path=att_file,
+        evidence_references=["pcap:test_evidence"],
+    )
 
     res = check_cape_confinement_attestation(
         isolated_workspace,
-        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_MACHINE": "win10_malbox"},
+        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_DEFAULT_MACHINE": "win10_analyst", "MALBOX_CAPE_DEFAULT_NETWORK_ROUTE": "drop"},
     )
     assert res.status == CheckStatus.FAIL
     assert res.readiness_tier == "BLOCKED"
-    assert "mismatch" in res.summary.lower()
+    assert "mismatch" in res.summary.lower() or "rejected" in res.summary.lower()
 
 
 def test_cape_confinement_attestation_expired(isolated_workspace: Path):
+    from app.services.sandbox.confinement import create_isolation_attestation
     att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
-    att_data = {
-        "machine": "win10_malbox",
-        "route": "host-only",
-        "attestation_expires_at": int(time.time() - 3600),  # expired
-        "manual_operator_assertions": {
-            "host_only_networking_verified": True,
-            "default_route_blocked": True,
-            "firewall_rules_verified": True,
-            "guest_snapshot_clean": True,
-        },
-    }
-    att_file.write_text(json.dumps(att_data), encoding="utf-8")
-    att_file.chmod(0o600)
+    create_isolation_attestation(
+        verified_machine="win10_analyst",
+        verified_route="drop",
+        verifier="test_op",
+        validity_seconds=-10,  # Expired immediately
+        attestation_path=att_file,
+        evidence_references=["pcap:test_evidence"],
+    )
 
     res = check_cape_confinement_attestation(
         isolated_workspace,
-        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_MACHINE": "win10_malbox", "MALBOX_CAPE_ROUTE": "host-only"},
+        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_DEFAULT_MACHINE": "win10_analyst", "MALBOX_CAPE_DEFAULT_NETWORK_ROUTE": "drop"},
     )
     assert res.status == CheckStatus.FAIL
     assert res.readiness_tier == "BLOCKED"
@@ -154,53 +145,151 @@ def test_cape_confinement_attestation_expired(isolated_workspace: Path):
 
 def test_cape_confinement_attestation_unverified_assertions(isolated_workspace: Path):
     att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
-    att_data = {
-        "machine": "win10_malbox",
-        "route": "host-only",
-        "attestation_expires_at": int(time.time() + 3600),
-        "manual_operator_assertions": {
+    now_iso = datetime.now(timezone.utc).isoformat()
+    future_iso = datetime.fromtimestamp(time.time() + 3600, tz=timezone.utc).isoformat()
+    payload = {
+        "schema_version": "1.0",
+        "attestation_type": "manual_operator_assertion",
+        "status": "verified",
+        "verified_machine": "win10_analyst",
+        "verified_route": "drop",
+        "verifier": "test_op",
+        "verified_at": now_iso,
+        "expires_at": future_iso,
+        "evidence_references": ["pcap:test_evidence"],
+        "operator_assertions": {
             "host_only_networking_verified": True,
-            "default_route_blocked": False,  # unverified!
+            "routing_isolation_verified": False,  # Missing!
             "firewall_rules_verified": True,
-            "guest_snapshot_clean": True,
+            "guest_snapshot_clean_verified": True,
         },
     }
-    att_file.write_text(json.dumps(att_data), encoding="utf-8")
+    att_file.write_text(json.dumps(payload), encoding="utf-8")
     att_file.chmod(0o600)
 
     res = check_cape_confinement_attestation(
         isolated_workspace,
-        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_MACHINE": "win10_malbox", "MALBOX_CAPE_ROUTE": "host-only"},
+        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_DEFAULT_MACHINE": "win10_analyst", "MALBOX_CAPE_DEFAULT_NETWORK_ROUTE": "drop"},
     )
     assert res.status == CheckStatus.FAIL
     assert res.readiness_tier == "BLOCKED"
-    assert "unverified" in res.summary.lower()
+    assert "missing" in res.summary.lower() or "rejected" in res.summary.lower()
 
 
 def test_cape_confinement_attestation_verified(isolated_workspace: Path):
+    from app.services.sandbox.confinement import create_isolation_attestation, verify_cape_confinement
     att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
-    att_data = {
-        "machine": "win10_malbox",
-        "route": "host-only",
-        "attestation_expires_at": int(time.time() + 86400 * 10),
-        "manual_operator_assertions": {
-            "host_only_networking_verified": True,
-            "default_route_blocked": True,
-            "firewall_rules_verified": True,
-            "guest_snapshot_clean": True,
-        },
-        "verifier": "test_operator",
-    }
-    att_file.write_text(json.dumps(att_data), encoding="utf-8")
-    att_file.chmod(0o600)
+    create_isolation_attestation(
+        verified_machine="win10_analyst",
+        verified_route="drop",
+        verifier="test_operator",
+        attestation_path=att_file,
+        evidence_references=["pcap:zero_egress_test", "iptables:drop_rule_checked"],
+    )
 
     res = check_cape_confinement_attestation(
         isolated_workspace,
-        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_MACHINE": "win10_malbox", "MALBOX_CAPE_ROUTE": "host-only"},
+        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_DEFAULT_MACHINE": "win10_analyst", "MALBOX_CAPE_DEFAULT_NETWORK_ROUTE": "drop"},
     )
     assert res.status == CheckStatus.PASS
     assert res.readiness_tier == "VERIFIED"
     assert "verified" in res.summary.lower()
+
+    # Verify runtime verifier agrees identically
+    runtime_res = verify_cape_confinement(
+        target_machine="win10_analyst",
+        target_route="drop",
+        attestation_path=att_file,
+    )
+    assert runtime_res.is_verified is True
+    assert runtime_res.status == "verified"
+
+
+def test_unsupported_host_only_route_rejected(isolated_workspace: Path):
+    """Host-only is an adapter name, not a valid CAPE execution routing policy."""
+    from app.services.sandbox.confinement import verify_cape_confinement
+    att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    future_iso = datetime.fromtimestamp(time.time() + 3600, tz=timezone.utc).isoformat()
+    payload = {
+        "schema_version": "1.0",
+        "attestation_type": "manual_operator_assertion",
+        "status": "verified",
+        "verified_machine": "win10_analyst",
+        "verified_route": "host-only",  # Invalid route!
+        "verifier": "test_op",
+        "verified_at": now_iso,
+        "expires_at": future_iso,
+        "evidence_references": ["pcap:test"],
+        "operator_assertions": {
+            "host_only_networking_verified": True,
+            "routing_isolation_verified": True,
+            "firewall_rules_verified": True,
+            "guest_snapshot_clean_verified": True,
+        },
+    }
+    att_file.write_text(json.dumps(payload), encoding="utf-8")
+    att_file.chmod(0o600)
+
+    # Doctor must reject
+    doc_res = check_cape_confinement_attestation(
+        isolated_workspace,
+        environ={"MALBOX_LIVE_MODE_ENABLED": "true", "MALBOX_CAPE_DEFAULT_MACHINE": "win10_analyst", "MALBOX_CAPE_DEFAULT_NETWORK_ROUTE": "host-only"},
+    )
+    assert doc_res.status == CheckStatus.FAIL
+    assert doc_res.readiness_tier == "BLOCKED"
+
+    # Runtime must reject identically
+    rt_res = verify_cape_confinement(
+        target_machine="win10_analyst",
+        target_route="host-only",
+        attestation_path=att_file,
+    )
+    assert rt_res.is_verified is False
+    assert rt_res.status == "unconfined_route"
+
+
+def test_setup_cape_default_never_creates_attestation(isolated_workspace: Path):
+    """setup_cape() must never automatically generate an isolation attestation."""
+    res = setup_cape(
+        isolated_workspace,
+        api_url="http://127.0.0.1:8008",
+        machine="win10_analyst",
+        route="drop",
+        generate_attestation=False,  # Default
+    )
+    assert res["success"] is True
+    assert res["attestation"] is None
+    att_file = isolated_workspace / "data" / "cape_isolation_attestation.json"
+    assert not att_file.exists()
+
+
+def test_setup_attest_isolation_requires_operator_and_evidence(isolated_workspace: Path):
+    """Explicit operator isolation workflow requires operator name and evidence references."""
+    from malbox_cli.setup import setup_attest_isolation
+
+    # Missing operator
+    bad_op = setup_attest_isolation(isolated_workspace, operator="", evidence_refs=["pcap:test"])
+    assert bad_op["success"] is False
+    assert "operator" in bad_op["error"].lower()
+
+    # Missing evidence references
+    bad_refs = setup_attest_isolation(isolated_workspace, operator="analyst", evidence_refs=[])
+    assert bad_refs["success"] is False
+    assert "evidence" in bad_refs["error"].lower()
+
+    # Valid attestation workflow
+    ok_att = setup_attest_isolation(
+        isolated_workspace,
+        operator="lead_analyst",
+        machine="win10_analyst",
+        route="drop",
+        evidence_refs=["iptables:drop_rules_verified", "wireshark:zero_egress_test"],
+        notes="Verified in lab VLAN",
+    )
+    assert ok_att["success"] is True
+    assert ok_att["verified"] is True
+    assert Path(ok_att["attestation_path"]).is_file()
 
 
 # ==============================================================================
@@ -224,18 +313,28 @@ def test_setup_ghidra_and_cape_and_ai(isolated_workspace: Path):
     assert "MALBOX_GHIDRA_ENABLED=true" in env_content
     assert "MALBOX_GHIDRA_HOME=/opt/ghidra" in env_content
 
-    # CAPE setup
+    # CAPE setup (does not auto-generate attestation)
     c_res = setup_cape(
         isolated_workspace,
         api_url="http://127.0.0.1:8008",
         api_token="test_cape_token",
         machine="win10_test",
-        route="host-only",
-        generate_attestation=True,
+        route="drop",
     )
     assert c_res["success"] is True
-    assert c_res["attestation"] is not None
-    assert Path(c_res["attestation"]["path"]).is_file()
+    assert c_res["attestation"] is None
+
+    # Separate operator isolation attestation workflow
+    from malbox_cli.setup import setup_attest_isolation
+    att_res = setup_attest_isolation(
+        isolated_workspace,
+        operator="lead_analyst",
+        machine="win10_test",
+        route="drop",
+        evidence_refs=["pcap:zero_leak"],
+    )
+    assert att_res["success"] is True
+    assert Path(att_res["attestation_path"]).is_file()
 
     # AI setup (local/ollama)
     ai_res = setup_ai(

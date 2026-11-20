@@ -119,6 +119,18 @@ class Settings(BaseSettings):
     CAPE_DEFAULT_MACHINE: str = "win10_analyst"
     CAPE_DEFAULT_NETWORK_ROUTE: str = "drop"
     CAPE_ISOLATION_ATTESTATION_PATH: Optional[str] = None
+    # Backward compatibility aliases for legacy env keys
+    CAPE_MACHINE: Optional[str] = None
+    CAPE_ROUTE: Optional[str] = None
+    CAPE_ATTESTATION_PATH: Optional[str] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.CAPE_MACHINE and self.CAPE_DEFAULT_MACHINE == "win10_analyst":
+            self.CAPE_DEFAULT_MACHINE = self.CAPE_MACHINE
+        if self.CAPE_ROUTE and self.CAPE_DEFAULT_NETWORK_ROUTE == "drop":
+            self.CAPE_DEFAULT_NETWORK_ROUTE = self.CAPE_ROUTE
+        if self.CAPE_ATTESTATION_PATH and not self.CAPE_ISOLATION_ATTESTATION_PATH:
+            self.CAPE_ISOLATION_ATTESTATION_PATH = self.CAPE_ATTESTATION_PATH
 
     def get_database_url(self) -> str:
         if self.DATABASE_URL:

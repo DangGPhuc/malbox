@@ -203,67 +203,171 @@ def setup_cape(
     api_token: Optional[str] = None,
     machine: Optional[str] = None,
     route: Optional[str] = None,
-    generate_attestation: bool = True,
+    generate_attestation: bool = False,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
-    Configures CAPE connection parameters and generates an auditable isolation attestation.
+    Configures CAPE connection parameters without automatically claiming network isolation.
+    Live detonation remains blocked until explicit manual operator attestation is completed.
     """
     url = api_url or "http://127.0.0.1:8008"
-    mach = machine or "win10_malbox"
-    rt = route or "host-only"
+    mach = machine or "win10_analyst"
+    rt = (route or "drop").strip().lower()
 
     updates = {
         "MALBOX_LIVE_MODE_ENABLED": "true",
         "MALBOX_DEFAULT_SANDBOX_BACKEND": "cape",
         "MALBOX_CAPE_API_URL": url,
-        "MALBOX_CAPE_MACHINE": mach,
-        "MALBOX_CAPE_ROUTE": rt,
+        "MALBOX_CAPE_DEFAULT_MACHINE": mach,
+        "MALBOX_CAPE_DEFAULT_NETWORK_ROUTE": rt,
     }
     if api_token:
         updates["MALBOX_CAPE_API_TOKEN"] = api_token
 
     ok, backup = update_env_values(root_dir, updates, dry_run=dry_run)
 
-    attestation_info = None
-    if generate_attestation and not dry_run:
-        data_dir = root_dir / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        chmod_safe(data_dir, 0o700)
-
-        att_path = data_dir / "cape_isolation_attestation.json"
-        now = time.time()
-        att_data = {
-            "schema_version": "1.0",
-            "attestation_timestamp": int(now),
-            "attestation_expires_at": int(now + 86400 * 30),  # 30 days valid
-            "machine": mach,
-            "route": rt,
-            "verifier": "operator-setup-assistant",
-            "manual_operator_assertions": {
-                "host_only_networking_verified": True,
-                "default_route_blocked": True,
-                "firewall_rules_verified": True,
-                "guest_snapshot_clean": True,
-            },
-            "operator_notes": "Configured via ./malbox setup --cape assistant. Host-only confinement verified.",
-        }
-        att_path.write_text(json.dumps(att_data, indent=2) + "\n", encoding="utf-8")
-        chmod_safe(att_path, 0o600)
-        attestation_info = {
-            "path": str(att_path),
-            "permissions": "0600",
-            "machine": mach,
-            "route": rt,
-            "expires_in_days": 30,
-        }
-
     return {
         "success": ok,
         "dry_run": dry_run,
         "backup_file": str(backup) if backup else None,
         "configured_values": updates,
-        "attestation": attestation_info,
+        "attestation": None,
+        "notice": (
+            "CAPE connection parameters configured in .env. Live detonation remains BLOCKED "
+            "until explicit manual isolation verification is performed. Run "
+            "`./malbox setup --attest-isolation --operator <name> --evidence-refs <refs>` to authorize execution."
+        ),
+    }
+
+
+def setup_attest_isolation(
+    root_dir: Path,
+    operator: Optional[str] = None,
+    machine: Optional[str] = None,
+    route: Optional[str] = None,
+    evidence_refs: Optional[List[str]] = None,
+    notes: Optional[str] = None,
+    assertions: Optional[Dict[str, bool]] = None,
+    validity_days: int = 30,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Explicit, separate operator workflow to certify VM network isolation.
+    Requires operator identity, non-empty evidence references, and all 4 isolation assertions.
+    """
+    config = resolve_effective_config(root_dir)
+    mach = (
+        machine
+        or config.get("MALBOX_CAPE_DEFAULT_MACHINE")
+        or config.get("MALBOX_CAPE_MACHINE")
+        or "win10_analyst"
+    ).strip()
+    rt = (
+        route
+        or config.get("MALBOX_CAPE_DEFAULT_NETWORK_ROUTE")
+        or config.get("MALBOX_CAPE_ROUTE")
+        or "drop"
+    ).strip().lower()
+
+    op = (operator or "").strip()
+    if not op or op == "*":
+        return {
+            "success": False,
+            "error": "Operator identity (--operator) is mandatory for isolation attestation; wildcard '*' or empty is prohibited.",
+        }
+
+    raw_refs = evidence_refs or []
+    cleaned_refs = [str(r).strip() for r in raw_refs if str(r).strip()]
+    if not cleaned_refs:
+        return {
+            "success": False,
+            "error": (
+                "At least one auditable evidence reference (--evidence-refs) is required "
+                "(e.g. 'iptables:host_only_drop_rules,wireshark:zero_egress_test')."
+            ),
+        }
+
+    import sys
+    backend_path = str(root_dir / "backend")
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+    from app.services.sandbox.confinement import (
+        SAFE_ISOLATED_ROUTES,
+        REQUIRED_OPERATOR_ASSERTIONS,
+        create_isolation_attestation,
+        verify_cape_confinement,
+    )
+
+    if rt not in SAFE_ISOLATED_ROUTES:
+        return {
+            "success": False,
+            "error": f"Route '{rt}' is not an approved safe isolated route: {sorted(SAFE_ISOLATED_ROUTES)}.",
+        }
+
+    op_assertions = assertions or {
+        "host_only_networking_verified": True,
+        "routing_isolation_verified": True,
+        "firewall_rules_verified": True,
+        "guest_snapshot_clean_verified": True,
+    }
+    missing = [k for k in REQUIRED_OPERATOR_ASSERTIONS if not op_assertions.get(k)]
+    if missing:
+        return {
+            "success": False,
+            "error": f"Missing mandatory operator assertions: {missing}",
+        }
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "operator": op,
+            "machine": mach,
+            "route": rt,
+            "evidence_references": cleaned_refs,
+            "assertions": op_assertions,
+            "validity_days": validity_days,
+        }
+
+    data_dir = root_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    chmod_safe(data_dir, 0o700)
+
+    att_path = data_dir / "cape_isolation_attestation.json"
+    created_path = create_isolation_attestation(
+        verified_machine=mach,
+        verified_route=rt,
+        verifier=op,
+        validity_seconds=86400 * validity_days,
+        attestation_path=att_path,
+        operator_assertions=op_assertions,
+        evidence_references=cleaned_refs,
+        operator_notes=notes,
+    )
+
+    verify_res = verify_cape_confinement(
+        target_machine=mach,
+        target_route=rt,
+        attestation_path=created_path,
+    )
+
+    if not verify_res.is_verified:
+        return {
+            "success": False,
+            "error": f"Attestation generation completed but failed verification: {verify_res.error}",
+            "attestation_path": str(created_path),
+        }
+
+    return {
+        "success": True,
+        "dry_run": False,
+        "attestation_path": str(created_path),
+        "machine": mach,
+        "route": rt,
+        "operator": op,
+        "expires_at": verify_res.expires_at,
+        "evidence_references": cleaned_refs,
+        "verified": True,
     }
 
 

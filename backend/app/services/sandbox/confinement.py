@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
-from app.core.config import settings
+try:
+    from app.core.config import settings
+except ImportError:
+    settings = None
 
 SAFE_ISOLATED_ROUTES: Set[str] = {"drop", "none", "isolated"}
 
@@ -29,6 +32,8 @@ class ConfinementVerificationResult:
     expires_at: Optional[str] = None
     verifier: Optional[str] = None
     operator_assertions: Optional[Dict[str, bool]] = None
+    evidence_references: Optional[List[str]] = None
+    operator_notes: Optional[str] = None
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -41,25 +46,36 @@ class ConfinementVerificationResult:
             "expires_at": self.expires_at,
             "verifier": self.verifier,
             "operator_assertions": self.operator_assertions,
+            "evidence_references": self.evidence_references,
+            "operator_notes": self.operator_notes,
             "error": self.error,
         }
 
 
 def get_attestation_path() -> Path:
     """Returns the path to the operator-managed CAPE isolation attestation file."""
-    custom_path = getattr(settings, "CAPE_ISOLATION_ATTESTATION_PATH", None)
-    if custom_path:
-        return Path(custom_path).resolve()
-    return (settings.DATA_DIR / "cape_isolation_attestation.json").resolve()
+    if settings is not None:
+        custom_path = getattr(settings, "CAPE_ISOLATION_ATTESTATION_PATH", None) or getattr(settings, "CAPE_ATTESTATION_PATH", None)
+        if custom_path:
+            return Path(custom_path).resolve()
+        data_dir = getattr(settings, "DATA_DIR", None)
+        if data_dir:
+            return (Path(data_dir) / "cape_isolation_attestation.json").resolve()
+    env_custom = os.environ.get("MALBOX_CAPE_ISOLATION_ATTESTATION_PATH") or os.environ.get("MALBOX_CAPE_ATTESTATION_PATH")
+    if env_custom:
+        return Path(env_custom).resolve()
+    return Path("./data/cape_isolation_attestation.json").resolve()
 
 
 def create_isolation_attestation(
     verified_machine: str,
     verified_route: str,
     verifier: str = "operator",
-    validity_seconds: int = 86400,
+    validity_seconds: int = 86400 * 30,
     attestation_path: Optional[Path] = None,
     operator_assertions: Optional[Dict[str, bool]] = None,
+    evidence_references: Optional[List[str]] = None,
+    operator_notes: Optional[str] = None,
 ) -> Path:
     """
     Creates or updates an operator-managed manual isolation attestation file.
@@ -68,6 +84,8 @@ def create_isolation_attestation(
     2. Exact route is provided (wildcards '*' or empty are strictly rejected).
     3. Designated route is in SAFE_ISOLATED_ROUTES.
     4. Mandatory manual operator assertions are explicitly certified.
+    5. Non-empty evidence references are supplied.
+    6. Verifier identity is non-empty.
     """
     target_machine = (verified_machine or "").strip()
     if not target_machine or target_machine == "*":
@@ -82,6 +100,19 @@ def create_isolation_attestation(
             f"Cannot attest unconfined route '{verified_route}'. Route must be one of: {sorted(SAFE_ISOLATED_ROUTES)}"
         )
 
+    ver = (verifier or "").strip()
+    if not ver or ver == "*":
+        raise ValueError("Cannot attest wildcard '*' or empty verifier; exact operator identity is required.")
+
+    if evidence_references is None:
+        refs = ["operator:manual_isolation_audit"]
+    elif isinstance(evidence_references, list) and len(evidence_references) > 0:
+        refs = [str(r).strip() for r in evidence_references if str(r).strip()]
+        if not refs:
+            raise ValueError("Evidence references must contain at least one non-empty reference string.")
+    else:
+        raise ValueError("Evidence references must be a non-empty list of string references.")
+
     assertions = operator_assertions or {
         "host_only_networking_verified": True,
         "routing_isolation_verified": True,
@@ -93,17 +124,20 @@ def create_isolation_attestation(
         raise ValueError(f"Missing mandatory operator assertions: {missing_or_false}")
 
     now = datetime.now(timezone.utc)
-    expires = datetime.fromtimestamp(now.timestamp() + max(60, validity_seconds), tz=timezone.utc)
+    expires = datetime.fromtimestamp(now.timestamp() + validity_seconds, tz=timezone.utc)
 
     payload = {
+        "schema_version": "1.0",
         "attestation_type": "manual_operator_assertion",
         "status": "verified",
         "verified_machine": target_machine,
         "verified_route": target_route,
-        "verifier": verifier.strip(),
+        "verifier": ver,
         "verified_at": now.isoformat(),
         "expires_at": expires.isoformat(),
         "operator_assertions": assertions,
+        "evidence_references": refs,
+        "operator_notes": (operator_notes or "").strip(),
         "assertion_statement": (
             "Auditable manual operator assertion: Independent operator verification that host-only "
             "networking, routing isolation, firewall rules, and guest snapshot are clean and isolated. "
@@ -151,7 +185,7 @@ def verify_cape_confinement(
             return ConfinementVerificationResult(
                 is_verified=False,
                 status="untrusted_attestation_file",
-                error=f"CAPE isolation attestation file '{path}' has unsafe permissions ({oct(st_mode)}); group/world writable files are rejected.",
+                error=f"CAPE isolation attestation file '{path}' has insecure/unsafe permissions ({oct(st_mode)}); group/world writable files are rejected.",
             )
     except OSError:
         pass
@@ -227,6 +261,21 @@ def verify_cape_confinement(
             is_verified=False,
             status="missing_operator_assertions",
             error=f"CAPE isolation attestation is missing mandatory operator certifications: {sorted(missing_assertions)}.",
+        )
+
+    # Validate non-empty evidence references
+    evidence_refs = data.get("evidence_references")
+    if not isinstance(evidence_refs, list) or len(evidence_refs) == 0:
+        return ConfinementVerificationResult(
+            is_verified=False,
+            status="missing_isolation_evidence",
+            verified_machine=data.get("verified_machine"),
+            verified_route=data.get("verified_route"),
+            verified_at=data.get("verified_at"),
+            expires_at=expires_at_str,
+            verifier=data.get("verifier"),
+            operator_assertions=assertions,
+            error="CAPE isolation attestation lacks mandatory non-empty 'evidence_references' list.",
         )
 
     att_machine = str(data.get("verified_machine", "")).strip()
@@ -330,5 +379,7 @@ def verify_cape_confinement(
         expires_at=expires_at_str,
         verifier=data.get("verifier"),
         operator_assertions=assertions,
+        evidence_references=evidence_refs,
+        operator_notes=data.get("operator_notes"),
         error=None,
     )
