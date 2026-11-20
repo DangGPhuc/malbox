@@ -21,6 +21,53 @@ REQUIRED_OPERATOR_ASSERTIONS: Set[str] = {
     "guest_snapshot_clean_verified",
 }
 
+STANDARD_VALID_ASSERTIONS: Dict[str, bool] = {
+    "host_only_networking_verified": True,
+    "routing_isolation_verified": True,
+    "firewall_rules_verified": True,
+    "guest_snapshot_clean_verified": True,
+}
+
+INVALID_OR_PLACEHOLDER_EVIDENCE: Set[str] = {
+    "test",
+    "testing",
+    "none",
+    "null",
+    "placeholder",
+    "na",
+    "n/a",
+    "sample",
+    "dummy",
+    "todo",
+    "unknown",
+    "arbitrary",
+    "undefined",
+    "empty",
+    "default",
+    "example",
+    "xxx",
+    "yyy",
+    "zzz",
+    "foo",
+    "bar",
+    "baz",
+}
+
+
+def is_valid_evidence_reference(ref: str) -> bool:
+    """Validates that an operator evidence reference is non-empty and non-placeholder."""
+    if not isinstance(ref, str):
+        return False
+    cleaned = ref.strip().lower()
+    if len(cleaned) < 5:
+        return False
+    if cleaned in INVALID_OR_PLACEHOLDER_EVIDENCE:
+        return False
+    alnum_only = "".join(c for c in cleaned if c.isalnum())
+    if not alnum_only or alnum_only in INVALID_OR_PLACEHOLDER_EVIDENCE:
+        return False
+    return True
+
 
 @dataclass
 class ConfinementVerificationResult:
@@ -104,24 +151,31 @@ def create_isolation_attestation(
     if not ver or ver == "*":
         raise ValueError("Cannot attest wildcard '*' or empty verifier; exact operator identity is required.")
 
-    if evidence_references is None:
-        refs = ["operator:manual_isolation_audit"]
-    elif isinstance(evidence_references, list) and len(evidence_references) > 0:
-        refs = [str(r).strip() for r in evidence_references if str(r).strip()]
-        if not refs:
-            raise ValueError("Evidence references must contain at least one non-empty reference string.")
-    else:
+    if evidence_references is None or not isinstance(evidence_references, list) or len(evidence_references) == 0:
         raise ValueError("Evidence references must be a non-empty list of string references.")
 
-    assertions = operator_assertions or {
-        "host_only_networking_verified": True,
-        "routing_isolation_verified": True,
-        "firewall_rules_verified": True,
-        "guest_snapshot_clean_verified": True,
-    }
-    missing_or_false = [k for k in REQUIRED_OPERATOR_ASSERTIONS if not assertions.get(k)]
+    refs = []
+    for r in evidence_references:
+        r_str = str(r).strip()
+        if not is_valid_evidence_reference(r_str):
+            raise ValueError(
+                f"Invalid or placeholder evidence reference '{r_str}'. Real auditable verification evidence is required (e.g. 'iptables:host_only_drop_rules', 'pcap:zero_egress_test')."
+            )
+        refs.append(r_str)
+
+    if operator_assertions is None or not isinstance(operator_assertions, dict):
+        raise ValueError(
+            "Explicit operator_assertions dictionary is required; automatic certification defaults are prohibited."
+        )
+
+    # Normalize aliases if provided
+    assertions = dict(operator_assertions)
+    if "default_route_blocked" in assertions and "routing_isolation_verified" not in assertions:
+        assertions["routing_isolation_verified"] = assertions["default_route_blocked"]
+
+    missing_or_false = [k for k in REQUIRED_OPERATOR_ASSERTIONS if assertions.get(k) is not True]
     if missing_or_false:
-        raise ValueError(f"Missing mandatory operator assertions: {missing_or_false}")
+        raise ValueError(f"Missing mandatory operator assertions: {sorted(missing_or_false)}")
 
     now = datetime.now(timezone.utc)
     expires = datetime.fromtimestamp(now.timestamp() + validity_seconds, tz=timezone.utc)
@@ -263,7 +317,7 @@ def verify_cape_confinement(
             error=f"CAPE isolation attestation is missing mandatory operator certifications: {sorted(missing_assertions)}.",
         )
 
-    # Validate non-empty evidence references
+    # Validate non-empty evidence references and reject placeholder references
     evidence_refs = data.get("evidence_references")
     if not isinstance(evidence_refs, list) or len(evidence_refs) == 0:
         return ConfinementVerificationResult(
@@ -277,6 +331,20 @@ def verify_cape_confinement(
             operator_assertions=assertions,
             error="CAPE isolation attestation lacks mandatory non-empty 'evidence_references' list.",
         )
+
+    for ref_item in evidence_refs:
+        if not is_valid_evidence_reference(str(ref_item)):
+            return ConfinementVerificationResult(
+                is_verified=False,
+                status="invalid_evidence_reference",
+                verified_machine=data.get("verified_machine"),
+                verified_route=data.get("verified_route"),
+                verified_at=data.get("verified_at"),
+                expires_at=expires_at_str,
+                verifier=data.get("verifier"),
+                operator_assertions=assertions,
+                error=f"Attestation contains placeholder or invalid evidence reference '{ref_item}'. Real auditable evidence is required.",
+            )
 
     att_machine = str(data.get("verified_machine", "")).strip()
     att_route = str(data.get("verified_route", "")).strip().lower()

@@ -288,6 +288,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--operator", type=str, help="Operator name for isolation attestation")
     p_setup.add_argument("--evidence-refs", type=str, help="Comma-separated evidence references (e.g. pcap:no-leak,iptables:drop-verified)")
     p_setup.add_argument("--notes", type=str, help="Operator notes for attestation")
+    p_setup.add_argument("--assert-all-invariants", action="store_true", help="Affirm all 4 isolation invariants (host-only net, routing isolation, firewall rules, guest snapshot clean)")
+    p_setup.add_argument("--assert-host-only", action="store_true", help="Affirm host-only networking verified")
+    p_setup.add_argument("--assert-routing-isolation", "--assert-default-route-blocked", dest="assert_routing_isolation", action="store_true", help="Affirm routing isolation verified")
+    p_setup.add_argument("--assert-firewall-rules", action="store_true", help="Affirm firewall drop rules verified")
+    p_setup.add_argument("--assert-clean-snapshot", action="store_true", help="Affirm guest snapshot clean verified")
     p_setup.add_argument("--provider", type=str, help="AI provider name (local, ollama, openai, mock)")
     p_setup.add_argument("--api-key", type=str, help="AI API Key")
     p_setup.add_argument("--model", type=str, help="AI model name")
@@ -421,6 +426,26 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
             )
         elif args.attest_isolation:
             refs = [r.strip() for r in (args.evidence_refs or "").split(",") if r.strip()]
+            assertions = None
+            if getattr(args, "assert_all_invariants", False):
+                assertions = {
+                    "host_only_networking_verified": True,
+                    "routing_isolation_verified": True,
+                    "firewall_rules_verified": True,
+                    "guest_snapshot_clean_verified": True,
+                }
+            elif any([
+                getattr(args, "assert_host_only", False),
+                getattr(args, "assert_routing_isolation", False),
+                getattr(args, "assert_firewall_rules", False),
+                getattr(args, "assert_clean_snapshot", False),
+            ]):
+                assertions = {
+                    "host_only_networking_verified": bool(getattr(args, "assert_host_only", False)),
+                    "routing_isolation_verified": bool(getattr(args, "assert_routing_isolation", False)),
+                    "firewall_rules_verified": bool(getattr(args, "assert_firewall_rules", False)),
+                    "guest_snapshot_clean_verified": bool(getattr(args, "assert_clean_snapshot", False)),
+                }
             res = setup_attest_isolation(
                 repo_root,
                 operator=args.operator,
@@ -428,6 +453,7 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
                 route=args.route,
                 evidence_refs=refs,
                 notes=args.notes,
+                assertions=assertions,
                 dry_run=args.dry_run,
             )
         elif args.ai:

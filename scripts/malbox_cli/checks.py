@@ -1043,15 +1043,23 @@ def check_cape_confinement_attestation(
             id="cape_attestation",
             name="CAPE Confinement Attestation",
             status=CheckStatus.PASS,
-            summary=f"CAPE isolation verified for machine '{expected_machine}' on route '{expected_route}' (valid for {hours_left:.1f}h).",
+            summary=(
+                f"[MANUAL_OPERATOR_ASSERTION] Operator '{res.verifier}' verified confinement for "
+                f"machine '{expected_machine}' (route: {expected_route}, valid for {hours_left:.1f}h). "
+                f"Note: auditable manual operator assertion, not automated network probe."
+            ),
             readiness_tier="VERIFIED",
             details={
+                "verification_type": "manual_operator_assertion",
+                "automated_network_verification": False,
+                "manual_operator_certified": True,
                 "attestation_path": str(att_path),
                 "machine": expected_machine,
                 "route": expected_route,
                 "verifier": res.verifier,
                 "hours_remaining": round(hours_left, 1),
                 "evidence_references": res.evidence_references,
+                "operator_assertions": res.operator_assertions,
             },
         )
 

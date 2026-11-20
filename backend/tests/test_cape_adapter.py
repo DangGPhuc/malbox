@@ -13,8 +13,13 @@ def test_cape_readiness_failure(monkeypatch):
 
 def test_cape_readiness_mocked(monkeypatch):
     """Verifies CAPE readiness parsing when API responds with 200, machine metadata, and verified confinement."""
-    from app.services.sandbox.confinement import create_isolation_attestation
-    create_isolation_attestation(verified_machine="win10_analyst", verified_route="drop")
+    from app.services.sandbox.confinement import create_isolation_attestation, STANDARD_VALID_ASSERTIONS
+    create_isolation_attestation(
+        verified_machine="win10_analyst",
+        verified_route="drop",
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+    )
 
     backend = CapeSandboxBackend(api_url="http://mock-cape.local")
 
@@ -680,8 +685,13 @@ def test_cape_pipeline_worker_e2e_regression_mocked_http(client, monkeypatch, tm
     monkeypatch.setattr(httpx.Client, "post", mock_post)
     monkeypatch.setattr(httpx.Client, "get", mock_get)
 
-    from app.services.sandbox.confinement import create_isolation_attestation
-    create_isolation_attestation(verified_machine="win10_analyst", verified_route="drop")
+    from app.services.sandbox.confinement import create_isolation_attestation, STANDARD_VALID_ASSERTIONS
+    create_isolation_attestation(
+        verified_machine="win10_analyst",
+        verified_route="drop",
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+    )
 
     # 2. Trigger synchronous analysis creation through API
     payload = {

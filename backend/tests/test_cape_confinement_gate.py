@@ -12,6 +12,7 @@ from app.services.sandbox.confinement import (
     create_isolation_attestation,
     verify_cape_confinement,
     get_attestation_path,
+    STANDARD_VALID_ASSERTIONS,
 )
 from app.models.analysis import Analysis, AnalysisStatus, SandboxBackendType
 from app.models.sample import Sample
@@ -38,7 +39,13 @@ def test_missing_machine_metadata_fails_closed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(httpx.Client, "get", lambda *args, **kwargs: MockResponse())
     att_file = tmp_path / "test_att.json"
-    create_isolation_attestation("win10_analyst", "drop", attestation_path=att_file)
+    create_isolation_attestation(
+        "win10_analyst",
+        "drop",
+        attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+    )
     monkeypatch.setattr("app.services.sandbox.confinement.get_attestation_path", lambda: att_file)
 
     res = backend.check_readiness()
@@ -66,7 +73,13 @@ def test_zero_available_guests_fails_closed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(httpx.Client, "get", lambda *args, **kwargs: MockResponseZeroTotal())
     att_file = tmp_path / "test_att.json"
-    create_isolation_attestation("win10_analyst", "drop", attestation_path=att_file)
+    create_isolation_attestation(
+        "win10_analyst",
+        "drop",
+        attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+    )
     monkeypatch.setattr("app.services.sandbox.confinement.get_attestation_path", lambda: att_file)
 
     r1 = backend.check_readiness()
@@ -127,6 +140,8 @@ def test_mismatched_guest_and_route_fails_closed(monkeypatch, tmp_path):
         verified_machine="win10_clean",
         verified_route="drop",
         attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
     )
 
     # 1. Matching machine succeeds
@@ -146,7 +161,13 @@ def test_mismatched_guest_and_route_fails_closed(monkeypatch, tmp_path):
 
     # 4. Unconfined internet route fails creation
     with pytest.raises(ValueError, match="Cannot attest unconfined route"):
-        create_isolation_attestation(verified_machine="win10", verified_route="internet", attestation_path=tmp_path / "bad.json")
+        create_isolation_attestation(
+            verified_machine="win10",
+            verified_route="internet",
+            attestation_path=tmp_path / "bad.json",
+            operator_assertions=STANDARD_VALID_ASSERTIONS,
+            evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+        )
 
 
 def test_expired_stale_readiness_evidence_fails_closed(tmp_path):
@@ -157,6 +178,8 @@ def test_expired_stale_readiness_evidence_fails_closed(tmp_path):
         verified_route="drop",
         validity_seconds=1,
         attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
     )
 
     # Manually backdate expiration to ensure it is in the past
@@ -205,7 +228,13 @@ def test_api_healthy_but_execution_unsafe(monkeypatch, tmp_path):
 
     # Case B: Attestation verified -> execution safe
     valid_file = tmp_path / "valid.json"
-    create_isolation_attestation("win10_analyst", "drop", attestation_path=valid_file)
+    create_isolation_attestation(
+        "win10_analyst",
+        "drop",
+        attestation_path=valid_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+    )
     monkeypatch.setattr("app.services.sandbox.confinement.get_attestation_path", lambda: valid_file)
 
     readiness_ok = check_system_readiness(check_cape=True)
@@ -291,13 +320,31 @@ def test_public_health_endpoints_never_leak_secrets(monkeypatch, tmp_path):
 def test_wildcard_machine_and_route_rejected(tmp_path):
     """Wildcard '*' and empty values for machine or route must be rejected."""
     with pytest.raises(ValueError, match="Cannot attest wildcard"):
-        create_isolation_attestation("*", "drop", attestation_path=tmp_path / "w1.json")
+        create_isolation_attestation(
+            "*",
+            "drop",
+            attestation_path=tmp_path / "w1.json",
+            operator_assertions=STANDARD_VALID_ASSERTIONS,
+            evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+        )
 
     with pytest.raises(ValueError, match="Cannot attest wildcard"):
-        create_isolation_attestation("win10_analyst", "*", attestation_path=tmp_path / "w2.json")
+        create_isolation_attestation(
+            "win10_analyst",
+            "*",
+            attestation_path=tmp_path / "w2.json",
+            operator_assertions=STANDARD_VALID_ASSERTIONS,
+            evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+        )
 
     with pytest.raises(ValueError, match="Cannot attest wildcard"):
-        create_isolation_attestation("", "drop", attestation_path=tmp_path / "w3.json")
+        create_isolation_attestation(
+            "",
+            "drop",
+            attestation_path=tmp_path / "w3.json",
+            operator_assertions=STANDARD_VALID_ASSERTIONS,
+            evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+        )
 
 
 def test_missing_operator_assertions_rejected(tmp_path):
@@ -312,6 +359,7 @@ def test_missing_operator_assertions_rejected(tmp_path):
             "drop",
             attestation_path=tmp_path / "inc.json",
             operator_assertions=incomplete_assertions,
+            evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
         )
 
 
@@ -323,6 +371,8 @@ def test_untrusted_world_writable_attestation_rejected(tmp_path):
         "win10_analyst",
         "drop",
         attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
     )
     # Set world-writable permission (0o666)
     os.chmod(att_file, 0o666)
@@ -331,3 +381,28 @@ def test_untrusted_world_writable_attestation_rejected(tmp_path):
     assert res.is_verified is False
     assert res.status == "untrusted_attestation_file"
     assert "group/world writable" in res.error
+
+
+def test_placeholder_evidence_references_rejected(tmp_path):
+    """Placeholder evidence like 'test', 'none', 'placeholder' must be rejected."""
+    for placeholder in ["test", "none", "placeholder", "n/a", "sample", "xyz"]:
+        with pytest.raises(ValueError, match="Invalid or placeholder evidence reference"):
+            create_isolation_attestation(
+                "win10_analyst",
+                "drop",
+                attestation_path=tmp_path / f"ph_{placeholder}.json",
+                operator_assertions=STANDARD_VALID_ASSERTIONS,
+                evidence_references=[placeholder],
+            )
+
+
+def test_operator_assertions_require_explicit_affirmation(tmp_path):
+    """Automatic True defaults must be prohibited; explicit affirmations required."""
+    with pytest.raises(ValueError, match="Explicit operator_assertions dictionary is required"):
+        create_isolation_attestation(
+            "win10_analyst",
+            "drop",
+            attestation_path=tmp_path / "no_assertions.json",
+            operator_assertions=None,
+            evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
+        )

@@ -13,7 +13,7 @@ from app.models.analysis import Analysis, AnalysisStatus
 from app.models.sample import Sample
 from app.models.static_analysis import StaticAnalysisRecord
 from app.workers.pipeline_worker import PipelineWorker
-from app.services.sandbox.confinement import create_isolation_attestation
+from app.services.sandbox.confinement import create_isolation_attestation, STANDARD_VALID_ASSERTIONS
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +24,8 @@ def setup_test_isolation_attestation(tmp_path, monkeypatch):
         verified_machine="win10_analyst",
         verified_route="drop",
         attestation_path=att_file,
+        operator_assertions=STANDARD_VALID_ASSERTIONS,
+        evidence_references=["iptables:drop_rules", "pcap:zero_egress"],
     )
     yield
 

@@ -313,17 +313,6 @@ def setup_attest_isolation(
             "error": "Operator identity (--operator) is mandatory for isolation attestation; wildcard '*' or empty is prohibited.",
         }
 
-    raw_refs = evidence_refs or []
-    cleaned_refs = [str(r).strip() for r in raw_refs if str(r).strip()]
-    if not cleaned_refs:
-        return {
-            "success": False,
-            "error": (
-                "At least one auditable evidence reference (--evidence-refs) is required "
-                "(e.g. 'iptables:host_only_drop_rules,wireshark:zero_egress_test')."
-            ),
-        }
-
     import sys
     backend_path = str(root_dir / "backend")
     if backend_path not in sys.path:
@@ -333,7 +322,28 @@ def setup_attest_isolation(
         REQUIRED_OPERATOR_ASSERTIONS,
         create_isolation_attestation,
         verify_cape_confinement,
+        is_valid_evidence_reference,
     )
+
+    raw_refs = evidence_refs or []
+    cleaned_refs = []
+    for r in raw_refs:
+        r_str = str(r).strip()
+        if not is_valid_evidence_reference(r_str):
+            return {
+                "success": False,
+                "error": f"Invalid or placeholder evidence reference '{r_str}'. Real auditable verification evidence is required.",
+            }
+        cleaned_refs.append(r_str)
+
+    if not cleaned_refs:
+        return {
+            "success": False,
+            "error": (
+                "At least one auditable evidence reference (--evidence-refs) is required "
+                "(e.g. 'iptables:host_only_drop_rules,wireshark:zero_egress_test')."
+            ),
+        }
 
     if rt not in SAFE_ISOLATED_ROUTES:
         return {
@@ -341,17 +351,25 @@ def setup_attest_isolation(
             "error": f"Route '{rt}' is not an approved safe isolated route: {sorted(SAFE_ISOLATED_ROUTES)}.",
         }
 
-    op_assertions = assertions or {
-        "host_only_networking_verified": True,
-        "routing_isolation_verified": True,
-        "firewall_rules_verified": True,
-        "guest_snapshot_clean_verified": True,
-    }
-    missing = [k for k in REQUIRED_OPERATOR_ASSERTIONS if not op_assertions.get(k)]
+    if assertions is None or not isinstance(assertions, dict):
+        return {
+            "success": False,
+            "error": (
+                "Missing mandatory affirmative operator assertions. The operator must explicitly affirm: "
+                "host_only_networking_verified, routing_isolation_verified, firewall_rules_verified, "
+                "guest_snapshot_clean_verified (e.g. via --assert-all-invariants or individual assertion flags)."
+            ),
+        }
+
+    op_assertions = dict(assertions)
+    if "default_route_blocked" in op_assertions and "routing_isolation_verified" not in op_assertions:
+        op_assertions["routing_isolation_verified"] = op_assertions["default_route_blocked"]
+
+    missing = [k for k in REQUIRED_OPERATOR_ASSERTIONS if op_assertions.get(k) is not True]
     if missing:
         return {
             "success": False,
-            "error": f"Missing mandatory operator assertions: {missing}",
+            "error": f"Missing or unconfirmed mandatory operator assertions: {sorted(missing)}",
         }
 
     if dry_run:
