@@ -48,8 +48,8 @@
 ## 2. Test Execution Outcomes
 
 ### Backend (`pytest` 9.2.0)
-- **Full Backend Test Suite:** **292 passed, 1 skipped** in 59.12s
-  * `test_remnux_virtualbox_gateway.py`: 20 passed
+- **Full Backend Test Suite:** **313 passed, 1 skipped** in 63.23s
+  * `test_remnux_virtualbox_gateway.py`: **41 passed** (expanded from 20 to 41 tests covering security, leases, watchdog, isolation gates, archive bombs, and MCP transport)
   * `test_automated_provisioning.py`: 13 passed
   * `test_cape_confinement_gate.py`: 8 passed
   * `test_ghidra_sequential_cleanup.py`: 3 passed
@@ -78,8 +78,18 @@
 ### Frontend (`vitest` 4.1.12 + `tsc` + `vite` 6.4.6)
 - **Frontend Unit Tests:** **51/51 PASSED** across 6 test suites (`DesignSystemAndTheme.test.tsx` [9], `CorrelationPage.test.tsx` [10], `ReportPage.test.tsx` [11], `EnrichmentFlow.test.tsx` [4], `StaticAnalysisPage.test.tsx` [14], `InfrastructurePage.test.tsx` [3])
 - **TypeScript Strict Check:** `tsc` PASSED (0 errors)
-- **Production Build:** `vite build` PASSED (clean bundle in 2.43s)
+- **Production Build:** `vite build` PASSED (clean bundle in 2.74s)
 - **Dependency Audit Baseline:** `npm audit` $\rightarrow$ 0 vulnerabilities
 
 ### Doctor & Safe Intake Smoke Test
 - `./malbox doctor --smoke-test`: 14 PASS, 1 WARN (CAPE offline - expected on unattached host), 0 FAIL, 1 SKIP. Quarantined with 0400 permissions, DB persistence verified.
+
+---
+
+## Remediation Log: REMnux VirtualBox Gateway Critical Remediation
+- **Phase 1 (Security & Credentials):** Default secrets eliminated from code; fail-closed enforcement requires $\ge 16$ characters; strict management client IP matching without subnet wildcards; zero secrets logged.
+- **Phase 2 (Real Isolation Readiness):** Multi-factor live hypervisor measurement (adapters, shared folders, clipboard, drag-and-drop, clean snapshot existence, host forwarding policy); fails closed on unverified confinement.
+- **Phase 3 (Independent Watchdog & Durable Leases):** Physical host-side execution lease (`ExecutionLease`) persisted to disk; background host watchdog enforces hard deadline with emergency clean snapshot rollback; quarantine lockdown engaged if rollback verification fails; startup reconciliation clears crashed VM state.
+- **Phase 4 (Gateway Correctness):** Dedicated phase timeouts; idempotent deduplication; 409 conflict handling; single VM concurrency lock; only `EVIDENCE_READY` marked complete.
+- **Phase 5 (Evidence & Manifest Integrity):** Real Sysmon & EventLog probing; truthful collector status (`UNAVAILABLE`, `EMPTY_NO_PACKETS`); tar extraction hardened against duplicate paths, member bombs ($>1000$), and size bombs ($>150$MB); read-only permissions (`0400`/`0500`) strictly enforced.
+- **Phase 6 (MCP & Deployment):** Runnable stdio JSON-RPC 2.0 MCP server loop; systemd service entrypoints aligned; safe interface-specific firewall rules documented.

@@ -102,8 +102,8 @@ The Host Controller runs on Kali to provide safe, authenticated hypervisor contr
    WorkingDirectory=/home/kali/Documents/malbox
    Environment=MALBOX_VBOX_CONTROLLER_HOST=127.0.0.1
    Environment=MALBOX_VBOX_CONTROLLER_PORT=8005
-   Environment=MALBOX_VBOX_CONTROLLER_SECRET=your-secure-secret-token-here
-   ExecStart=/home/kali/Documents/malbox/.venv/bin/python3 -m integrations.virtualbox_host_controller.server
+   Environment=MALBOX_VBOX_CONTROLLER_SECRET=your-secure-secret-token-here-min16chars
+   ExecStart=/home/kali/Documents/malbox/.venv/bin/uvicorn integrations.virtualbox_host_controller.server:app --host 127.0.0.1 --port 8005
    Restart=on-failure
    RestartSec=5
 
@@ -153,36 +153,32 @@ sudo netplan apply
 ```
 
 ### 3.3 REMnux Isolation & Firewall Policy
-Run the following inside REMnux to enforce non-routing and containment:
+Run the following inside REMnux to enforce non-routing and containment using safe, interface-specific rules (without destructive table flushes):
 ```bash
 # 1. Disable IP forwarding
 sudo sysctl -w net.ipv4.ip_forward=0
 
-# 2. Flush existing rules
-sudo iptables -F
-sudo iptables -X
-sudo iptables -t nat -F
+# 2. Configure dedicated isolation chain (non-destructive; does NOT flush entire host ruleset)
+sudo iptables -N MALBOX-ISOLATION 2>/dev/null || sudo iptables -F MALBOX-ISOLATION
 
-# 3. Default DROP policies
-sudo iptables -P INPUT DROP
-sudo iptables -P FORWARD DROP
-sudo iptables -P OUTPUT DROP
+# 3. Block all packet forwarding across sandbox interface and management interface
+sudo iptables -I FORWARD 1 -i enp0s8 -o enp0s3 -j DROP
+sudo iptables -I FORWARD 2 -i enp0s3 -o enp0s8 -j DROP
+sudo iptables -I FORWARD 3 -j DROP
 
-# 4. Allow loopback
-sudo iptables -A INPUT -i lo -j ACCEPT
-sudo iptables -A OUTPUT -o lo -j ACCEPT
-
-# 5. Allow management from Kali host only (192.168.56.1)
+# 4. Filter incoming traffic on management interface (enp0s3)
+# Allow Kali host (192.168.56.1) access to Gateway API (:8008)
 sudo iptables -A INPUT -i enp0s3 -s 192.168.56.1 -p tcp --dport 8008 -j ACCEPT
-sudo iptables -A OUTPUT -o enp0s3 -d 192.168.56.1 -m state --state ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A INPUT -i enp0s3 -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# 6. Allow sandbox traffic from REMWin (10.77.0.10) to local sinkhole services
+# 5. Filter incoming traffic on sandbox interface (enp0s8)
+# Allow REMWin (10.77.0.10) to access local sinkhole services only (DNS, HTTP, HTTPS)
 sudo iptables -A INPUT -i enp0s8 -s 10.77.0.10 -p udp --dport 53 -j ACCEPT
 sudo iptables -A INPUT -i enp0s8 -s 10.77.0.10 -p tcp --dport 53 -j ACCEPT
 sudo iptables -A INPUT -i enp0s8 -s 10.77.0.10 -p tcp -m multiport --dports 80,443,8080 -j ACCEPT
-sudo iptables -A OUTPUT -o enp0s8 -d 10.77.0.10 -j ACCEPT
+sudo iptables -A INPUT -i enp0s8 -j DROP
 
-# 7. Make persistent
+# 6. Make persistent across reboots
 sudo apt-get install -y iptables-persistent
 sudo netfilter-persistent save
 ```
@@ -199,13 +195,13 @@ After=network.target
 Type=simple
 User=remnux
 WorkingDirectory=/opt/malbox-gateway
-Environment=MALBOX_GATEWAY_HOST=0.0.0.0
-Environment=MALBOX_GATEWAY_PORT=8008
-Environment=MALBOX_GATEWAY_AUTH_TOKEN=your-gateway-token-here
-Environment=MALBOX_HOST_CONTROLLER_URL=http://192.168.56.1:8005
-Environment=MALBOX_HOST_CONTROLLER_SECRET=your-secure-secret-token-here
+Environment=MALBOX_REMNUX_GATEWAY_HOST=0.0.0.0
+Environment=MALBOX_REMNUX_GATEWAY_PORT=8008
+Environment=MALBOX_REMNUX_GATEWAY_TOKEN=your-gateway-token-here-min16chars
+Environment=MALBOX_VBOX_CONTROLLER_URL=http://192.168.56.1:8005
+Environment=MALBOX_VBOX_CONTROLLER_SECRET=your-vbox-secret-here-min16chars
 Environment=MALBOX_REMWIN_AGENT_URL=http://10.77.0.10:8000
-Environment=MALBOX_REMWIN_AGENT_TOKEN=remwin-guest-agent-token
+Environment=MALBOX_AGENT_SECRET=your-agent-token-here-min16chars
 ExecStart=/usr/bin/python3 -m uvicorn integrations.remnux_gateway.api.app:app --host 0.0.0.0 --port 8008
 Restart=always
 RestartSec=5
