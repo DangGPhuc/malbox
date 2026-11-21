@@ -16,6 +16,7 @@ class PCAPCollector:
         self.interface = interface
         self.output_path = output_path
         self.process: Optional[subprocess.Popen] = None
+        self.status: str = "PENDING"
 
     def start(self, output_path: Path) -> bool:
         self.output_path = output_path
@@ -25,6 +26,7 @@ class PCAPCollector:
         if not tool:
             # Tool not found; write empty marker pcap or note
             output_path.write_bytes(b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x01\x00\x00\x00")
+            self.status = "UNAVAILABLE"
             return False
 
         cmd = [tool, "-i", self.interface, "-w", str(output_path), "-q"]
@@ -36,13 +38,17 @@ class PCAPCollector:
                 stdin=subprocess.DEVNULL,
             )
             time.sleep(0.5)
-            return (self.process.poll() is None)
+            running = (self.process.poll() is None)
+            self.status = "RUNNING" if running else "FAILED"
+            return running
         except Exception:
             # Fallback to minimal valid pcap header
             output_path.write_bytes(b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x01\x00\x00\x00")
+            self.status = "FAILED"
             return False
 
-    def stop(self) -> bool:
+    def stop(self) -> str:
+        """Stops the capture process and accurately evaluates pcap collection status."""
         if self.process and self.process.poll() is None:
             try:
                 self.process.terminate()
@@ -52,7 +58,20 @@ class PCAPCollector:
                     self.process.kill()
                 except Exception:
                     pass
-        # Ensure file exists
-        if self.output_path and not self.output_path.exists():
-            self.output_path.write_bytes(b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x01\x00\x00\x00")
-        return True
+
+        # Check pcap output size and evaluate status
+        if self.output_path and self.output_path.exists():
+            size = self.output_path.stat().st_size
+            if size > 24:
+                self.status = "COLLECTED"
+            elif size > 0:
+                self.status = "EMPTY_NO_PACKETS"
+            else:
+                self.status = "EMPTY"
+        else:
+            if self.output_path:
+                self.output_path.write_bytes(b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x01\x00\x00\x00")
+                self.status = "EMPTY_NO_PACKETS"
+            else:
+                self.status = "FAILED"
+        return self.status

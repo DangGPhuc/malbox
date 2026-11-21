@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -15,6 +16,9 @@ from ..collectors.packager import package_evidence_bundle
 from ..collectors.pcap import PCAPCollector
 from ..config import settings
 from ..contracts.schemas import EvidenceManifest, GatewayJobStatus, JobStatusResponse
+
+ANALYSIS_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{4,64}$")
+MAX_SAMPLE_BYTES = 33_554_432  # 32 MiB binary payload cap
 
 
 class REMnuxJobController:
@@ -86,43 +90,71 @@ class REMnuxJobController:
         timeout_seconds: int = 300,
         approved_by_operator: bool = True,
     ) -> JobStatusResponse:
+        # Validate analysis_id format
+        if not analysis_id or not ANALYSIS_ID_PATTERN.match(analysis_id.strip()):
+            raise ValueError(f"Invalid analysis_id '{analysis_id}': must be 4-64 alphanumeric, dash, or underscore characters.")
+
+        # Enforce maximum binary payload size limit (32MB)
+        if len(sample_bytes) > MAX_SAMPLE_BYTES:
+            raise ValueError(f"Payload size ({len(sample_bytes)} bytes) exceeds maximum limit of {MAX_SAMPLE_BYTES} bytes (32MB).")
+
         actual_sha = hashlib.sha256(sample_bytes).hexdigest()
         if expected_sha256 and actual_sha.lower() != expected_sha256.lower():
             raise ValueError(f"Hash mismatch: expected {expected_sha256}, got {actual_sha}")
 
         job_id = f"gw_{analysis_id}"
-        safe_filename = Path(filename).name or "sample.exe"
-        quarantine_file = settings.QUARANTINE_DIR / f"{job_id}_{safe_filename}"
-        quarantine_file.write_bytes(sample_bytes)
-        try:
-            quarantine_file.chmod(0o400)
-        except Exception:
-            pass
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-        job_record = {
-            "job_id": job_id,
-            "analysis_id": analysis_id,
-            "status": GatewayJobStatus.HASH_VERIFIED.value,
-            "sample_sha256": actual_sha,
-            "filename": safe_filename,
-            "quarantine_path": str(quarantine_file),
-            "vm_target": settings.TARGET_VM_IDENTIFIER,
-            "snapshot_name": settings.CLEAN_SNAPSHOT_NAME,
-            "created_at": now_iso,
-            "started_at": None,
-            "finished_at": None,
-            "elapsed_seconds": 0.0,
-            "timeout_seconds": min(timeout_seconds, settings.EXECUTION_MAX_SECONDS),
-            "execution_confirmed": False,
-            "guest_pid": None,
-            "error": None,
-            "cleanup_status": "PENDING",
-            "evidence_bundle_size_bytes": None,
-            "evidence_manifest_ready": False,
-        }
 
         with self.lock:
+            # Idempotency check: if analysis_id already submitted with same hash, return existing status
+            if job_id in self.jobs:
+                existing = self.jobs[job_id]
+                if existing.get("sample_sha256", "").lower() == actual_sha.lower():
+                    return self._to_status_response(existing)
+                raise ValueError(f"Analysis ID '{analysis_id}' already exists with a different sample hash (conflict).")
+
+            # VM Concurrency check: enforce 1 active job on VM
+            if self.active_job_id and self.active_job_id in self.jobs:
+                active_status = self.jobs[self.active_job_id].get("status")
+                if active_status in (
+                    GatewayJobStatus.PREFLIGHT.value,
+                    GatewayJobStatus.GUEST_PREPARED.value,
+                    GatewayJobStatus.TASK_SUBMITTED.value,
+                    GatewayJobStatus.EXECUTION_CONFIRMED.value,
+                    GatewayJobStatus.COLLECTING.value,
+                ):
+                    raise RuntimeError(f"Sandbox VM is currently busy with active job '{self.active_job_id}' (status={active_status}).")
+
+            safe_filename = Path(filename).name or "sample.exe"
+            quarantine_file = settings.QUARANTINE_DIR / f"{job_id}_{safe_filename}"
+            quarantine_file.write_bytes(sample_bytes)
+            try:
+                quarantine_file.chmod(0o400)
+            except Exception:
+                pass
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            job_record = {
+                "job_id": job_id,
+                "analysis_id": analysis_id,
+                "status": GatewayJobStatus.HASH_VERIFIED.value,
+                "sample_sha256": actual_sha,
+                "filename": safe_filename,
+                "quarantine_path": str(quarantine_file),
+                "vm_target": settings.TARGET_VM_IDENTIFIER,
+                "snapshot_name": settings.CLEAN_SNAPSHOT_NAME,
+                "created_at": now_iso,
+                "started_at": None,
+                "finished_at": None,
+                "elapsed_seconds": 0.0,
+                "timeout_seconds": min(timeout_seconds, settings.EXECUTION_MAX_SECONDS),
+                "execution_confirmed": False,
+                "guest_pid": None,
+                "error": None,
+                "cleanup_status": "PENDING",
+                "evidence_bundle_size_bytes": None,
+                "evidence_manifest_ready": False,
+            }
+
             self.jobs[job_id] = job_record
             self._save_jobs_db()
 
@@ -130,6 +162,8 @@ class REMnuxJobController:
 
     def start_job_execution(self, job_id: str) -> None:
         """Launches the execution in a background worker thread."""
+        with self.lock:
+            self.active_job_id = job_id
         thread = threading.Thread(target=self._run_job_pipeline, args=(job_id,), daemon=True)
         thread.start()
 
@@ -148,7 +182,7 @@ class REMnuxJobController:
         pcap_path = evidence_job_dir / "dynamic" / "network.pcap"
 
         try:
-            # 1. PREFLIGHT: Check Host Controller
+            # 1. PREFLIGHT: Check Host Controller reachability
             job["status"] = GatewayJobStatus.PREFLIGHT.value
             self._save_jobs_db()
 
@@ -157,39 +191,37 @@ class REMnuxJobController:
             if not ok:
                 raise RuntimeError(f"Physical Kali Host Controller unreachable ({code}): {hc_data}")
 
-            # 2. GUEST_PREPARED: Cycle VM to clean snapshot
+            # 2. GUEST_PREPARED: Acquire execution lease from Host Controller (clean cycle + start VM under watchdog)
             job["status"] = GatewayJobStatus.GUEST_PREPARED.value
             self._save_jobs_db()
 
-            prep_body = json.dumps({
+            lease_body = json.dumps({
+                "job_id": job_id,
+                "analysis_id": job["analysis_id"],
                 "vm_target": settings.TARGET_VM_IDENTIFIER,
                 "snapshot_name": settings.CLEAN_SNAPSHOT_NAME,
+                "timeout_seconds": job["timeout_seconds"],
             }).encode("utf-8")
-            prep_headers = create_host_controller_headers(prep_body, settings.HOST_CONTROLLER_SECRET)
-            ok, code, prep_resp = self._http_request(
-                f"{settings.HOST_CONTROLLER_URL}/vm/prepare",
+            lease_headers = create_host_controller_headers(lease_body, settings.HOST_CONTROLLER_SECRET)
+            ok, code, lease_resp = self._http_request(
+                f"{settings.HOST_CONTROLLER_URL}/lease/acquire",
                 method="POST",
-                headers=prep_headers,
-                data=prep_body,
+                headers=lease_headers,
+                data=lease_body,
                 timeout=60.0,
             )
             if not ok:
-                raise RuntimeError(f"Host Controller failed to prepare clean VM snapshot ({code}): {prep_resp}")
+                if code == 404:
+                    # Fallback to prepare + start if lease endpoint not present
+                    prep_headers = create_host_controller_headers(lease_body, settings.HOST_CONTROLLER_SECRET)
+                    self._http_request(f"{settings.HOST_CONTROLLER_URL}/vm/prepare", method="POST", headers=prep_headers, data=lease_body, timeout=60.0)
+                    start_body = json.dumps({"vm_target": settings.TARGET_VM_IDENTIFIER, "headless": True}).encode("utf-8")
+                    start_headers = create_host_controller_headers(start_body, settings.HOST_CONTROLLER_SECRET)
+                    self._http_request(f"{settings.HOST_CONTROLLER_URL}/vm/start", method="POST", headers=start_headers, data=start_body, timeout=30.0)
+                else:
+                    raise RuntimeError(f"Host Controller lease acquisition failed ({code}): {lease_resp}")
 
-            # 3. Start VM
-            start_body = json.dumps({"vm_target": settings.TARGET_VM_IDENTIFIER, "headless": True}).encode("utf-8")
-            start_headers = create_host_controller_headers(start_body, settings.HOST_CONTROLLER_SECRET)
-            ok, code, start_resp = self._http_request(
-                f"{settings.HOST_CONTROLLER_URL}/vm/start",
-                method="POST",
-                headers=start_headers,
-                data=start_body,
-                timeout=30.0,
-            )
-            if not ok:
-                raise RuntimeError(f"Host Controller failed to start VM ({code}): {start_resp}")
-
-            # 4. Wait for REMWin Agent readiness (probe loop up to 60s)
+            # 3. Wait for REMWin Agent readiness (probe loop up to 60s boot window)
             agent_ready = False
             agent_deadline = time.monotonic() + 60.0
             while time.monotonic() < agent_deadline:
@@ -202,10 +234,10 @@ class REMnuxJobController:
             if not agent_ready:
                 raise RuntimeError("REMWin guest agent failed to respond within 60s boot window.")
 
-            # 5. Start PCAP capture
+            # 4. Start PCAP capture
             pcap_collector.start(pcap_path)
 
-            # 6. Stage sample to REMWin Agent
+            # 5. Stage sample to REMWin Agent (15s staging window)
             job["status"] = GatewayJobStatus.TASK_SUBMITTED.value
             self._save_jobs_db()
 
@@ -230,7 +262,7 @@ class REMnuxJobController:
             if not ok:
                 raise RuntimeError(f"Failed to stage sample to REMWin agent ({code}): {stage_resp}")
 
-            # 7. Execute sample on Agent
+            # 6. Execute sample on Agent (10s execution initiation window)
             exec_body = json.dumps({"timeout_seconds": job["timeout_seconds"]}).encode("utf-8")
             exec_headers = create_remwin_agent_headers(settings.REMWIN_AGENT_TOKEN)
             exec_headers["Content-Type"] = "application/json"
@@ -252,13 +284,12 @@ class REMnuxJobController:
                 job["guest_pid"] = exec_resp["pid"]
             self._save_jobs_db()
 
-            # 8. COLLECTING: Monotonic watchdog loop
+            # 7. COLLECTING: Monotonic watchdog loop
             job["status"] = GatewayJobStatus.COLLECTING.value
             self._save_jobs_db()
 
             watchdog_deadline = time.monotonic() + float(job["timeout_seconds"])
             poll_interval = 2.0
-            is_active = True
 
             while time.monotonic() < watchdog_deadline:
                 if job.get("status") == GatewayJobStatus.CANCELLED.value:
@@ -278,18 +309,18 @@ class REMnuxJobController:
 
                 time.sleep(poll_interval)
 
-            # 9. Stop execution & collect guest telemetry
+            # 8. Stop execution & collect guest telemetry
             job["status"] = GatewayJobStatus.EXECUTION_FINISHED.value
             job["finished_at"] = datetime.now(timezone.utc).isoformat()
             self._save_jobs_db()
 
             pcap_collector.stop()
 
-            # Fetch agent telemetry
+            # Fetch agent telemetry (up to 30s collection window)
             ok, code, telemetry = self._http_request(
                 f"{settings.REMWIN_AGENT_URL}/telemetry",
                 headers=create_remwin_agent_headers(settings.REMWIN_AGENT_TOKEN),
-                timeout=15.0,
+                timeout=30.0,
             )
             raw_telemetry = telemetry if (ok and isinstance(telemetry, dict)) else {}
             (evidence_job_dir / "dynamic" / "process_events.json").write_text(
@@ -301,23 +332,34 @@ class REMnuxJobController:
                 json.dumps(job, indent=2), encoding="utf-8"
             )
 
-            # 10. GUEST_RESTORED: Stop VM & restore clean snapshot
-            cycle_body = json.dumps({
+            # 9. Release Host Controller lease (restores clean snapshot and verifies rollback)
+            release_body = json.dumps({
+                "job_id": job_id,
                 "vm_target": settings.TARGET_VM_IDENTIFIER,
                 "snapshot_name": settings.CLEAN_SNAPSHOT_NAME,
             }).encode("utf-8")
-            cycle_headers = create_host_controller_headers(cycle_body, settings.HOST_CONTROLLER_SECRET)
-            ok, code, cycle_resp = self._http_request(
-                f"{settings.HOST_CONTROLLER_URL}/vm/cycle",
+            release_headers = create_host_controller_headers(release_body, settings.HOST_CONTROLLER_SECRET)
+            ok, code, release_resp = self._http_request(
+                f"{settings.HOST_CONTROLLER_URL}/lease/release",
                 method="POST",
-                headers=cycle_headers,
-                data=cycle_body,
-                timeout=60.0,
+                headers=release_headers,
+                data=release_body,
+                timeout=30.0,
             )
+            if not ok and code == 404:
+                # Fallback to /vm/cycle if /lease/release is missing
+                ok, code, release_resp = self._http_request(
+                    f"{settings.HOST_CONTROLLER_URL}/vm/cycle",
+                    method="POST",
+                    headers=release_headers,
+                    data=release_body,
+                    timeout=30.0,
+                )
+
             if ok:
                 job["cleanup_status"] = "RESTORED"
             else:
-                job["cleanup_status"] = f"CLEANUP_FAILED: {cycle_resp}"
+                job["cleanup_status"] = f"CLEANUP_FAILED: {release_resp}"
                 job["status"] = GatewayJobStatus.CLEANUP_FAILED.value
                 self._save_jobs_db()
                 return
@@ -325,7 +367,18 @@ class REMnuxJobController:
             job["status"] = GatewayJobStatus.GUEST_RESTORED.value
             self._save_jobs_db()
 
-            # 11. EVIDENCE_READY: Package bundle
+            # 10. EVIDENCE_READY: Assemble truthful manifest and package bundle
+            agent_coll = raw_telemetry.get("collector_status", {})
+            collector_status = {
+                "pcap": pcap_collector.status,
+                "sysmon": agent_coll.get("sysmon", "UNAVAILABLE"),
+                "eventlog": agent_coll.get("eventlog", "UNAVAILABLE"),
+                "processes": agent_coll.get("processes", "EMPTY"),
+                "network": agent_coll.get("network", "EMPTY"),
+                "dropped_files": agent_coll.get("dropped_files", "EMPTY"),
+            }
+
+            confirmed = bool(job.get("execution_confirmed") or raw_telemetry.get("execution_confirmed"))
             manifest = EvidenceManifest(
                 analysis_id=job["analysis_id"],
                 job_id=job_id,
@@ -337,10 +390,10 @@ class REMnuxJobController:
                 started_at=job["started_at"],
                 stopped_at=job["finished_at"],
                 duration_seconds=job["elapsed_seconds"],
-                execution_confirmed=job["execution_confirmed"],
+                execution_confirmed=confirmed,
                 confirmation_source=f"REMWin guest agent PID {job.get('guest_pid')}",
                 network_isolation_status="VERIFIED",
-                collector_status={"pcap": "SUCCESS", "guest_telemetry": "SUCCESS"},
+                collector_status=collector_status,
                 cleanup_outcome="RESTORED",
                 source_provenance="Malbox REMnux Deterministic Gateway",
             )
@@ -350,6 +403,7 @@ class REMnuxJobController:
             if not pkg_ok:
                 raise RuntimeError(f"Evidence packaging failed: {pkg_err}")
 
+            # Only transition to EVIDENCE_READY when packager completes successfully!
             job["status"] = GatewayJobStatus.EVIDENCE_READY.value
             job["evidence_manifest_ready"] = True
             job["evidence_bundle_size_bytes"] = bundle_archive.stat().st_size
@@ -360,18 +414,26 @@ class REMnuxJobController:
             job["status"] = GatewayJobStatus.FAILED.value
             job["error"] = str(e)
             self._save_jobs_db()
-            # Attempt emergency rollback of guest
+            # Emergency lease release / snapshot rollback
             try:
-                cycle_body = json.dumps({"vm_target": settings.TARGET_VM_IDENTIFIER, "snapshot_name": settings.CLEAN_SNAPSHOT_NAME}).encode("utf-8")
+                rel_body = json.dumps({
+                    "job_id": job_id,
+                    "vm_target": settings.TARGET_VM_IDENTIFIER,
+                    "snapshot_name": settings.CLEAN_SNAPSHOT_NAME,
+                }).encode("utf-8")
                 self._http_request(
-                    f"{settings.HOST_CONTROLLER_URL}/vm/cycle",
+                    f"{settings.HOST_CONTROLLER_URL}/lease/release",
                     method="POST",
-                    headers=create_host_controller_headers(cycle_body, settings.HOST_CONTROLLER_SECRET),
-                    data=cycle_body,
+                    headers=create_host_controller_headers(rel_body, settings.HOST_CONTROLLER_SECRET),
+                    data=rel_body,
                     timeout=30.0,
                 )
             except Exception:
                 pass
+        finally:
+            with self.lock:
+                if self.active_job_id == job_id:
+                    self.active_job_id = None
 
     def cancel_job(self, job_id: str) -> bool:
         job = self.jobs.get(job_id)
@@ -392,18 +454,26 @@ class REMnuxJobController:
         except Exception:
             pass
 
-        # Force Host Controller rollback
+        # Force Host Controller lease release
         try:
-            cycle_body = json.dumps({"vm_target": settings.TARGET_VM_IDENTIFIER, "snapshot_name": settings.CLEAN_SNAPSHOT_NAME}).encode("utf-8")
+            rel_body = json.dumps({
+                "job_id": job_id,
+                "vm_target": settings.TARGET_VM_IDENTIFIER,
+                "snapshot_name": settings.CLEAN_SNAPSHOT_NAME,
+            }).encode("utf-8")
             self._http_request(
-                f"{settings.HOST_CONTROLLER_URL}/vm/cycle",
+                f"{settings.HOST_CONTROLLER_URL}/lease/release",
                 method="POST",
-                headers=create_host_controller_headers(cycle_body, settings.HOST_CONTROLLER_SECRET),
-                data=cycle_body,
+                headers=create_host_controller_headers(rel_body, settings.HOST_CONTROLLER_SECRET),
+                data=rel_body,
                 timeout=30.0,
             )
         except Exception:
             pass
+
+        with self.lock:
+            if self.active_job_id == job_id:
+                self.active_job_id = None
 
         return True
 

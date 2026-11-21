@@ -196,3 +196,79 @@ class ConstrainedSandboxMCPServer:
             "job_id": job_id,
             "bundle_size_bytes": path.stat().st_size if (path and path.is_file()) else None,
         }
+
+
+def handle_jsonrpc_request(server: ConstrainedSandboxMCPServer, req: Dict[str, Any]) -> Dict[str, Any]:
+    """Handles an incoming JSON-RPC 2.0 MCP request deterministically."""
+    req_id = req.get("id")
+    method = req.get("method", "")
+    params = req.get("params", {}) or {}
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "malbox-remnux-gateway-mcp", "version": "1.0.0"},
+            },
+        }
+
+    if method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": server.get_supported_tools()},
+        }
+
+    if method == "tools/call":
+        name = params.get("name", "")
+        arguments = params.get("arguments", {})
+        result = server.execute_tool(name, arguments)
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                "isError": "error" in result,
+            },
+        }
+
+    # Direct tool invocation
+    if any(t["name"] == method for t in server.get_supported_tools()):
+        result = server.execute_tool(method, params)
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Method not found: '{method}'"},
+    }
+
+
+def run_mcp_stdio_server(server: Optional[ConstrainedSandboxMCPServer] = None) -> None:
+    """Runs a standard JSON-RPC 2.0 stdio loop reading from sys.stdin."""
+    import sys
+    srv = server or ConstrainedSandboxMCPServer()
+    for line in sys.stdin:
+        clean = line.strip()
+        if not clean:
+            continue
+        try:
+            req = json.loads(clean)
+            resp = handle_jsonrpc_request(srv, req)
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+        except Exception as e:
+            err_resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {str(e)}"},
+            }
+            sys.stdout.write(json.dumps(err_resp) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    run_mcp_stdio_server()
