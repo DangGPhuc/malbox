@@ -96,7 +96,10 @@ def validate_and_extract_evidence_bundle(
                     return False, None, f"Archive exceeds maximum allowed uncompressed size ({max_total_bytes} bytes)"
 
             # 2. Safe extraction pass
-            tar.extractall(path=destination_dir)
+            try:
+                tar.extractall(path=destination_dir, filter="data")
+            except TypeError:
+                tar.extractall(path=destination_dir)
 
         # 3. Validate manifest
         manifest_path = destination_dir / "manifest.json"

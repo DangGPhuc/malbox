@@ -219,7 +219,8 @@ def test_vbox_network_isolation_validation():
 
 def test_vbox_commands_execute_without_shell():
     """Ensures VBoxManage wrapper invokes subprocess with list arguments, never shell=True."""
-    with patch("subprocess.run") as mock_run:
+    with patch("integrations.virtualbox_host_controller.vbox.get_vboxmanage_bin", return_value="/usr/bin/VBoxManage"), \
+         patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="Oracle VM VirtualBox Command Line", stderr="")
         check_virtualbox_installed()
 
