@@ -21,7 +21,9 @@ from urllib.parse import parse_qs, urlparse
 
 AGENT_HOST = os.getenv("MALBOX_AGENT_HOST", "0.0.0.0")
 AGENT_PORT = int(os.getenv("MALBOX_AGENT_PORT", "8000"))
-AGENT_SECRET = os.getenv("MALBOX_AGENT_SECRET", "remwin-guest-agent-token")
+# Minimum 16-character secret; no default fallback secret allowed (fails closed)
+AGENT_SECRET = os.getenv("MALBOX_AGENT_SECRET", os.getenv("MALBOX_REMWIN_AGENT_TOKEN", "")).strip()
+MIN_SECRET_LENGTH = 16
 WORKSPACE_ROOT = Path(os.getenv("MALBOX_AGENT_WORKSPACE", r"C:\malbox\workspace"))
 
 # In-memory job state
@@ -29,6 +31,13 @@ CURRENT_JOB: Optional[Dict[str, Any]] = None
 SPAWNED_PROCESS: Optional[subprocess.Popen] = None
 JOB_START_TIME: Optional[float] = None
 EXECUTION_MAX_SECONDS = 300
+MAX_BINARY_BYTES = 33_554_432  # 32 MiB
+MAX_HEX_CHARS = 67_108_864  # 64 MiB hex string
+
+
+def is_secret_valid(secret: str) -> bool:
+    """Verifies that agent management token meets minimum length requirements."""
+    return bool(secret and len(secret.strip()) >= MIN_SECRET_LENGTH)
 
 
 def get_file_sha256(path: Path) -> str:
@@ -51,11 +60,13 @@ class REMWinAgentHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _verify_auth(self) -> bool:
+        if not is_secret_valid(AGENT_SECRET):
+            return False
         auth_header = self.headers.get("Authorization", "")
         token = auth_header.replace("Bearer ", "").replace("Token ", "").strip()
         if not token:
             token = self.headers.get("X-Malbox-Agent-Token", "").strip()
-        return (token == AGENT_SECRET)
+        return bool(token and token == AGENT_SECRET)
 
     def do_GET(self) -> None:
         global CURRENT_JOB, SPAWNED_PROCESS, JOB_START_TIME
@@ -143,6 +154,10 @@ class REMWinAgentHandler(BaseHTTPRequestHandler):
             self._send_json(409, {"error": "A job is currently executing on this guest."})
             return
 
+        if content_length > MAX_HEX_CHARS:
+            self._send_json(413, {"error": f"Payload exceeds maximum allowed limit ({MAX_HEX_CHARS} bytes)"})
+            return
+
         # Expect multipart form or binary upload
         content_type = self.headers.get("Content-Type", "")
         if "application/json" in content_type:
@@ -156,13 +171,23 @@ class REMWinAgentHandler(BaseHTTPRequestHandler):
             if not payload_hex:
                 self._send_json(400, {"error": "Missing payload_hex in JSON stage request"})
                 return
+            if len(payload_hex) > MAX_HEX_CHARS:
+                self._send_json(413, {"error": f"Hex payload exceeds maximum size limit ({MAX_HEX_CHARS} chars)"})
+                return
             binary_bytes = bytes.fromhex(payload_hex)
         else:
             # Raw binary upload with headers
             job_id = self.headers.get("X-Malbox-Job-ID", f"job_{int(time.time())}")
             expected_sha256 = self.headers.get("X-Malbox-Expected-SHA256", "").lower()
             filename = self.headers.get("X-Malbox-Filename", "sample.exe")
+            if content_length > MAX_BINARY_BYTES:
+                self._send_json(413, {"error": f"Binary payload exceeds maximum limit ({MAX_BINARY_BYTES} bytes)"})
+                return
             binary_bytes = self.rfile.read(content_length)
+
+        if len(binary_bytes) > MAX_BINARY_BYTES:
+            self._send_json(413, {"error": f"Binary exceeds 32MB limit ({len(binary_bytes)} bytes)"})
+            return
 
         # Validate hash
         actual_sha256 = hashlib.sha256(binary_bytes).hexdigest()
@@ -267,6 +292,21 @@ class REMWinAgentHandler(BaseHTTPRequestHandler):
 
         processes: List[Dict[str, Any]] = []
         network: List[Dict[str, Any]] = []
+        dropped_files: List[Dict[str, Any]] = []
+        collector_status: Dict[str, str] = {}
+        sysmon_events: List[str] = []
+        eventlog_events: List[str] = []
+
+        is_running = bool(SPAWNED_PROCESS and SPAWNED_PROCESS.poll() is None)
+        exit_code = SPAWNED_PROCESS.poll() if SPAWNED_PROCESS else None
+        execution_confirmed = bool(
+            CURRENT_JOB and (
+                "started_at" in CURRENT_JOB
+                or CURRENT_JOB.get("pid") is not None
+                or exit_code is not None
+                or is_running
+            )
+        )
 
         if CURRENT_JOB and "pid" in CURRENT_JOB:
             processes.append({
@@ -274,9 +314,12 @@ class REMWinAgentHandler(BaseHTTPRequestHandler):
                 "name": CURRENT_JOB.get("filename", "sample.exe"),
                 "command_line": CURRENT_JOB.get("staged_path"),
                 "start_time": CURRENT_JOB.get("started_at"),
-                "status": "RUNNING" if (SPAWNED_PROCESS and SPAWNED_PROCESS.poll() is None) else "TERMINATED",
-                "exit_code": SPAWNED_PROCESS.poll() if SPAWNED_PROCESS else None,
+                "status": "RUNNING" if is_running else "TERMINATED",
+                "exit_code": exit_code,
             })
+            collector_status["processes"] = "COLLECTED"
+        else:
+            collector_status["processes"] = "EMPTY"
 
         # Netstat snapshot
         try:
@@ -292,14 +335,83 @@ class REMWinAgentHandler(BaseHTTPRequestHandler):
                             "state": parts[3] if len(parts) > 4 else "UNKNOWN",
                             "pid": parts[-1] if len(parts) >= 5 else None,
                         })
+                collector_status["network"] = "COLLECTED" if network else "EMPTY"
+            else:
+                collector_status["network"] = "FAILED"
+        except FileNotFoundError:
+            collector_status["network"] = "UNAVAILABLE"
         except Exception:
-            pass
+            collector_status["network"] = "FAILED"
+
+        # Check dropped files in job workspace
+        if CURRENT_JOB and "job_id" in CURRENT_JOB:
+            job_ws = WORKSPACE_ROOT / CURRENT_JOB["job_id"]
+            if job_ws.is_dir():
+                staged_name = CURRENT_JOB.get("filename", "")
+                for p in job_ws.rglob("*"):
+                    if p.is_file() and p.name != staged_name:
+                        dropped_files.append({
+                            "name": p.name,
+                            "path": str(p),
+                            "size_bytes": p.stat().st_size,
+                            "sha256": get_file_sha256(p),
+                        })
+                collector_status["dropped_files"] = "COLLECTED" if dropped_files else "EMPTY"
+            else:
+                collector_status["dropped_files"] = "EMPTY"
+        else:
+            collector_status["dropped_files"] = "EMPTY"
+
+        # Sysmon telemetry probe (wevtutil)
+        try:
+            sysmon_res = subprocess.run(
+                ["wevtutil", "qe", "Microsoft-Windows-Sysmon/Operational", "/c:50", "/f:RenderedXml"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if sysmon_res.returncode == 0:
+                sysmon_out = sysmon_res.stdout.strip()
+                if sysmon_out:
+                    sysmon_events.append(sysmon_out)
+                collector_status["sysmon"] = "COLLECTED"
+            else:
+                collector_status["sysmon"] = "FAILED"
+        except FileNotFoundError:
+            collector_status["sysmon"] = "UNAVAILABLE"
+        except Exception:
+            collector_status["sysmon"] = "FAILED"
+
+        # Windows EventLog probe (Security channel)
+        try:
+            ev_res = subprocess.run(
+                ["wevtutil", "qe", "Security", "/c:20", "/f:RenderedXml"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if ev_res.returncode == 0:
+                ev_out = ev_res.stdout.strip()
+                if ev_out:
+                    eventlog_events.append(ev_out)
+                collector_status["eventlog"] = "COLLECTED"
+            else:
+                collector_status["eventlog"] = "FAILED"
+        except FileNotFoundError:
+            collector_status["eventlog"] = "UNAVAILABLE"
+        except Exception:
+            collector_status["eventlog"] = "FAILED"
 
         self._send_json(200, {
             "job_id": CURRENT_JOB.get("job_id") if CURRENT_JOB else None,
             "sha256": CURRENT_JOB.get("sha256") if CURRENT_JOB else None,
+            "execution_confirmed": execution_confirmed,
             "processes": processes,
             "network": network,
+            "dropped_files": dropped_files,
+            "sysmon_events": sysmon_events,
+            "eventlog_events": eventlog_events,
+            "collector_status": collector_status,
             "collected_at": time.time(),
         })
 

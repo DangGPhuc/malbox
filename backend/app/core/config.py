@@ -127,12 +127,12 @@ class Settings(BaseSettings):
 
     # REMnux Sandbox Gateway & VirtualBox Host Controller Settings
     REMNUX_GATEWAY_URL: str = "http://192.168.56.10:8008"
-    REMNUX_GATEWAY_TOKEN: str = "remnux-gateway-auth-token-xyz"
+    REMNUX_GATEWAY_TOKEN: str = ""
     REMNUX_GATEWAY_TIMEOUT_SECONDS: int = 300
     REMNUX_GUEST_VM_UUID: str = "REMWin"
     REMNUX_CLEAN_SNAPSHOT: str = "clean_snapshot"
     VBOX_CONTROLLER_URL: str = "http://127.0.0.1:8005"
-    VBOX_CONTROLLER_SECRET: str = "malbox-vbox-host-secret-token"
+    VBOX_CONTROLLER_SECRET: str = ""
 
     def model_post_init(self, __context: Any) -> None:
         if self.CAPE_MACHINE and self.CAPE_DEFAULT_MACHINE == "win10_analyst":
