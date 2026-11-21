@@ -7,6 +7,9 @@
 **Status:** **OPERATIONAL — COMPLETE AUTOMATED PROVISIONING & PRODUCTION LIVE-FIRST PLATFORM**  
 **CI Run:** [https://github.com/DangGPhuc/malbox/actions/runs/44761351446](https://github.com/DangGPhuc/malbox/actions/runs/44761351446) (PASS: Backend 272 passed, Frontend 51 passed)
 **Release Documents:**
+- [`docs/deployment/REMNUX_VIRTUALBOX_INSTALLATION_GUIDE.md`](deployment/REMNUX_VIRTUALBOX_INSTALLATION_GUIDE.md) — Complete Step-by-Step Installation Guide for REMnux Gateway & REMWin VirtualBox Lab
+- [`docs/deployment/REMNUX_VIRTUALBOX_LAB.md`](deployment/REMNUX_VIRTUALBOX_LAB.md) — Deployment Profile Specification for Dual-Interface Peer-VM Architecture
+- [`docs/architecture/ADR_REMNUX_VIRTUALBOX_GATEWAY.md`](architecture/ADR_REMNUX_VIRTUALBOX_GATEWAY.md) — ADR-008: Deterministic REMnux Gateway and REMWin Automated Sandbox Architecture
 - [`docs/deployment/OPERATOR_INSTALLATION_GUIDE.md`](deployment/OPERATOR_INSTALLATION_GUIDE.md) — Complete Automated Operator Installation & Provisioning Guide
 - [`docs/deployment/UNINSTALL_AND_ROLLBACK.md`](deployment/UNINSTALL_AND_ROLLBACK.md) — Teardown, State Reset, and Complete Uninstall Guide
 - [`docs/architecture/live-first-analysis.md`](architecture/live-first-analysis.md) — Live-First Suspicious File Analysis Architecture & Confinement Gate
@@ -22,6 +25,7 @@
 
 | Subsystem | Readiness | Verification Evidence | Operational Details |
 | :--- | :--- | :--- | :--- |
+| **REMnux Gateway & VirtualBox Peer-VM Lab** | **VERIFIED** | `test_remnux_virtualbox_gateway.py` (20/20 PASSED) | Peer-VM execution topology (`REMNUX_VIRTUALBOX_LAB`). Dual-network isolation (`vboxnet0` 192.168.56.0/24 + `malbox-sandbox` 10.77.0.0/24). Physical host controller with HMAC replay defense, VM allowlist, and clean snapshot cycling. Constrained MCP tool server. Non-negotiable invariant: ZERO AI outside Kali. |
 | **Mandatory CAPE Confinement Gate** | **VERIFIED** | `test_cape_confinement_gate.py` (8/8 PASSED) | Fail-closed isolation contract (`verify_cape_confinement`). Requires explicit operator attestation (`cape_isolation_attestation.json`), unexpired timestamp, and safe route allowlist (`drop`, `none`, `isolated`). Configured route name never implies verified isolation. |
 | **Ghidra / CAPE Sequential Synchronization** | **VERIFIED** | `test_ghidra_sequential_cleanup.py` (3/3 PASSED) | Pipeline waits for Ghidra completion before CAPE detonation. On Ghidra timeout, enforces process group termination via `cancel_active(wait_seconds)`. If Ghidra process remains active, transitions to `FAILED` and blocks CAPE. Accurately records `TIMED_OUT`. |
 | **Bounded CAPE Transport & Monotonic Deadlines** | **VERIFIED** | `test_cape_transport_deadline.py` (6/6 PASSED) | Strict monotonic deadline spanning polling, report retrieval, and artifact streaming. Eliminates artificial 5s deadline extension. Bounded streaming bodies (50 MB report, 100 MB artifact). 200 MB free disk space check. Guaranteed `.tmp` file cleanup on failure. |
@@ -44,7 +48,8 @@
 ## 2. Test Execution Outcomes
 
 ### Backend (`pytest` 9.2.0)
-- **Full Backend Test Suite:** **272 passed, 1 skipped** in 58.35s
+- **Full Backend Test Suite:** **292 passed, 1 skipped** in 59.12s
+  * `test_remnux_virtualbox_gateway.py`: 20 passed
   * `test_automated_provisioning.py`: 13 passed
   * `test_cape_confinement_gate.py`: 8 passed
   * `test_ghidra_sequential_cleanup.py`: 3 passed
