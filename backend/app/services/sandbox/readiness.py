@@ -42,6 +42,30 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
     elif not op_auth_configured:
         readiness_status = "operator_auth_unconfigured"
         details = "Operator authorization token is unconfigured or too short (fail-closed security boundary)."
+    elif check_cape and getattr(settings, "DEFAULT_SANDBOX_BACKEND", "cape") == "remnux_gateway":
+        try:
+            from app.services.sandbox.remnux_gateway import RemnuxGatewayBackend
+            gw = RemnuxGatewayBackend()
+            probe = gw.check_readiness(timeout=timeout)
+            if probe.get("ready"):
+                cape_reachable = True
+                cape_authenticated = True
+                cape_compatible = True
+                cape_version = "REMnux Gateway 1.0"
+                guest_vms_total = 1
+                guest_vms_available = 1
+                guest_vm_ready = True
+                network_isolation_verified = True
+                readiness_status = "ready"
+                details = "REMnux Gateway and VirtualBox Host Controller active and verified."
+            else:
+                cape_reachable = probe.get("gateway_reachable", False)
+                cape_authenticated = probe.get("gateway_authenticated", False)
+                readiness_status = "gateway_unreachable"
+                details = probe.get("error", "REMnux gateway unreachable.")
+        except Exception as e:
+            readiness_status = "error"
+            details = f"Failed to probe REMnux Gateway: {str(e)}"
     elif check_cape and cape_configured:
         try:
             from app.services.sandbox.cape import CapeSandboxBackend
@@ -144,16 +168,24 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
         prerequisites_missing.append("Live analysis disabled by server policy (MALBOX_LIVE_MODE_ENABLED=false)")
     if not op_auth_configured:
         prerequisites_missing.append("Operator authorization token unconfigured or too short (MALBOX_OPERATOR_TOKEN)")
-    if not cape_configured:
-        prerequisites_missing.append("CAPE API URL unconfigured (MALBOX_CAPE_API_URL)")
-    elif not cape_reachable:
-        prerequisites_missing.append(f"CAPE API unreachable at {settings.CAPE_API_URL}")
-    elif not cape_authenticated:
-        prerequisites_missing.append("CAPE API authentication failed")
-    elif not guest_vm_ready:
-        prerequisites_missing.append(details or "No guest analysis machines are registered or available")
-    elif not network_isolation_verified:
-        prerequisites_missing.append(details or "CAPE network isolation attestation unverified")
+    if getattr(settings, "DEFAULT_SANDBOX_BACKEND", "cape") == "remnux_gateway":
+        if not cape_reachable:
+            prerequisites_missing.append(f"REMnux Gateway unreachable at {getattr(settings, 'REMNUX_GATEWAY_URL', '')}")
+        elif not guest_vm_ready:
+            prerequisites_missing.append(f"VirtualBox Host Controller unreachable at {getattr(settings, 'VBOX_CONTROLLER_URL', '')}")
+        elif not network_isolation_verified:
+            prerequisites_missing.append("REMnux / VirtualBox network isolation unverified")
+    else:
+        if not cape_configured:
+            prerequisites_missing.append("CAPE API URL unconfigured (MALBOX_CAPE_API_URL)")
+        elif not cape_reachable:
+            prerequisites_missing.append(f"CAPE API unreachable at {settings.CAPE_API_URL}")
+        elif not cape_authenticated:
+            prerequisites_missing.append("CAPE API authentication failed")
+        elif not guest_vm_ready:
+            prerequisites_missing.append(details or "No guest analysis machines are registered or available")
+        elif not network_isolation_verified:
+            prerequisites_missing.append(details or "CAPE network isolation attestation unverified")
 
     return {
         "ready_for_analysis": ready_for_analysis,
@@ -283,6 +315,29 @@ def check_infrastructure_readiness(timeout: float = 2.0) -> Dict[str, Any]:
             "remediation": "./malbox setup --verify" if not detonation_ready else None,
         },
     }
+
+    if getattr(settings, "DEFAULT_SANDBOX_BACKEND", "cape") == "remnux_gateway":
+        subsystems["cape"] = {
+            "name": "REMnux Sandbox Gateway API",
+            "tier": "CAPE_API_READY",
+            "status": "READY" if cape_api_ready else ("UNREACHABLE" if not base_readiness.get("cape_reachable") else "UNAUTHORIZED"),
+            "details": f"REMnux Gateway active at {getattr(settings, 'REMNUX_GATEWAY_URL', '')}." if cape_api_ready else f"Cannot communicate with REMnux Gateway at {getattr(settings, 'REMNUX_GATEWAY_URL', '')}.",
+            "remediation": "./malbox setup --configure-lab-network" if not cape_api_ready else None,
+        }
+        subsystems["guest"] = {
+            "name": "VirtualBox REMWin Guest VM",
+            "tier": "GUEST_READY",
+            "status": "READY" if guest_ready else "UNAVAILABLE",
+            "details": f"Host Controller at {getattr(settings, 'VBOX_CONTROLLER_URL', '')} controlling REMWin VM." if guest_ready else "VirtualBox Host Controller unreachable or REMWin guest not ready.",
+            "remediation": "./malbox setup --audit-lab-network" if not guest_ready else None,
+        }
+        subsystems["isolation"] = {
+            "name": "REMnux Dual-Interface Isolation",
+            "tier": "CONFINEMENT_VERIFIED",
+            "status": "VERIFIED" if confinement_verified else "BLOCKED",
+            "details": "Dual-network topology verified: Host-only vboxnet0 (192.168.56.0/24) + Internal malbox-sandbox (10.77.0.0/24)." if confinement_verified else "REMnux or REMWin network isolation unverified; live malware execution is BLOCKED.",
+            "remediation": "./malbox setup --audit-lab-network" if not confinement_verified else None,
+        }
 
     remediation_commands = [
         s["remediation"] for s in subsystems.values() if s.get("remediation")

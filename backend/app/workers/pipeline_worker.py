@@ -433,6 +433,99 @@ class PipelineWorker:
                     self.db.commit()
                     return analysis
 
+            elif analysis.backend_type == SandboxBackendType.REMNUX_GATEWAY.value:
+                if not settings.LIVE_MODE_ENABLED:
+                    safe_update_status(analysis, self.db, AnalysisStatus.BLOCKED_BY_POLICY)
+                    analysis.error_message = "Safety Policy Violation: Live sandbox execution is disabled server-side."
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    return analysis
+
+                if not analysis.live_mode or not analysis.approved_by_user:
+                    safe_update_status(analysis, self.db, AnalysisStatus.BLOCKED_BY_POLICY)
+                    analysis.error_message = "Safety Policy Violation: REMnux Gateway execution requires live_mode=true and approved_by_user=true."
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    return analysis
+
+                from app.services.sandbox.remnux_gateway import RemnuxGatewayBackend
+                sandbox = RemnuxGatewayBackend()
+
+                readiness = sandbox.check_readiness(timeout=2.0)
+                if not readiness.get("ready") or not readiness.get("confinement_verified"):
+                    safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                    err_msg = f"REMnux Gateway confinement or readiness check failed: {readiness.get('error')}"
+                    analysis.error_message = err_msg
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    try:
+                        from app.services.evidence_correlation.service import EvidenceCorrelationService
+                        EvidenceCorrelationService(self.db).compute_and_persist(analysis.id, triggered_automatically=True)
+                    except Exception:
+                        pass
+                    try:
+                        from app.schemas.report import RiskAssessment
+                        safe_risk = RiskAssessment(score=0, level="Inconclusive / Incomplete", confidence=0.0)
+                        ReportGenerator(self.db).generate_report(
+                            analysis.id,
+                            safe_risk,
+                            ai_summary=f"Dynamic execution unavailable: {err_msg}. Static disassembly and triage findings preserved.",
+                            env_metadata={"telemetry_completeness": "UNAVAILABLE", "telemetry_notes": [err_msg]},
+                        )
+                    except Exception:
+                        pass
+                    return analysis
+
+                backend_task_id = sandbox.submit_sample(
+                    sample_path=sample_quarantine_path,
+                    profile=analysis.profile,
+                    timeout_seconds=analysis.timeout_seconds,
+                    options={"analysis_id": analysis.id, "filename": sample.file_name},
+                )
+                analysis.external_task_id = backend_task_id
+                self.db.commit()
+
+                # Poll status until evidence is ready or overall monotonic deadline expires
+                gw_ready = False
+                poll_interval = 2.0
+                while time.monotonic() < overall_deadline:
+                    if self._is_cancelled():
+                        sandbox.cancel_task(backend_task_id)
+                        safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
+                        analysis.completed_at = datetime.now(timezone.utc)
+                        self.db.commit()
+                        return analysis
+
+                    status_info = sandbox.get_task_status(backend_task_id)
+                    curr_status = status_info.get("status")
+                    is_ready = status_info.get("is_ready_for_report", False)
+
+                    if is_ready or curr_status in ["completed", "reported"]:
+                        gw_ready = True
+                        break
+                    elif curr_status in ["failed", "cleanup_failed"]:
+                        safe_update_status(analysis, self.db, AnalysisStatus.FAILED)
+                        analysis.error_message = f"REMnux Gateway analysis failed: {status_info.get('error', 'Execution error')}"
+                        analysis.completed_at = datetime.now(timezone.utc)
+                        self.db.commit()
+                        return analysis
+                    elif curr_status == "cancelled":
+                        safe_update_status(analysis, self.db, AnalysisStatus.CANCELLED)
+                        analysis.error_message = f"REMnux Gateway task cancelled: {status_info.get('error') or curr_status}"
+                        analysis.completed_at = datetime.now(timezone.utc)
+                        self.db.commit()
+                        return analysis
+
+                    time.sleep(poll_interval)
+
+                if not gw_ready:
+                    sandbox.cancel_task(backend_task_id)
+                    safe_update_status(analysis, self.db, AnalysisStatus.TIMED_OUT)
+                    analysis.error_message = f"Analysis timed out waiting for REMnux sandbox after {analysis.timeout_seconds}s."
+                    analysis.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    return analysis
+
             elif analysis.backend_type == SandboxBackendType.REPLAY.value:
                 if not getattr(settings, "ALLOW_SYNTHETIC_REPLAY", False):
                     safe_update_status(analysis, self.db, AnalysisStatus.BLOCKED_BY_POLICY)
@@ -472,7 +565,7 @@ class PipelineWorker:
 
             # 4. COLLECTING
             safe_update_status(analysis, self.db, AnalysisStatus.COLLECTING)
-            if analysis.backend_type == SandboxBackendType.CAPE.value:
+            if analysis.backend_type in (SandboxBackendType.CAPE.value, SandboxBackendType.REMNUX_GATEWAY.value):
                 remaining_time = overall_deadline - time.monotonic()
                 if remaining_time <= 0:
                     sandbox.cancel_task(backend_task_id)

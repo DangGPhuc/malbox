@@ -76,6 +76,35 @@ def _format_doctor_human(report: Dict[str, Any], verbose: bool = False) -> str:
 
 
 def _format_setup_human(res: Dict[str, Any]) -> None:
+    if "profile" in res and res.get("profile") == "REMNUX_VIRTUALBOX_LAB":
+        if "checks" in res:
+            print(f"malbox-ai Lab Network Audit — [{res.get('overall_status', 'UNKNOWN')}]")
+            print("=" * 72)
+            for c in res.get("checks", []):
+                tag = f"[{c.get('status', 'INFO')}]"
+                print(f"{tag:<8} {c['check']:<25} : {c['details']}")
+            if res.get("violations"):
+                print("-" * 72)
+                print("Violations:")
+                for v in res["violations"]:
+                    print(f"  ! {v}")
+            if res.get("remediations"):
+                print("-" * 72)
+                print("Suggested Remediation Commands:")
+                for r in res["remediations"]:
+                    print(f"  $ {r}")
+            print("=" * 72)
+            return
+
+        if "steps" in res and any("command" in s for s in res.get("steps", [])):
+            print("malbox-ai REMNUX_VIRTUALBOX_LAB Setup Commands")
+            print("=" * 72)
+            for s in res.get("steps", []):
+                print(f"\n# {s.get('step')}")
+                for line in s.get("command", "").splitlines():
+                    print(f"  {line}")
+            print("=" * 72)
+            return
     if "verdict" in res:
         print(f"malbox-ai Benign End-to-End Acceptance: [{res['verdict']}]")
         print("=" * 72)
@@ -351,6 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_act.add_argument("--cape", action="store_true", help="Configure CAPE Sandbox Controller connection")
     setup_act.add_argument("--provision-cape", action="store_true", help="Provision and connect CAPE Sandbox Controller")
     setup_act.add_argument("--provision-guest", action="store_true", help="Provision and verify Windows Analysis Guest VM")
+    setup_act.add_argument("--audit-lab-network", action="store_true", help="Read-only audit of REMNUX_VIRTUALBOX_LAB network isolation")
+    setup_act.add_argument("--configure-lab-network", action="store_true", help="Generate structured setup commands for REMNUX_VIRTUALBOX_LAB")
     setup_act.add_argument("--attest-isolation", action="store_true", help="Explicit manual operator isolation attestation workflow")
     setup_act.add_argument("--verify", action="store_true", help="Run post-setup validation checks across all 7 readiness tiers")
     setup_act.add_argument("--benign-e2e", action="store_true", help="Run safe benign non-malicious end-to-end acceptance test")
@@ -491,9 +522,11 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
         from .setup import (
             setup_ai,
             setup_attest_isolation,
+            setup_audit_lab_network,
             setup_benign_e2e,
             setup_cape,
             setup_check,
+            setup_configure_lab_network,
             setup_ghidra,
             setup_install_ai,
             setup_install_core,
@@ -589,6 +622,10 @@ def main(argv: Optional[List[str]] = None, root_dir: Optional[Path] = None) -> i
                 dry_run=args.dry_run,
                 non_interactive=args.non_interactive,
             )
+        elif getattr(args, "audit_lab_network", False):
+            res = setup_audit_lab_network(repo_root)
+        elif getattr(args, "configure_lab_network", False):
+            res = setup_configure_lab_network(repo_root)
         elif getattr(args, "benign_e2e", False):
             res = setup_benign_e2e(
                 repo_root,

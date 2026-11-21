@@ -224,6 +224,18 @@ def setup_provision_guest(
     )
 
 
+def setup_audit_lab_network(root_dir: Path) -> Dict[str, Any]:
+    """Read-only audit of VirtualBox REMNUX_VIRTUALBOX_LAB network isolation."""
+    from .provisioning.remnux_vbox import audit_lab_network
+    return audit_lab_network(root_dir)
+
+
+def setup_configure_lab_network(root_dir: Path) -> Dict[str, Any]:
+    """Generates structured configuration plan for REMNUX_VIRTUALBOX_LAB."""
+    from .provisioning.remnux_vbox import generate_lab_setup_commands
+    return generate_lab_setup_commands()
+
+
 def setup_benign_e2e(
     root_dir: Path,
     operator_token: Optional[str] = None,

@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     GHIDRA_MAX_PERSISTED_RESULT_BYTES: int = 1048576  # 1 MiB DB persistence ceiling
 
     # Pluggable Sandbox Settings
-    DEFAULT_SANDBOX_BACKEND: str = "cape"  # cape (default live), replay (deprecated)
+    DEFAULT_SANDBOX_BACKEND: str = "cape"  # cape (default live), remnux_gateway, replay (deprecated)
     CAPE_API_URL: str = "http://127.0.0.1:8008"  # Distinct from application port 8000
     CAPE_API_TOKEN: str = ""
     CAPE_TIMEOUT_SECONDS: int = 300
@@ -124,6 +124,15 @@ class Settings(BaseSettings):
     CAPE_MACHINE: Optional[str] = None
     CAPE_ROUTE: Optional[str] = None
     CAPE_ATTESTATION_PATH: Optional[str] = None
+
+    # REMnux Sandbox Gateway & VirtualBox Host Controller Settings
+    REMNUX_GATEWAY_URL: str = "http://192.168.56.10:8008"
+    REMNUX_GATEWAY_TOKEN: str = "remnux-gateway-auth-token-xyz"
+    REMNUX_GATEWAY_TIMEOUT_SECONDS: int = 300
+    REMNUX_GUEST_VM_UUID: str = "REMWin"
+    REMNUX_CLEAN_SNAPSHOT: str = "clean_snapshot"
+    VBOX_CONTROLLER_URL: str = "http://127.0.0.1:8005"
+    VBOX_CONTROLLER_SECRET: str = "malbox-vbox-host-secret-token"
 
     def model_post_init(self, __context: Any) -> None:
         if self.CAPE_MACHINE and self.CAPE_DEFAULT_MACHINE == "win10_analyst":
