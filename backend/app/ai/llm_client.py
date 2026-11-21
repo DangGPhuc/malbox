@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 import httpx
 
 from app.core.config import settings
@@ -10,6 +12,47 @@ from app.core.security import sanitize_untrusted_input_for_ai
 from app.schemas.orchestration import AnalysisPlan, FollowUpRecommendation
 
 logger = logging.getLogger(__name__)
+
+TRUSTED_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def validate_local_ai_endpoint(base_url: str) -> None:
+    """
+    Enforces trusted local endpoint policy: base_url must point strictly to loopback
+    (localhost, 127.0.0.1, ::1) or explicitly approved private inference hosts via
+    TRUSTED_LOCAL_AI_HOSTS. External/unauthorized hosts are strictly rejected when provider='local'.
+    """
+    if not base_url:
+        raise ValueError("Local AI base_url cannot be empty.")
+
+    try:
+        parsed = urlparse(base_url)
+        host = (parsed.hostname or "").strip().lower()
+    except Exception as exc:
+        raise ValueError(f"Invalid local AI base_url '{base_url}': {str(exc)}") from exc
+
+    if not host:
+        raise ValueError(f"Invalid local AI base_url '{base_url}': missing hostname.")
+
+    if host in TRUSTED_LOOPBACK_HOSTS:
+        return
+
+    # Check explicitly approved private inference hosts from configuration
+    allowed_raw = getattr(settings, "TRUSTED_LOCAL_AI_HOSTS", None) or os.environ.get("MALBOX_TRUSTED_LOCAL_AI_HOSTS", "")
+    allowed_list = (
+        [h.strip().lower() for h in allowed_raw.split(",") if h.strip()]
+        if isinstance(allowed_raw, str)
+        else [str(h).strip().lower() for h in allowed_raw]
+    )
+    if host in allowed_list:
+        return
+
+    raise ValueError(
+        f"Untrusted local AI endpoint host '{host}'. Local AI policy strictly requires loopback (localhost, 127.0.0.1, ::1) "
+        f"or explicitly approved private hosts in TRUSTED_LOCAL_AI_HOSTS ({allowed_list}). External or remote hosts "
+        f"cannot be accessed under local AI mode without cloud provider consent."
+    )
+
 
 class RealLLMProvider(LLMProvider):
     """
@@ -23,11 +66,15 @@ class RealLLMProvider(LLMProvider):
         model: str,
         base_url: Optional[str] = None,
         timeout: Optional[float] = None,
+        is_local: bool = False,
     ):
         self.api_key = api_key
         self.model = model
         self.base_url = (base_url or settings.AI_BASE_URL).rstrip("/")
         self.timeout = timeout or settings.AI_TIMEOUT_SECONDS
+        self.is_local = is_local
+        if self.is_local:
+            validate_local_ai_endpoint(self.base_url)
         self.provider_name = "real"
         self.last_call_meta: Dict[str, Any] = {
             "provider": "real",
@@ -100,7 +147,7 @@ class RealLLMProvider(LLMProvider):
             }
             return validated.model_dump()
         except Exception as e:
-            logger.warning(f"Real LLM plan generation failed: {e}. Falling back to MockLLMProvider.")
+            logger.warning(f"Real LLM plan generation failed: {e}. Falling back to deterministic MockLLMProvider.")
             self.last_call_meta = {
                 "provider": "mock_fallback",
                 "model": self.model,
@@ -109,7 +156,9 @@ class RealLLMProvider(LLMProvider):
                 "fallback_reason": str(e),
             }
             mock = MockLLMProvider()
-            return mock.generate_plan(sample_metadata)
+            plan = mock.generate_plan(sample_metadata)
+            plan["rationale"] = f"[AI PLANNER UNAVAILABLE: {e}] Deterministic static triage plan applied. " + plan.get("rationale", "")
+            return plan
 
     def evaluate_observations(
         self,
@@ -146,7 +195,7 @@ class RealLLMProvider(LLMProvider):
             }
             return validated.model_dump()
         except Exception as e:
-            logger.warning(f"Real LLM observation evaluation failed: {e}. Falling back to MockLLMProvider.")
+            logger.warning(f"Real LLM observation evaluation failed: {e}. Falling back to deterministic MockLLMProvider.")
             self.last_call_meta = {
                 "provider": "mock_fallback",
                 "model": self.model,
@@ -155,7 +204,9 @@ class RealLLMProvider(LLMProvider):
                 "fallback_reason": str(e),
             }
             mock = MockLLMProvider()
-            return mock.evaluate_observations(sample_metadata, telemetry_summary)
+            eval_res = mock.evaluate_observations(sample_metadata, telemetry_summary)
+            eval_res["rationale"] = f"[AI EVALUATOR UNAVAILABLE: {e}] Deterministic follow-up rules applied. " + eval_res.get("rationale", "")
+            return eval_res
 
     def generate_executive_summary(
         self,
@@ -181,7 +232,7 @@ class RealLLMProvider(LLMProvider):
             }
             return result["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.warning(f"Real LLM summary generation failed: {e}. Falling back to MockLLMProvider.")
+            logger.warning(f"Real LLM summary generation failed: {e}. Falling back to deterministic MockLLMProvider.")
             self.last_call_meta = {
                 "provider": "mock_fallback",
                 "model": self.model,
@@ -190,12 +241,113 @@ class RealLLMProvider(LLMProvider):
                 "fallback_reason": str(e),
             }
             mock = MockLLMProvider()
-            return mock.generate_executive_summary(sample_metadata, findings_summary, timeline)
+            summary = mock.generate_executive_summary(sample_metadata, findings_summary, timeline)
+            return f"[AI SUMMARY UNAVAILABLE: {e}] Non-AI technical summary: " + summary
+
+
+    def generate_intelligence_report(
+        self,
+        bundle: "VerifiedEvidenceBundle",
+        rules_text: "Optional[str]" = None,
+        cancel_event: "Optional[Any]" = None,
+    ) -> "IntelligenceReport":
+        from app.ai.intelligence_helper import run_bounded_llm_intelligence
+
+        report, call_meta = run_bounded_llm_intelligence(
+            bundle=bundle,
+            api_key=self.api_key,
+            model=self.model,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            rules_text=rules_text,
+            cancel_event=cancel_event,
+        )
+        self.last_call_meta = call_meta
+        return report
+
+
+def get_local_ai_base_url() -> str:
+    """Returns local AI endpoint URL, defaulting to loopback Ollama if unconfigured or default cloud URL."""
+    url = getattr(settings, "AI_BASE_URL", "") or ""
+    if not url or "api.openai.com" in url.lower():
+        return "http://127.0.0.1:11434/v1"
+    return url
 
 
 def get_llm_provider() -> LLMProvider:
     """Factory returns active AI provider based on configuration."""
+    if settings.AI_PROVIDER in ("local", "ollama"):
+        url = get_local_ai_base_url()
+        return RealLLMProvider(
+            api_key=settings.AI_API_KEY or "ollama",
+            model=settings.AI_MODEL or "llama3",
+            base_url=url,
+            timeout=settings.AI_TIMEOUT_SECONDS,
+            is_local=True,
+        )
     if settings.AI_PROVIDER != "mock" and settings.AI_API_KEY:
+        return RealLLMProvider(
+            api_key=settings.AI_API_KEY,
+            model=settings.AI_MODEL,
+            base_url=settings.AI_BASE_URL,
+            timeout=settings.AI_TIMEOUT_SECONDS,
+            is_local=False,
+        )
+    return MockLLMProvider()
+
+
+def get_reporting_llm_provider(
+    force_external: bool = False,
+    requested_mode: "Optional[str]" = None,
+) -> LLMProvider:
+    """
+    Returns reporting intelligence provider respecting AI_REPORTING_MODE and explicit
+    external transmission consent. Defaults strictly to offline MockLLMProvider.
+    Local AI models (e.g. Ollama) execute locally on the host and do not require external consent.
+    """
+    cfg_mode = (getattr(settings, "AI_REPORTING_MODE", "opt_in") or "opt_in").strip().lower()
+    cfg_prov = (getattr(settings, "AI_PROVIDER", "mock") or "mock").strip().lower()
+
+    req_mode = (requested_mode or "").strip().lower()
+    if not req_mode or req_mode in ("auto", "opt_in"):
+        if cfg_mode in ("local", "ollama") or cfg_prov in ("local", "ollama"):
+            mode = "local"
+        elif cfg_mode == "opt_in":
+            if cfg_prov != "mock" and getattr(settings, "AI_API_KEY", ""):
+                mode = "llm"
+            else:
+                mode = "deterministic"
+        else:
+            mode = cfg_mode
+    else:
+        mode = req_mode
+
+    if mode == "deterministic":
+        return MockLLMProvider()
+
+    # Local AI provider (Ollama / Local OpenAI-compatible server on localhost)
+    if mode in ("local", "ollama") or cfg_prov in ("local", "ollama"):
+        url = get_local_ai_base_url()
+        return RealLLMProvider(
+            api_key=settings.AI_API_KEY or "ollama",
+            model=settings.AI_MODEL or "llama3",
+            base_url=url,
+            timeout=settings.AI_TIMEOUT_SECONDS,
+            is_local=True,
+        )
+
+    if mode == "opencode" or (force_external and mode == "auto" and getattr(settings, "OPENCODE_ENABLED", False)):
+        from app.ai.opencode_provider import OpenCodeReportProvider
+
+        return OpenCodeReportProvider()
+
+    has_consent = bool(getattr(settings, "REPORTING_EXTERNAL_AI_CONSENT", False))
+    if (
+        (mode == "llm" or (force_external and mode == "auto"))
+        and has_consent
+        and settings.AI_PROVIDER != "mock"
+        and settings.AI_API_KEY
+    ):
         return RealLLMProvider(
             api_key=settings.AI_API_KEY,
             model=settings.AI_MODEL,

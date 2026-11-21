@@ -2,7 +2,7 @@ name: malbox-ai CI
 
 on:
   push:
-    branches: [ "main", "dev", "rebuild/*", "audit/*" ]
+    branches: [ "main", "dev", "rebuild/*", "audit/*", "feat/*", "fix/*" ]
   pull_request:
     branches: [ "main", "dev" ]
 
@@ -28,7 +28,7 @@ jobs:
 
       - name: Compile check (bytecode verification)
         run: |
-          python -m compileall -q backend/app backend/tests
+          python -m compileall -q backend/app backend/tests scripts
 
       - name: Module import check
         run: |
@@ -65,6 +65,12 @@ jobs:
         run: |
           cd frontend
           npm ci
+
+      - name: Typecheck & Run Frontend Unit Tests
+        run: |
+          cd frontend
+          npm run typecheck
+          npm test
 
       - name: Build frontend distribution
         run: |

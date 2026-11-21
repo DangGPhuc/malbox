@@ -10,6 +10,8 @@ if [ -d ".venv" ]; then
 fi
 
 export PYTHONPATH=backend
-echo "[*] Starting malbox-ai Backend API on http://127.0.0.1:8000..."
-exec python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+HOST="${MALBOX_HOST:-$(python3 -c 'from app.core.config import settings; print(settings.HOST)' 2>/dev/null || echo 127.0.0.1)}"
+PORT="${MALBOX_PORT:-$(python3 -c 'from app.core.config import settings; print(settings.PORT)' 2>/dev/null || echo 8000)}"
 
+echo "[*] Starting malbox-ai Backend API on http://${HOST}:${PORT}..."
+exec python3 -m uvicorn app.main:app --host "$HOST" --port "$PORT" --reload

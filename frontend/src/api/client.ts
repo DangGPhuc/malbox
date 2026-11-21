@@ -9,14 +9,59 @@ import {
   OrchestrationRecord,
   ReportResponse,
   ArtifactItem,
+  IntelligenceEnrichRequest,
+  StaticAnalysisResult,
+  StaticAnalysisJobAcceptedResponse,
+  CorrelationResult,
+  InfrastructureReadinessResponse,
 } from '../types';
 
 const BASE_URL = '/api/v1';
+
+export class EnrichmentApiError extends Error {
+  readonly status: number;
+  readonly retryAfterSeconds?: number;
+
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
+    super(message);
+    this.name = 'EnrichmentApiError';
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+export class StaticAnalysisApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'StaticAnalysisApiError';
+    this.status = status;
+  }
+}
+
+export class CorrelationApiError extends Error {
+  readonly status: number;
+  readonly retryAfterSeconds?: number;
+
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
+    super(message);
+    this.name = 'CorrelationApiError';
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 export const api = {
   async getHealth(): Promise<HealthStatus> {
     const res = await fetch(`${BASE_URL}/health`);
     if (!res.ok) throw new Error('Failed to retrieve health status');
+    return res.json();
+  },
+
+  async getInfrastructureReadiness(): Promise<InfrastructureReadinessResponse> {
+    const res = await fetch(`${BASE_URL}/health/infrastructure`);
+    if (!res.ok) throw new Error('Failed to retrieve infrastructure readiness status');
     return res.json();
   },
 
@@ -99,13 +144,30 @@ export const api = {
     return res.json();
   },
 
+  async retryAnalysis(analysisId: string, operatorToken?: string): Promise<AnalysisDetail> {
+    const headers: Record<string, string> = {};
+    if (operatorToken) {
+      headers['X-Operator-Token'] = operatorToken;
+    }
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/retry`, {
+      method: 'POST',
+      headers,
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || 'Failed to retry analysis');
+    }
+    return res.json();
+  },
+
   async getEvents(
     analysisId: string,
-    params?: { category?: string; action?: string; page?: number; page_size?: number }
+    params?: { category?: string; action?: string; process_id?: number; page?: number; page_size?: number }
   ): Promise<{ total: number; page: number; page_size: number; items: AnalysisEvent[] }> {
     const query = new URLSearchParams();
     if (params?.category) query.append('category', params.category);
     if (params?.action) query.append('action', params.action);
+    if (params?.process_id !== undefined) query.append('process_id', params.process_id.toString());
     if (params?.page) query.append('page', params.page.toString());
     if (params?.page_size) query.append('page_size', params.page_size.toString());
 
@@ -144,10 +206,138 @@ export const api = {
     return res.json();
   },
 
+  async enrichReportIntelligence(
+    analysisId: string,
+    payload: IntelligenceEnrichRequest,
+    reportingToken: string
+  ): Promise<ReportResponse> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const trimmedToken = reportingToken.trim();
+    if (trimmedToken) {
+      headers['X-Reporting-Token'] = trimmedToken;
+    }
+
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/report/intelligence`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const retryRaw = res.headers?.get?.('Retry-After');
+      const retrySec = retryRaw && /^\d+$/.test(retryRaw.trim()) ? Number(retryRaw.trim()) : undefined;
+      const errBody = await res.json().catch(() => ({ detail: `Enrichment failed (${res.status})` }));
+      const detail =
+        typeof errBody?.detail === 'string'
+          ? errBody.detail
+          : `Intelligence enrichment failed with status ${res.status}.`;
+      throw new EnrichmentApiError(detail, res.status, retrySec);
+    }
+
+    return res.json();
+  },
+
   async getArtifacts(analysisId: string): Promise<ArtifactItem[]> {
     const res = await fetch(`${BASE_URL}/analyses/${analysisId}/artifacts`);
     if (!res.ok) throw new Error('Failed to retrieve artifacts');
     return res.json();
   },
-};
 
+  async getStaticAnalysis(analysisId: string, signal?: AbortSignal): Promise<StaticAnalysisResult> {
+    const res = await fetch(
+      `${BASE_URL}/analyses/${analysisId}/static-analysis`,
+      signal ? { signal } : undefined
+    );
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Failed to retrieve static analysis (${res.status})` }));
+      const detail = typeof errBody?.detail === 'string' ? errBody.detail : 'Failed to retrieve static analysis';
+      throw new StaticAnalysisApiError(detail, res.status);
+    }
+    return res.json();
+  },
+
+  async getSampleStaticAnalysis(sampleId: string): Promise<StaticAnalysisResult> {
+    const res = await fetch(`${BASE_URL}/samples/${sampleId}/static-analysis`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Failed to retrieve sample static analysis (${res.status})` }));
+      const detail = typeof errBody?.detail === 'string' ? errBody.detail : 'Failed to retrieve sample static analysis';
+      throw new StaticAnalysisApiError(detail, res.status);
+    }
+    return res.json();
+  },
+
+  async triggerStaticAnalysis(
+    analysisId: string,
+    reportingToken: string
+  ): Promise<StaticAnalysisJobAcceptedResponse> {
+    const headers: Record<string, string> = {};
+    const trimmed = reportingToken.trim();
+    if (trimmed) {
+      headers['X-Reporting-Token'] = trimmed;
+    }
+
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/static-analysis`, {
+      method: 'POST',
+      headers,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Static analysis trigger failed (${res.status})` }));
+      const detail =
+        typeof errBody?.detail === 'string'
+          ? errBody.detail
+          : `Static analysis trigger failed with status ${res.status}.`;
+      throw new StaticAnalysisApiError(detail, res.status);
+    }
+    return res.json();
+  },
+
+  getReportHtmlUrl(analysisId: string): string {
+    return `${BASE_URL}/analyses/${analysisId}/report/html`;
+  },
+
+  async getCorrelation(analysisId: string, signal?: AbortSignal): Promise<CorrelationResult> {
+    const res = await fetch(
+      `${BASE_URL}/analyses/${analysisId}/correlation`,
+      signal ? { signal } : undefined
+    );
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({ detail: `Failed to retrieve correlation (${res.status})` }));
+      const detail = typeof errBody?.detail === 'string' ? errBody.detail : 'Failed to retrieve correlation';
+      throw new CorrelationApiError(detail, res.status);
+    }
+    return res.json();
+  },
+
+  async triggerCorrelation(
+    analysisId: string,
+    reportingToken: string,
+    force: boolean = false
+  ): Promise<CorrelationResult> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const trimmed = reportingToken.trim();
+    if (trimmed) {
+      headers['X-Reporting-Token'] = trimmed;
+    }
+
+    const res = await fetch(`${BASE_URL}/analyses/${analysisId}/correlation`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ force }),
+    });
+    if (!res.ok) {
+      const retryRaw = res.headers?.get?.('Retry-After');
+      const retrySec = retryRaw && /^\d+$/.test(retryRaw.trim()) ? Number(retryRaw.trim()) : undefined;
+      const errBody = await res.json().catch(() => ({ detail: `Correlation recompute failed (${res.status})` }));
+      const detail =
+        typeof errBody?.detail === 'string'
+          ? errBody.detail
+          : `Correlation trigger failed with status ${res.status}.`;
+      throw new CorrelationApiError(detail, res.status, retrySec);
+    }
+    return res.json();
+  },
+};

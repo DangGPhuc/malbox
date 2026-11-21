@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+set -eu
+
+# Root-level executable entrypoint for malbox-ai CLI.
+# Requires only POSIX shell utilities and system Python 3.10+ before project deps exist.
+
+SCRIPT_PATH="$0"
+if command -v readlink >/dev/null 2>&1; then
+    RESOLVED="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || echo "$SCRIPT_PATH")"
+else
+    RESOLVED="$SCRIPT_PATH"
+fi
+ROOT_DIR="$(cd "$(dirname "$RESOLVED")" && pwd)"
+
+PY_BIN=""
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+            PY_BIN="$candidate"
+            break
+        fi
+        if [ -z "$PY_BIN" ]; then
+            PY_BIN="$candidate"
+        fi
+    fi
+done
+
+if [ -z "$PY_BIN" ]; then
+    echo "[FAIL] Python 3.10+ is required to run malbox CLI, but neither python3 nor python was found in PATH." >&2
+    echo "       Install Python 3.10+ manually using your system package manager (without running malbox with sudo)." >&2
+    exit 1
+fi
+
+export PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY_BIN" -m malbox_cli "$@"

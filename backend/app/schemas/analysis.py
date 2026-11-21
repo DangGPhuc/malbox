@@ -6,15 +6,15 @@ from app.models.analysis import AnalysisStatus, SandboxBackendType
 class AnalysisCreate(BaseModel):
     sample_id: str
     backend_type: SandboxBackendType = Field(
-        default=SandboxBackendType.REPLAY,
-        description="Execution backend: 'replay' or 'cape'"
+        default=SandboxBackendType.CAPE,
+        description="Execution backend: 'cape' (production default) or 'replay'"
     )
     profile: str = Field(
         default="standard",
         description="Analysis profile, e.g. standard, ransomware_focus, infostealer_focus, evasion_focus"
     )
     timeout_seconds: int = Field(default=120, ge=10, le=600)
-    live_mode: bool = Field(default=False, description="Enable live malware execution (requires sandbox infrastructure)")
+    live_mode: bool = Field(default=True, description="Enable live malware execution (requires sandbox infrastructure)")
     approved_by_user: bool = Field(default=False, description="Explicit approval for live execution")
     replay_scenario_id: Optional[str] = Field(
         default=None,
@@ -31,6 +31,8 @@ class AnalysisCreate(BaseModel):
         if isinstance(data, dict):
             if "scenario_id" in data and not data.get("replay_scenario_id"):
                 data["replay_scenario_id"] = data["scenario_id"]
+            if data.get("backend_type") in ("replay", SandboxBackendType.REPLAY) and "live_mode" not in data:
+                data["live_mode"] = False
         return data
 
     @model_validator(mode="after")
@@ -39,8 +41,6 @@ class AnalysisCreate(BaseModel):
             raise ValueError("Inconsistent configuration: Replay backend cannot run in live mode (must have live_mode=false).")
         if self.backend_type == SandboxBackendType.CAPE and not self.live_mode:
             raise ValueError("Inconsistent configuration: CAPE backend requires live_mode=true.")
-        if self.live_mode and not self.approved_by_user:
-            raise ValueError("Live execution requires explicit analyst authorization (approved_by_user=true).")
         return self
 
 class AnalysisStatusHistoryItem(BaseModel):

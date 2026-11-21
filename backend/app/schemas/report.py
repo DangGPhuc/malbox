@@ -2,6 +2,8 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from app.schemas.finding import FindingResponse
+from app.schemas.intelligence import IntelligenceReport
+from app.schemas.classification import MalwareClassificationResult
 
 class RiskAssessment(BaseModel):
     score: int = Field(ge=0, le=100)
@@ -49,6 +51,8 @@ class FullReportSchema(BaseModel):
     confidence_and_limitations: Dict[str, Any] = Field(default_factory=dict)
     recommended_follow_up: Dict[str, Any] = Field(default_factory=dict)
     artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    intelligence_report: Optional[IntelligenceReport] = None
+    malware_classification: Optional[MalwareClassificationResult] = None
 
 class ReportResponse(BaseModel):
     id: str
@@ -60,5 +64,6 @@ class ReportResponse(BaseModel):
     is_replay: bool = True
     replay_scenario_id: Optional[str] = None
     full_report: FullReportSchema
+    malware_classification: Optional[MalwareClassificationResult] = None
     created_at: datetime
 

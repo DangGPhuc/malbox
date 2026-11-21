@@ -6,6 +6,21 @@ export interface HealthStatus {
   live_mode_enabled: boolean;
   default_backend: string;
   ai_provider: string;
+  ready_for_analysis?: boolean;
+  readiness_status?: string;
+  live_mode_configured?: boolean;
+  operator_auth_configured?: boolean;
+  cape_reachable?: boolean;
+  cape_authenticated?: boolean;
+  cape_version?: string;
+  guest_vms_total?: number;
+  guest_vms_available?: number;
+  guest_vm_ready?: boolean;
+  network_isolation_verified?: boolean;
+  ghidra_installed?: boolean;
+  rules_loaded?: number;
+  readiness_details?: string;
+  prerequisites_missing?: string[];
 }
 
 export interface SectionInfo {
@@ -101,7 +116,7 @@ export interface AnalysisEvent {
   process_name?: string;
   parent_process_id?: number;
   target_path?: string;
-  attributes: Record<string, any>;
+  attributes: Record<string, unknown>;
   source_tool: string;
   confidence: number;
   created_at: string;
@@ -115,8 +130,8 @@ export interface BehavioralFinding {
   description: string;
   severity: string;
   confidence: number;
-  mitre_attack_id?: string;
-  mitre_tactic?: string;
+  mitre_attack_id?: string | null;
+  mitre_tactic?: string | null;
   supporting_event_ids: string[];
   created_at: string;
 }
@@ -144,7 +159,7 @@ export interface GraphNodeData {
   id: string;
   label: string;
   type: string;
-  details: Record<string, any>;
+  details: Record<string, unknown>;
   suspicious: boolean;
   severity?: string;
   pid?: number;
@@ -160,7 +175,7 @@ export interface GraphEdgeData {
   target: string;
   label: string;
   event_ids: string[];
-  details: Record<string, any>;
+  details: Record<string, unknown>;
 }
 
 export interface GraphEdge {
@@ -179,11 +194,11 @@ export interface OrchestrationRecord {
   id: string;
   analysis_id: string;
   stage: string;
-  proposed_action: Record<string, any>;
-  supporting_evidence: Record<string, any>;
+  proposed_action: Record<string, unknown>;
+  supporting_evidence: Record<string, unknown>;
   validation_result: string;
   validation_notes?: string;
-  final_action: Record<string, any>;
+  final_action: Record<string, unknown>;
   execution_outcome?: string;
   created_at: string;
 }
@@ -197,42 +212,293 @@ export interface MitreTechnique {
   confidence: number;
 }
 
+export interface DroppedFileIOC {
+  path: string;
+  sha256: string;
+  size_bytes: number;
+  event_id: string;
+}
+
 export interface ExtractedIOCs {
   domains: string[];
   ips: string[];
   urls: string[];
-  dropped_files: Array<{
-    path: string;
-    sha256: string;
-    size_bytes: number;
-    event_id: string;
-  }>;
+  dropped_files: DroppedFileIOC[];
   registry_keys: string[];
+}
+
+// =========================================================================
+// Phase 2A / 2B Evidence-Grounded AI Intelligence Contracts (Strictly Typed)
+// =========================================================================
+
+export type ClaimClassification = 'FACT' | 'INFERENCE' | 'HYPOTHESIS';
+
+export type ClaimValidationStatus = 'VERIFIED' | 'UNVERIFIED' | 'REJECTED';
+
+export type ClaimSupportCategory =
+  | 'DETERMINISTIC_FACT'
+  | 'ANALYST_INFERENCE'
+  | 'UNCERTAIN_HYPOTHESIS'
+  | 'CONSERVATIVE_UNVERIFIED'
+  | 'UNSUPPORTED_OR_FABRICATED';
+
+export type EvidenceCompleteness = 'high' | 'medium' | 'low';
+
+export type FollowUpPriority = 'high' | 'medium' | 'low';
+
+export interface TimelineInterpretation {
+  phase: string;
+  summary: string;
+  supporting_evidence_ids: string[];
+}
+
+export interface AnalyticalClaim {
+  claim_id: string;
+  classification: ClaimClassification;
+  claim_text: string;
+  supporting_evidence_ids: string[];
+  confidence: number;
+  caveats: string[];
+  validation_status: ClaimValidationStatus;
+  support_category: ClaimSupportCategory;
+  requires_human_review: boolean;
+  evidence_sources: string[];
+  validation_notes?: string | null;
+}
+
+export interface IOCInterpretation {
+  ioc_value: string;
+  ioc_type: string;
+  role_or_context: string;
+  confidence: number;
+  supporting_evidence_ids: string[];
+}
+
+export interface ConfidenceAssessment {
+  overall_confidence: number;
+  evidence_completeness: EvidenceCompleteness;
+  rationale: string;
+}
+
+export interface EvidenceGap {
+  gap_type: string;
+  description: string;
+  impact: string;
+}
+
+export interface FollowUpAction {
+  priority: FollowUpPriority;
+  action: string;
+  rationale: string;
+  requires_manual_approval: boolean;
+}
+
+export interface AnalystStage {
+  stage_id: string;
+  stage_name: string;
+  inputs_summary: Record<string, any>;
+  output_summary: Record<string, any>;
+  validation_status: string;
+  error?: string | null;
+  tokens_used?: number;
+  execution_nature?: string;
+  inference_mode?: string;
+}
+
+export interface AIProviderMetadata {
+  mode: string;
+  provider: string;
+  model: string;
+  tokens_used: number;
+  inference_type?: string;
+  fallback_used: boolean;
+  fallback_reason?: string | null;
+  rules_version: string;
+  generated_at: string;
+  analyst_stages?: AnalystStage[] | null;
+}
+
+export interface ValidationSummary {
+  passed: boolean;
+  total_claims: number;
+  verified_claims: number;
+  unverified_claims: number;
+  rejected_claims: number;
+  review_required_claims: number;
+  deterministic_facts: number;
+  analyst_inferences: number;
+  uncertain_hypotheses: number;
+  removed_invalid_evidence_ids: string[];
+  warnings: string[];
+  fallback_applied: boolean;
+}
+
+export interface TruncationMetadata {
+  truncated: boolean;
+  total_events_available: number;
+  events_included: number;
+  events_omitted: number;
+  timeline_truncated: boolean;
+  fields_truncated_count: number;
+  max_events_limit: number;
+  max_field_chars: number;
+  max_bundle_bytes: number;
+  estimated_bundle_bytes: number;
+  prioritization_strategy: string;
+}
+
+export interface IntelligenceReport {
+  schema_version: string;
+  analysis_id: string;
+  is_replay: boolean;
+  replay_scenario_id?: string | null;
+  provenance_summary: string;
+  deterministic_risk_score: number;
+  deterministic_risk_level: string;
+  executive_assessment: string;
+  behavioral_narrative: string;
+  timeline_interpretations: TimelineInterpretation[];
+  technical_claims: AnalyticalClaim[];
+  ioc_interpretations: IOCInterpretation[];
+  confidence_assessment: ConfidenceAssessment;
+  contradictions_or_gaps: EvidenceGap[];
+  limitations: string[];
+  recommended_follow_up_actions: FollowUpAction[];
+  evidence_truncation: TruncationMetadata;
+  correlation_summary?: CorrelationBundleSection | null;
+  provider_metadata: AIProviderMetadata;
+  validation_summary: ValidationSummary;
+}
+
+export type IntelligenceEnrichMode = 'deterministic' | 'llm' | 'opencode' | 'auto' | 'local' | 'ollama';
+
+export interface IntelligenceEnrichRequest {
+  mode: IntelligenceEnrichMode;
+  external_transmission_consent: boolean;
+}
+
+export interface ReportSampleMetadata {
+  file_name: string;
+  file_size: number;
+  sha256: string;
+  sha1?: string;
+  md5?: string;
+  is_pe?: boolean;
+  pe_metadata?: Partial<PEMetadata> | null;
+}
+
+export interface ReportAnalysisEnvironment {
+  backend?: string;
+  profile?: string;
+  timeout_seconds?: number;
+  live_mode?: boolean;
+  guest_os?: string;
+  confinement?: string;
+  replay_scenario_id?: string | null;
+  fixture_version?: string | null;
+}
+
+export interface ReportRuleBreakdownItem {
+  rule_id?: string;
+  title?: string;
+  severity?: string;
+  points?: number;
+  weight?: number;
+  reason?: string;
+}
+
+export interface ReportExecutionTimelineEntry {
+  event_id?: string;
+  timestamp?: string | null;
+  category?: string;
+  action?: string;
+  process?: string | null;
+  pid?: number | null;
+  target?: string | null;
+  summary: string;
+}
+
+export interface ReportArtifactSummary {
+  name?: string | null;
+  file_name?: string | null;
+  type?: string;
+  description?: string;
+  is_synthetic?: boolean;
+  provenance?: string;
+  provenance_note?: string;
 }
 
 export interface FullReport {
   analysis_id: string;
   generated_at: string;
-  sample_metadata: Record<string, any>;
-  analysis_environment: Record<string, any>;
+  backend_type?: string;
+  is_replay?: boolean;
+  replay_scenario_id?: string | null;
+  provenance_disclaimer?: string;
+  sample_metadata: ReportSampleMetadata;
+  analysis_environment: ReportAnalysisEnvironment;
   executive_summary: string;
   risk_assessment: {
     score: number;
     level: string;
-    rule_breakdown: Array<Record<string, any>>;
+    rule_breakdown: ReportRuleBreakdownItem[];
     confidence: number;
   };
   mitre_attack_mappings: MitreTechnique[];
   findings: BehavioralFinding[];
   extracted_iocs: ExtractedIOCs;
-  execution_timeline: Array<Record<string, any>>;
-  process_activity_summary: Record<string, any>;
-  filesystem_activity_summary: Record<string, any>;
-  registry_activity_summary: Record<string, any>;
-  network_activity_summary: Record<string, any>;
-  confidence_and_limitations: Record<string, any>;
-  recommended_follow_up: Record<string, any>;
-  artifacts: Array<Record<string, any>>;
+  execution_timeline: ReportExecutionTimelineEntry[];
+  process_activity_summary: Record<string, unknown>;
+  filesystem_activity_summary: Record<string, unknown>;
+  registry_activity_summary: Record<string, unknown>;
+  network_activity_summary: Record<string, unknown>;
+  confidence_and_limitations: {
+    execution_duration_bound?: string;
+    sandbox_evasion_risk?: string;
+    network_confinement?: string;
+    overall_entropy?: number;
+  };
+  recommended_follow_up: {
+    needs_second_pass?: boolean;
+    recommendations?: string[];
+    limitations_identified?: string[];
+  };
+  artifacts: ReportArtifactSummary[];
+  intelligence_report?: IntelligenceReport | null;
+  malware_classification?: MalwareClassificationResult | null;
+}
+
+export type CategoryAssessmentStatus = 'CONFIRMED' | 'SUSPECTED' | 'ABSENT' | 'UNSUPPORTED';
+
+export interface CategoryAssessment {
+  category_id: string;
+  category_name: string;
+  category_type: string;
+  classification_status: CategoryAssessmentStatus;
+  confidence: number;
+  evidence_ids: string[];
+  supporting_static_function_ids: string[];
+  supporting_dynamic_event_ids: number[];
+  supporting_artifact_ids: string[];
+  explanation: string;
+  contradictory_evidence: string[];
+  limitations: string[];
+}
+
+export interface MalwareClassificationResult {
+  analysis_id: string;
+  sample_sha256: string;
+  taxonomy_version: string;
+  classifier_version: string;
+  primary_category?: string | null;
+  secondary_categories: string[];
+  suspected_family?: string | null;
+  family_confidence?: number | null;
+  overall_evidence_quality: string;
+  classification_status: 'CLASSIFIED' | 'UNKNOWN' | 'INSUFFICIENT_EVIDENCE' | 'UNSUPPORTED';
+  classification_findings: CategoryAssessment[];
+  limitations: string[];
+  unsupported_categories: string[];
 }
 
 export interface ReportResponse {
@@ -241,6 +507,9 @@ export interface ReportResponse {
   executive_summary: string;
   risk_score: number;
   risk_level: string;
+  backend_type?: string;
+  is_replay?: boolean;
+  replay_scenario_id?: string | null;
   full_report: FullReport;
   created_at: string;
 }
@@ -250,5 +519,400 @@ export interface ArtifactItem {
   file_size: number;
   artifact_type: string;
   relative_path: string;
+}
+
+// =========================================================================
+// Phase 3A / 3B Static Analysis (Ghidra Headless) Strictly Typed Contracts
+// =========================================================================
+
+export type StaticAnalysisStatus =
+  | 'PENDING'
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'PARTIAL'
+  | 'FAILED'
+  | 'TIMED_OUT'
+  | 'UNAVAILABLE'
+  | 'SKIPPED';
+
+export type StaticProvenanceScope =
+  | 'analysis_specific'
+  | 'sample_level'
+  | 'sample_fallback'
+  | 'unexecuted';
+
+export type DecompileStatus = 'OK' | 'TIMED_OUT' | 'ERROR' | 'SKIPPED_CAP';
+
+export interface StaticAttemptMetadata {
+  job_id?: string | null;
+  analysis_id?: string | null;
+  status: StaticAnalysisStatus;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+  is_usable: boolean;
+  same_analysis: boolean;
+}
+
+export interface StaticAnalysisProvenance {
+  schema_version: string;
+  analysis_id?: string | null;
+  sample_id: string;
+  sample_sha256: string;
+  source_tool: 'ghidra_headless' | string;
+  ghidra_version?: string | null;
+  java_version?: string | null;
+  binary_executed: false;
+  started_at?: string | null;
+  completed_at?: string | null;
+  execution_duration_ms?: number | null;
+  project_isolated: boolean;
+  os_sandbox: string;
+  process_exit_code?: number | null;
+  memory_limit_backend: string;
+  memory_limit_mb?: number | null;
+  heap_limit_mb?: number | null;
+  requested_analysis_id?: string | null;
+  provenance_scope?: StaticProvenanceScope;
+  provenance_note?: string | null;
+  ghidra_enabled?: boolean | null;
+  latest_attempt?: StaticAttemptMetadata | null;
+  usable_evidence?: StaticAttemptMetadata | null;
+  showing_preserved_usable_evidence?: boolean;
+}
+
+export interface ProgramMetadata {
+  program_name: string;
+  executable_format?: string | null;
+  language_id?: string | null;
+  architecture?: string | null;
+  endianness?: string | null;
+  address_size?: number | null;
+  image_base?: string | null;
+  entry_points: string[];
+  total_functions_discovered: number;
+  total_imports: number;
+  total_exports: number;
+  total_strings: number;
+}
+
+export interface ImportedSymbol {
+  library: string;
+  name: string;
+  address?: string | null;
+  ordinal?: number | null;
+}
+
+export interface CrossReference {
+  from_address: string;
+  to_address: string;
+  ref_type: string;
+  from_function_id?: string | null;
+  to_function_id?: string | null;
+  target_symbol?: string | null;
+}
+
+export interface FunctionCallRelationship {
+  caller_function_id: string;
+  caller_address: string;
+  caller_name: string;
+  callee_function_id?: string | null;
+  callee_address?: string | null;
+  callee_name: string;
+  is_external_import: boolean;
+  call_site_address?: string | null;
+}
+
+export interface StaticStringEvidence {
+  string_id: string;
+  address: string;
+  value: string;
+  length: number;
+  section?: string | null;
+  referencing_function_ids: string[];
+}
+
+export interface FunctionMetadata {
+  function_id: string;
+  entry_address: string;
+  name: string;
+  size_bytes: number;
+  basic_block_count?: number | null;
+  is_thunk: boolean;
+  is_external: boolean;
+  is_executed: false;
+  calling_convention?: string | null;
+  signature?: string | null;
+  imported_api_calls: string[];
+  called_function_ids: string[];
+  caller_function_ids: string[];
+  string_refs: string[];
+  xref_in_count: number;
+  xref_out_count: number;
+  rank_score: number;
+  rank_reasons: string[];
+}
+
+export interface DecompiledFunction {
+  function_id: string;
+  entry_address: string;
+  name: string;
+  pseudocode: string;
+  pseudocode_bytes: number;
+  truncated: boolean;
+  decompile_status: DecompileStatus;
+  error_message?: string | null;
+  provenance_note: string;
+}
+
+export interface FunctionAnalysisFinding {
+  function_id: string;
+  entry_address: string;
+  name: string;
+  score: number;
+  reasons: string[];
+  imported_apis: string[];
+  string_signals: string[];
+  disclaimer: string;
+}
+
+export interface StaticAnalysisTruncation {
+  truncated: boolean;
+  functions_discovered: number;
+  functions_included: number;
+  functions_omitted: number;
+  decompiled_requested: number;
+  decompiled_included: number;
+  decompiled_omitted_cap: number;
+  strings_included: number;
+  strings_omitted: number;
+  output_bytes: number;
+  max_output_bytes: number;
+  max_functions: number;
+  max_decompile_functions: number;
+}
+
+export interface StaticAnalysisResult {
+  schema_version: string;
+  status: StaticAnalysisStatus;
+  provenance: StaticAnalysisProvenance;
+  program_metadata?: ProgramMetadata | null;
+  functions: FunctionMetadata[];
+  call_graph: FunctionCallRelationship[];
+  cross_references: CrossReference[];
+  imports: ImportedSymbol[];
+  exports: string[];
+  strings: StaticStringEvidence[];
+  decompiled_functions: DecompiledFunction[];
+  ranked_findings: FunctionAnalysisFinding[];
+  truncation: StaticAnalysisTruncation;
+  errors: string[];
+  warnings: string[];
+  is_partial: boolean;
+}
+
+export interface StaticAnalysisJobAcceptedResponse {
+  job_id: string;
+  sample_id: string;
+  analysis_id?: string | null;
+  status: StaticAnalysisStatus | string;
+  message: string;
+}
+
+// =========================================================================
+// Phase 4A / 4B Static-Dynamic Evidence Correlation Strictly Typed Contracts
+// =========================================================================
+
+export type CorrelationRelationship =
+  | 'DIRECTLY_OBSERVED'
+  | 'CONSISTENT_WITH'
+  | 'CONTRADICTORY'
+  | 'INSUFFICIENT_EVIDENCE'
+  | 'SYNTHETIC_SCENARIO_ONLY';
+
+export type CorrelationStatus =
+  | 'COMPLETED'
+  | 'PARTIAL'
+  | 'INSUFFICIENT_EVIDENCE'
+  | 'UNSUPPORTED'
+  | 'FAILED';
+
+export type CorrelationEvidenceKind =
+  | 'static_function'
+  | 'static_import'
+  | 'static_string'
+  | 'dynamic_event'
+  | 'behavioral_finding';
+
+export type CorrelationConfidenceLevel = 'high' | 'medium' | 'low';
+
+export interface CorrelationEvidenceReference {
+  ref_id: string;
+  evidence_kind: CorrelationEvidenceKind;
+  source_tool: string;
+  timestamp?: string | null;
+  summary: string;
+  is_synthetic: boolean;
+  trace_verified: boolean;
+  provenance_scope?: string | null;
+}
+
+export interface CorrelationConfidence {
+  score: number;
+  level: CorrelationConfidenceLevel;
+  rationale: string;
+}
+
+export interface CorrelationFinding {
+  correlation_id: string;
+  rule_id: string;
+  analysis_id: string;
+  sample_sha256: string;
+  static_references: CorrelationEvidenceReference[];
+  dynamic_references: CorrelationEvidenceReference[];
+  relationship: CorrelationRelationship;
+  relationship_summary: string;
+  explanation: string;
+  confidence: CorrelationConfidence;
+  known_limitations: string[];
+  behavioral_execution_directly_observed: boolean;
+}
+
+export interface CorrelationProvenance {
+  schema_version: string;
+  engine_version: string;
+  analysis_id: string;
+  sample_id: string;
+  sample_sha256: string;
+  static_record_id?: string | null;
+  static_analysis_id?: string | null;
+  static_status: string;
+  static_provenance_scope: string;
+  dynamic_backend: string;
+  is_replay: boolean;
+  replay_scenario_id?: string | null;
+  sample_identity_verified: boolean;
+  static_reuse_detected: boolean;
+  is_stale: boolean;
+  trace_verification_mode: string;
+  computed_at: string;
+  source_fingerprint: string;
+  triggered_automatically: boolean;
+  external_ai_used: false;
+}
+
+export interface CorrelationLimitations {
+  items: string[];
+  has_runtime_function_trace: boolean;
+  is_replay_synthetic: boolean;
+  sample_level_static_reuse: boolean;
+  partial_static_coverage: boolean;
+  suppressed_ambiguous_count: number;
+}
+
+export interface CorrelationTruncation {
+  truncated: boolean;
+  total_events_in_analysis: number;
+  events_scanned: number;
+  events_omitted: number;
+  functions_available: number;
+  functions_scanned: number;
+  candidate_relationships_evaluated: number;
+  findings_included: number;
+  findings_omitted: number;
+  max_events_limit: number;
+  max_functions_limit: number;
+  max_findings_limit: number;
+  max_serialized_bytes: number;
+  serialized_bytes: number;
+}
+
+export interface CorrelationSummary {
+  total_findings: number;
+  directly_observed_count: number;
+  consistent_with_count: number;
+  contradictory_count: number;
+  insufficient_evidence_count: number;
+  synthetic_scenario_only_count: number;
+}
+
+export interface CorrelationResult {
+  schema_version: string;
+  status: CorrelationStatus;
+  provenance: CorrelationProvenance;
+  summary: CorrelationSummary;
+  findings: CorrelationFinding[];
+  limitations: CorrelationLimitations;
+  truncation: CorrelationTruncation;
+  warnings: string[];
+  errors: string[];
+  disclaimer: string;
+}
+
+export interface CorrelationBundleFinding {
+  correlation_id: string;
+  rule_id: string;
+  relationship: CorrelationRelationship;
+  relationship_summary: string;
+  explanation: string;
+  confidence_score: number;
+  confidence_level: CorrelationConfidenceLevel;
+  behavioral_execution_directly_observed: boolean;
+  static_ref_ids: string[];
+  dynamic_ref_ids: string[];
+  known_limitations: string[];
+}
+
+export interface CorrelationBundleSection {
+  schema_version: string;
+  status: CorrelationStatus | string;
+  source_fingerprint?: string | null;
+  is_replay: boolean;
+  is_stale?: boolean;
+  trace_verification_mode?: string;
+  has_runtime_function_trace?: boolean;
+  summary: Partial<CorrelationSummary> & Record<string, number>;
+  findings: CorrelationBundleFinding[];
+  limitations: string[];
+  warnings: string[];
+  truncated: boolean;
+  disclaimer: string;
+}
+
+export interface SubsystemReadinessCard {
+  name: string;
+  tier: string;
+  status: string;
+  details: string;
+  remediation?: string | null;
+}
+
+export interface InfrastructureReadinessResponse {
+  overall_status: string;
+  tiers: {
+    APPLICATION_READY: boolean;
+    STATIC_ANALYSIS_READY: boolean;
+    AI_PROVIDER_READY: boolean;
+    CAPE_API_READY: boolean;
+    GUEST_READY: boolean;
+    CONFINEMENT_VERIFIED: boolean;
+    DETONATION_READY: boolean;
+  };
+  subsystems: {
+    backend: SubsystemReadinessCard;
+    ghidra: SubsystemReadinessCard;
+    cape: SubsystemReadinessCard;
+    guest: SubsystemReadinessCard;
+    isolation: SubsystemReadinessCard;
+    ai: SubsystemReadinessCard;
+    worker: SubsystemReadinessCard;
+    detonation: SubsystemReadinessCard;
+    [key: string]: SubsystemReadinessCard;
+  };
+  remediation_commands: string[];
+  detonation_blockers: string[];
+  live_mode_enabled: boolean;
+  default_backend: string;
 }
 

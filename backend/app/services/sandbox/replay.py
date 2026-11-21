@@ -147,7 +147,13 @@ class ReplaySandboxBackend(SandboxBackend):
             return True
         return False
 
-    def generate_artifacts(self, backend_task_id: str, dest_dir: Path) -> List[Dict[str, Any]]:
+    def generate_artifacts(
+        self,
+        backend_task_id: str,
+        dest_dir: Path,
+        deadline: Optional[float] = None,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
         """Generates safe mock artifact files labeled explicitly as synthetic with strict path validation."""
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_root = dest_dir.resolve()

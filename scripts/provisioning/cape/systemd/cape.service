@@ -1,0 +1,18 @@
+[Unit]
+Description=CAPE Sandbox Daemon
+After=network.target postgresql.service redis.service cape-rooter.service
+Wants=cape-rooter.service
+
+[Service]
+Type=simple
+User=cape
+Group=cape
+WorkingDirectory=/opt/CAPEv2
+Environment="PYTHONPATH=/opt/CAPEv2"
+ExecStart=/opt/CAPEv2/.venv/bin/python3 cuckoo.py
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -46,6 +46,31 @@ class TelemetryNormalizer:
             )
             events.append(event)
 
+        # 1.1 Monitored API Calls
+        for call in raw_data.get("api_calls", []):
+            api_name = call.get("api")
+            if not api_name:
+                continue
+            event = AnalysisEvent(
+                analysis_id=analysis_id,
+                category="process",
+                action=api_name,
+                timestamp=parse_iso_datetime(call.get("timestamp")),
+                process_id=call.get("pid"),
+                process_name=call.get("process_name"),
+                parent_process_id=None,
+                target_path=api_name,
+                attributes={
+                    "arguments": call.get("arguments", {}),
+                    "return_value": call.get("return_value"),
+                    "status": call.get("status"),
+                    "is_api_call": True,
+                },
+                source_tool="sandbox-apimon",
+                confidence=1.0,
+            )
+            events.append(event)
+
         # 2. Filesystem Activity
         for f in raw_data.get("filesystem", []):
             action_map = {

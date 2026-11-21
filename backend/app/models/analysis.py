@@ -9,6 +9,7 @@ from app.core.database import Base
 class SandboxBackendType(str, enum.Enum):
     REPLAY = "replay"
     CAPE = "cape"
+    REMNUX_GATEWAY = "remnux_gateway"
 
 class AnalysisStatus(str, enum.Enum):
     UPLOADED = "UPLOADED"

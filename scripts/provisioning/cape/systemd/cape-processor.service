@@ -1,0 +1,16 @@
+[Unit]
+Description=CAPE Sandbox Auxiliary Processor
+After=network.target cape.service
+
+[Service]
+Type=simple
+User=cape
+Group=cape
+WorkingDirectory=/opt/CAPEv2
+Environment="PYTHONPATH=/opt/CAPEv2"
+ExecStart=/opt/CAPEv2/.venv/bin/python3 utils/process.py -auto
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

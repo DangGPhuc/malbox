@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Optional, Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
@@ -39,28 +39,108 @@ class Settings(BaseSettings):
 
     # Upload & Security Limits
     MAX_UPLOAD_SIZE_BYTES: int = 33554432  # 32 MB
-    LIVE_MODE_ENABLED: bool = False
+    LIVE_MODE_ENABLED: bool = True
+    ALLOW_SYNTHETIC_REPLAY: bool = False  # Disabled in production; Replay is strictly isolated
     REQUIRE_EXPLICIT_APPROVAL: bool = True
     OPERATOR_TOKEN: str = ""  # Must be explicitly configured via MALBOX_OPERATOR_TOKEN to enable live operations
     WORKER_CONCURRENCY: int = 1
     DEFAULT_ANALYSIS_TIMEOUT_SECONDS: int = 120
     JOB_POLL_INTERVAL_SECONDS: float = 0.5
 
-    # AI Orchestration
+    # AI Orchestration & Phase 2A/2B Reporting Security
     AI_PROVIDER: str = "mock"  # mock, real, openai, ollama
+    AI_REPORTING_MODE: str = "opt_in"  # opt_in, deterministic, llm, opencode
     AI_MODEL: str = "gpt-4o-mini"
     AI_API_KEY: str = ""
     AI_BASE_URL: str = "https://api.openai.com/v1"
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_MAX_TOKENS: int = 2048
     AI_TEMPERATURE: float = 0.1
+    TRUSTED_LOCAL_AI_HOSTS: str = ""  # Comma-separated list of approved non-loopback private hosts for local AI
+
+    # Reporting & Correlation Security (No hardcoded secrets; fail closed)
+    REPORTING_AUTH_TOKEN: str = ""  # Required via X-Reporting-Token for POST .../report/intelligence & .../correlation
+    # Isolated high-entropy HMAC key for live runtime trace verification (Empty = authenticated traces disabled; NEVER falls back to SECRET_KEY)
+    TRACE_AUTH_KEY: str = ""
+    REPORTING_EXTERNAL_AI_CONSENT: bool = False  # Server-level consent for sending evidence to external providers
+    REPORTING_RATE_LIMIT_REQUESTS: int = 10
+    REPORTING_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    REPORTING_MAX_CONCURRENT_JOBS: int = 2
+    REPORTING_ENRICHMENT_TIMEOUT_SECONDS: float = 35.0
+
+    # OpenCode Restricted Reporting Adapter (Disabled & opt-in by default; requires bwrap OS sandbox)
+    OPENCODE_ENABLED: bool = False
+    OPENCODE_BIN: str = "opencode"
+    OPENCODE_SANDBOX_BIN: str = "bwrap"
+    OPENCODE_AGENT_NAME: str = "report-analyst"
+    OPENCODE_MODEL: str = ""
+    OPENCODE_ALLOW_NETWORK: bool = False
+    OPENCODE_ALLOWED_PROVIDER_URL: str = ""
+    OPENCODE_TIMEOUT_SECONDS: float = 30.0
+    OPENCODE_MAX_OUTPUT_BYTES: int = 262144
+    OPENCODE_MAX_CPU_SECONDS: int = 25
+    OPENCODE_MAX_MEMORY_MB: int = 2048
+    OPENCODE_MAX_DATA_MB: int = 512
+    OPENCODE_MAX_SANDBOX_TMPFS_BYTES: int = 16777216
+    OPENCODE_PROVIDER_API_KEY: str = ""
+    OPENCODE_PROVIDER_ENV_NAME: str = "OPENAI_API_KEY"
+
+    # Static Analysis (Ghidra Headless - Optional, disabled by default)
+    GHIDRA_ENABLED: bool = False
+    GHIDRA_HOME: str = ""
+    GHIDRA_WORKSPACE_ROOT: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent.parent.parent / "data" / "ghidra_projects"
+    )
+    GHIDRA_SCRIPTS_DIR: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent.parent.parent / "ghidra_scripts"
+    )
+    # Process-tree memory ceiling (JVM heap + metaspace + native decompiler RSS) suitable for ~8GB Kali VM
+    GHIDRA_MAX_MEMORY_MB: int = 1280
+    GHIDRA_MAX_HEAP_MB: int = 512
+    GHIDRA_MIN_AVAILABLE_MEMORY_MB: int = 1280
+    GHIDRA_REQUIRE_CGROUP_MEMORY_LIMIT: bool = True
+    GHIDRA_MAX_CPU: int = 1
+    GHIDRA_TIMEOUT_SECONDS: int = 120
+    GHIDRA_MAX_SAMPLE_BYTES: int = 16777216  # 16 MiB
+    GHIDRA_MAX_FUNCTIONS: int = 250
+    GHIDRA_MAX_DECOMPILE_FUNCTIONS: int = 10
+    GHIDRA_MAX_PSEUDOCODE_CHARS: int = 8192
+    GHIDRA_MAX_OUTPUT_BYTES: int = 524288  # 512 KiB facts.json hard cap
+    GHIDRA_MAX_STREAM_BYTES: int = 262144  # 256 KiB bounded stdout/stderr cap
+    GHIDRA_MAX_PERSISTED_RESULT_BYTES: int = 1048576  # 1 MiB DB persistence ceiling
 
     # Pluggable Sandbox Settings
-    DEFAULT_SANDBOX_BACKEND: str = "replay"  # replay, cape
+    DEFAULT_SANDBOX_BACKEND: str = "cape"  # cape (default live), remnux_gateway, replay (deprecated)
     CAPE_API_URL: str = "http://127.0.0.1:8008"  # Distinct from application port 8000
     CAPE_API_TOKEN: str = ""
     CAPE_TIMEOUT_SECONDS: int = 300
     CAPE_POLL_INTERVAL_SECONDS: int = 5
+    # Operator-configured profile-to-tag mapping for CAPE Sandbox (empty by default; no implicit tags)
+    CAPE_PROFILE_TAG_MAP: Dict[str, str] = Field(default_factory=dict)
+    CAPE_DEFAULT_MACHINE: str = "win10_analyst"
+    CAPE_DEFAULT_NETWORK_ROUTE: str = "drop"
+    CAPE_ISOLATION_ATTESTATION_PATH: Optional[str] = None
+    # Backward compatibility aliases for legacy env keys
+    CAPE_MACHINE: Optional[str] = None
+    CAPE_ROUTE: Optional[str] = None
+    CAPE_ATTESTATION_PATH: Optional[str] = None
+
+    # REMnux Sandbox Gateway & VirtualBox Host Controller Settings
+    REMNUX_GATEWAY_URL: str = "http://192.168.56.10:8008"
+    REMNUX_GATEWAY_TOKEN: str = ""
+    REMNUX_GATEWAY_TIMEOUT_SECONDS: int = 300
+    REMNUX_GUEST_VM_UUID: str = "REMWin"
+    REMNUX_CLEAN_SNAPSHOT: str = "clean_snapshot"
+    VBOX_CONTROLLER_URL: str = "http://127.0.0.1:8005"
+    VBOX_CONTROLLER_SECRET: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.CAPE_MACHINE and self.CAPE_DEFAULT_MACHINE == "win10_analyst":
+            self.CAPE_DEFAULT_MACHINE = self.CAPE_MACHINE
+        if self.CAPE_ROUTE and self.CAPE_DEFAULT_NETWORK_ROUTE == "drop":
+            self.CAPE_DEFAULT_NETWORK_ROUTE = self.CAPE_ROUTE
+        if self.CAPE_ATTESTATION_PATH and not self.CAPE_ISOLATION_ATTESTATION_PATH:
+            self.CAPE_ISOLATION_ATTESTATION_PATH = self.CAPE_ATTESTATION_PATH
 
     def get_database_url(self) -> str:
         if self.DATABASE_URL:
@@ -73,8 +153,10 @@ class Settings(BaseSettings):
         self.QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
         self.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
         self.FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+        self.GHIDRA_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
         try:
             self.QUARANTINE_DIR.chmod(0o700)
+            self.GHIDRA_WORKSPACE_ROOT.chmod(0o700)
         except OSError:
             pass
 

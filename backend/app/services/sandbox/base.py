@@ -38,6 +38,12 @@ class SandboxBackend(ABC):
         pass
 
     @abstractmethod
-    def generate_artifacts(self, backend_task_id: str, dest_dir: Path) -> List[Dict[str, Any]]:
+    def generate_artifacts(
+        self,
+        backend_task_id: str,
+        dest_dir: Path,
+        deadline: Optional[float] = None,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
         """Materializes safe mock or real forensic artifacts into the analysis artifacts folder."""
         pass

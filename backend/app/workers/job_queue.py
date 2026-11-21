@@ -83,9 +83,11 @@ class JobQueueManager:
     def recover_stale_jobs(self, db: Session) -> int:
         """
         Recovers jobs left in intermediate non-terminal states during an abrupt crash or restart.
-        Marks them FAILED so they do not remain indefinitely stuck in RUNNING.
+        Separates never-started queued jobs from interrupted active jobs while preserving
+        remote CAPE task IDs and historical evidence for operator retry.
         """
         active_non_terminal = [
+            AnalysisStatus.QUEUED.value,
             AnalysisStatus.PREFLIGHT.value,
             AnalysisStatus.PLANNED.value,
             AnalysisStatus.RUNNING.value,
@@ -103,10 +105,27 @@ class JobQueueManager:
         )
 
         recovered_count = 0
+        now_dt = datetime.now(timezone.utc)
         for job in stale_jobs:
+            orig_status = job.status
             job.status = AnalysisStatus.FAILED.value
-            job.error_message = "Analysis interrupted by process shutdown or worker restart. Recovered safely."
-            job.completed_at = datetime.now(timezone.utc)
+            job.completed_at = now_dt
+
+            # Separate never-started queued/planned jobs from active interrupted jobs
+            if (
+                orig_status in (AnalysisStatus.QUEUED.value, AnalysisStatus.PREFLIGHT.value, AnalysisStatus.PLANNED.value)
+                and job.started_at is None
+            ):
+                job.error_message = (
+                    f"Analysis never started: abandoned in {orig_status} state during process shutdown "
+                    "or worker restart; static triage preserved. Safe to retry."
+                )
+            else:
+                job.error_message = (
+                    f"Analysis interrupted by process shutdown or worker restart; "
+                    f"interrupted during active stage '{orig_status}'; "
+                    "static triage and remote task state preserved for operator retry."
+                )
             recovered_count += 1
 
         if recovered_count > 0:

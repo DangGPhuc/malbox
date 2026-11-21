@@ -1,5 +1,12 @@
 import pytest
+import sys
 from pathlib import Path
+
+# Ensure repository root is on sys.path for integrations and scripts packages
+_repo_root = str(Path(__file__).resolve().parent.parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -25,6 +32,9 @@ def setup_test_env(tmp_path_factory):
     settings.DATA_DIR = test_dir
     settings.QUARANTINE_DIR = test_dir / "quarantine"
     settings.ARTIFACTS_DIR = test_dir / "artifacts"
+    settings.LIVE_MODE_ENABLED = True
+    settings.DEFAULT_SANDBOX_BACKEND = "cape"
+    settings.ALLOW_SYNTHETIC_REPLAY = True
     settings.setup_directories()
 
 @pytest.fixture(scope="function")
@@ -53,6 +63,7 @@ def client(db_session, monkeypatch):
     monkeypatch.setattr("app.core.database.SessionLocal", TestingSessionLocal)
     monkeypatch.setattr("app.api.v1.analyses.SessionLocal", TestingSessionLocal)
     monkeypatch.setattr("app.workers.job_queue.SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.static_analysis.worker.SessionLocal", TestingSessionLocal)
     app.dependency_overrides[get_db] = override_get_db
 
     with TestClient(app) as test_client:

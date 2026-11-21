@@ -20,6 +20,7 @@ yarn-debug.log*
 yarn-error.log*
 
 # Application Runtime Storage & Malware Quarantine
+.malbox/
 data/
 quarantine/
 artifacts_storage/
@@ -30,6 +31,9 @@ artifacts_storage/
 # Environment configurations with secrets
 .env
 .env.local
+.env.bak*
+.env.*.bak
+*.bak
 
 # IDE & OS
 .vscode/

@@ -59,6 +59,11 @@ def create_analysis(
             )
 
     elif payload.backend_type == SandboxBackendType.REPLAY:
+        if not getattr(settings, "ALLOW_SYNTHETIC_REPLAY", False):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Replay mode is deprecated and disabled in production. Live CAPE analysis is the default."
+            )
         if payload.live_mode:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -218,4 +223,116 @@ def cancel_analysis(
         )
 
     db.refresh(a)
+    return a
+
+@router.post("/analyses/{analysis_id}/retry", response_model=AnalysisResponse, tags=["Analyses"])
+def retry_analysis(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+    run_sync: bool = Query(False),
+    x_operator_token: Optional[str] = Header(None, alias="X-Operator-Token"),
+):
+    """
+    Allows safe operator retry of failed or cancelled analysis tasks.
+    Enforces operator security token for live mode and concurrency limits.
+    """
+    a = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+    if not a:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis task not found.")
+
+    if a.status not in [AnalysisStatus.FAILED.value, AnalysisStatus.CANCELLED.value]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot retry analysis in status '{a.status}'. Only FAILED or CANCELLED analyses can be retried."
+        )
+
+    # Protect live analysis retry operations
+    if a.live_mode:
+        if not settings.OPERATOR_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Live retry blocked: Server operator security token is unconfigured (fail closed)."
+            )
+        if not x_operator_token or not hmac.compare_digest(x_operator_token, settings.OPERATOR_TOKEN):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: Valid operator token required to retry live malware analysis (X-Operator-Token)."
+            )
+
+        # Recheck Live Mode & confinement readiness
+        if a.backend_type == SandboxBackendType.CAPE.value:
+            from app.services.sandbox.confinement import verify_cape_confinement
+            target_machine = getattr(settings, "CAPE_DEFAULT_MACHINE", "win10_analyst")
+            target_route = getattr(settings, "CAPE_DEFAULT_NETWORK_ROUTE", "drop")
+            conf_res = verify_cape_confinement(target_machine=target_machine, target_route=target_route)
+            if not conf_res.is_verified:
+                raise HTTPException(
+                    status_code=status.HTTP_412_PRECONDITION_FAILED,
+                    detail=f"Live retry blocked by confinement policy: {conf_res.error or conf_res.status}"
+                )
+
+            # Reconcile previous CAPE task before retrying
+            if a.external_task_id:
+                from app.services.sandbox.cape import cape_adapter
+                try:
+                    task_status = cape_adapter.get_task_status(a.external_task_id)
+                    cape_status = str(task_status.get("cape_status", "")).lower()
+
+                    # Prevent duplicate remote detonation if task is still running or pending
+                    if cape_status in ("running", "processing", "pending", "distributed"):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Cannot retry analysis: remote CAPE task {a.external_task_id} is still active (status: {cape_status}). Reconcile or cancel remote task before retrying."
+                        )
+
+                    # For cancelled tasks, confirm remote cancellation/cleanup before retrying
+                    if a.status == AnalysisStatus.CANCELLED.value:
+                        if cape_status not in ("completed", "reported", "failed", "not_found", "deleted"):
+                            cape_adapter.cancel_task(a.external_task_id)
+                            recheck = cape_adapter.get_task_status(a.external_task_id)
+                            recheck_status = str(recheck.get("cape_status", "")).lower()
+                            if recheck_status in ("running", "processing", "pending"):
+                                raise HTTPException(
+                                    status_code=status.HTTP_409_CONFLICT,
+                                    detail=f"Cannot retry cancelled analysis: remote CAPE task {a.external_task_id} cleanup could not be confirmed."
+                                )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Failed to reconcile previous remote CAPE task {a.external_task_id}: {str(e)}. Retry blocked to prevent duplicate remote execution."
+                    )
+
+    # Record retry event for provenance and preserve historical evidence
+    from app.models.event import AnalysisEvent
+    retry_event = AnalysisEvent(
+        analysis_id=a.id,
+        category="artifact",
+        action="operator_retry",
+        attributes={
+            "previous_status": a.status,
+            "previous_external_task_id": a.external_task_id,
+            "live_mode": a.live_mode,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        source_tool="operator",
+        confidence=1.0,
+    )
+    db.add(retry_event)
+
+    # Reset analysis status to QUEUED, clear external_task_id for fresh execution, and clear transient error state
+    a.external_task_id = None
+    a.status = AnalysisStatus.QUEUED.value
+    a.error_message = None
+    a.started_at = None
+    a.completed_at = None
+    db.commit()
+    db.refresh(a)
+
+    if run_sync:
+        a = job_queue_manager.execute_sync(a.id, db)
+    else:
+        job_queue_manager.start()
+
     return a
