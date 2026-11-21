@@ -134,9 +134,10 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
       setSubmitting(true);
       setError(null);
 
+      const backendToUse = health?.default_backend || 'cape';
       const analysis = await api.createAnalysis({
         sample_id: uploadedSample.id,
-        backend_type: 'cape',
+        backend_type: backendToUse,
         profile: 'standard',
         timeout_seconds: 60,
         live_mode: true,
@@ -461,7 +462,9 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                     Isolated Sandbox
                   </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    CAPE guest VM detonation & API hooking
+                    {health?.default_backend === 'remnux_gateway'
+                      ? 'REMnux gateway & REMWin guest detonation'
+                      : 'CAPE guest VM detonation & API hooking'}
                   </div>
                 </div>
               </div>
@@ -539,16 +542,20 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
               {isCapeReady ? (
                 <>
                   <CheckCircle2 size={16} color="#15803d" />
-                  <span style={{ fontWeight: 600, color: '#15803d' }}>CAPE Sandbox Ready:</span>
+                  <span style={{ fontWeight: 600, color: '#15803d' }}>
+                    {health?.default_backend === 'remnux_gateway' ? 'REMnux Sandbox Ready:' : 'CAPE Sandbox Ready:'}
+                  </span>
                   <span style={{ color: 'var(--text-secondary)' }}>
-                    Operator-attested guest environment and safe network route verified for live automated detonation.
+                    {health?.default_backend === 'remnux_gateway'
+                      ? 'REMnux sandbox gateway and isolated REMWin guest verified for live automated detonation.'
+                      : 'Operator-attested guest environment and safe network route verified for live automated detonation.'}
                   </span>
                 </>
               ) : isConfinementUnverified ? (
                 <>
                   <AlertTriangle size={16} color="var(--danger)" />
                   <span style={{ fontWeight: 600, color: 'var(--danger)' }}>
-                    CAPE Confinement Gate Blocked:
+                    {health?.default_backend === 'remnux_gateway' ? 'REMnux Confinement Gate Blocked:' : 'CAPE Confinement Gate Blocked:'}
                   </span>
                   <span style={{ color: 'var(--text-secondary)' }}>
                     {health?.readiness_details || 'Guest network isolation is unverified. Detonation is blocked pending operator isolation verification.'}
@@ -558,7 +565,9 @@ export const SubmitPage: React.FC<SubmitPageProps> = ({
                 <>
                   <AlertTriangle size={16} color="var(--amber)" />
                   <span style={{ fontWeight: 600, color: 'var(--amber)' }}>
-                    CAPE Sandbox Not Ready — Static Pipeline Operational:
+                    {health?.default_backend === 'remnux_gateway'
+                      ? 'REMnux Sandbox Not Ready — Static Pipeline Operational:'
+                      : 'CAPE Sandbox Not Ready — Static Pipeline Operational:'}
                   </span>
                   <span style={{ color: 'var(--text-secondary)' }}>
                     {health?.readiness_details || 'Live sandbox is currently unreachable or guest machines are unavailable. Static triage & Ghidra extraction will proceed safely.'}

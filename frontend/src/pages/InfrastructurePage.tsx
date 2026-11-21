@@ -66,8 +66,11 @@ export const InfrastructurePage: React.FC = () => {
       case 'ghidra':
         return <Cpu size={18} />;
       case 'cape':
+      case 'gateway':
+      case 'remnux':
         return <Layers size={18} />;
       case 'guest':
+      case 'vbox_controller':
         return <HardDrive size={18} />;
       case 'isolation':
         return <Lock size={18} />;

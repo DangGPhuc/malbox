@@ -908,6 +908,7 @@ export interface InfrastructureReadinessResponse {
     ai: SubsystemReadinessCard;
     worker: SubsystemReadinessCard;
     detonation: SubsystemReadinessCard;
+    [key: string]: SubsystemReadinessCard;
   };
   remediation_commands: string[];
   detonation_blockers: string[];
