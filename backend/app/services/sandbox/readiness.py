@@ -47,7 +47,8 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
             from app.services.sandbox.remnux_gateway import RemnuxGatewayBackend
             gw = RemnuxGatewayBackend()
             probe = gw.check_readiness(timeout=timeout)
-            if probe.get("ready"):
+            confinement_ok = bool(probe.get("confinement_verified", False))
+            if probe.get("ready") and confinement_ok:
                 cape_reachable = True
                 cape_authenticated = True
                 cape_compatible = True
@@ -57,7 +58,18 @@ def check_system_readiness(check_cape: bool = True, timeout: float = 2.0) -> Dic
                 guest_vm_ready = True
                 network_isolation_verified = True
                 readiness_status = "ready"
-                details = "REMnux Gateway and VirtualBox Host Controller active and verified."
+                details = "REMnux Gateway and VirtualBox Host Controller active and isolation verified."
+            elif not confinement_ok and (probe.get("gateway_reachable") or probe.get("host_controller_reachable")):
+                cape_reachable = bool(probe.get("gateway_reachable", False))
+                cape_authenticated = bool(probe.get("gateway_authenticated", False))
+                cape_compatible = True
+                cape_version = "REMnux Gateway 1.0"
+                guest_vms_total = 1
+                guest_vms_available = 1
+                guest_vm_ready = bool(probe.get("guest_vm_ready", False))
+                network_isolation_verified = False
+                readiness_status = "unverified_confinement"
+                details = probe.get("error") or "Guest network isolation is unverified; live detonation blocked."
             else:
                 cape_reachable = probe.get("gateway_reachable", False)
                 cape_authenticated = probe.get("gateway_authenticated", False)

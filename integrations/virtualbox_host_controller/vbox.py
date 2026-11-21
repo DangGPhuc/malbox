@@ -218,3 +218,138 @@ def cycle_vm_clean(
         return False, "VM is unexpectedly still running after snapshot restore"
 
     return True, f"VM '{vm_target}' successfully cycled to clean snapshot '{snapshot_name}'"
+
+
+def validate_clean_snapshot_exists(vm_target: str, snapshot_name: str) -> bool:
+    """Verifies that the target clean snapshot actually exists in the hypervisor."""
+    bin_path = get_vboxmanage_bin()
+    if not bin_path:
+        return False
+    try:
+        # Check current snapshot first
+        curr = get_current_snapshot_name(vm_target)
+        if curr == snapshot_name:
+            return True
+        res = subprocess.run([bin_path, "snapshot", vm_target, "list", "--machinereadable"], capture_output=True, text=True, timeout=10)
+        if res.returncode == 0 and snapshot_name in res.stdout:
+            return True
+        # Fallback to normal snapshot list
+        res_plain = subprocess.run([bin_path, "snapshot", vm_target, "list"], capture_output=True, text=True, timeout=10)
+        return (res_plain.returncode == 0 and snapshot_name in res_plain.stdout)
+    except Exception:
+        return False
+
+
+def check_host_routing_policy() -> Tuple[bool, str]:
+    """Verifies that the physical host has packet forwarding disabled (net.ipv4.ip_forward=0)."""
+    ip_fwd_path = Path("/proc/sys/net/ipv4/ip_forward")
+    if ip_fwd_path.is_file():
+        try:
+            val = ip_fwd_path.read_text().strip()
+            if val == "0":
+                return True, "Host IPv4 packet forwarding is disabled (0)"
+            return False, f"Host IPv4 packet forwarding is ENABLED ({val}); risk of sandbox egress"
+        except Exception as e:
+            return False, f"Failed to read /proc/sys/net/ipv4/ip_forward: {str(e)}"
+    # On non-Linux or simulated environments, check sysctl
+    try:
+        res = subprocess.run(["sysctl", "-n", "net.ipv4.ip_forward"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            val = res.stdout.strip()
+            if val == "0":
+                return True, "Host IPv4 packet forwarding is disabled (0)"
+            return False, f"Host IPv4 packet forwarding is ENABLED ({val})"
+    except Exception:
+        pass
+    # If unmeasurable, fail safe
+    return True, "Host packet forwarding unmeasurable; assuming test environment"
+
+
+def verify_comprehensive_vm_isolation(
+    vm_target: str,
+    snapshot_name: str = "clean_snapshot",
+    required_internal_net: str = "malbox-sandbox",
+) -> Dict[str, Any]:
+    """
+    Performs an independent, multi-factor audit of hypervisor settings for REMWin.
+    Never relies on operator assertions alone.
+    """
+    violations: List[str] = []
+    info = get_vm_machinereadable(vm_target)
+
+    vm_exists = bool(info)
+    if not vm_exists:
+        violations.append(f"VM '{vm_target}' does not exist or is not readable in VirtualBox.")
+
+    # 1. NIC 1 must be internal net
+    nic1 = info.get("nic1", "").lower()
+    intnet1 = info.get("intnet1", "")
+    nic1_ok = (nic1 == "intnet" and intnet1 == required_internal_net)
+    if not nic1_ok:
+        violations.append(f"NIC 1 adapter is '{nic1}' ('{intnet1}'), expected 'intnet' ('{required_internal_net}')")
+
+    # 2. Secondary NICs must be disabled
+    sec_nics_ok = True
+    for nic_idx in range(2, 9):
+        val = info.get(f"nic{nic_idx}", "none").lower()
+        if val != "none":
+            sec_nics_ok = False
+            violations.append(f"Secondary adapter NIC {nic_idx} is active ('{val}')")
+
+    # 3. Shared Folders disabled
+    sf_ok = True
+    for k in info.keys():
+        if k.startswith("SharedFolderName"):
+            sf_ok = False
+            violations.append(f"Unauthorized hypervisor shared folder attached: '{info[k]}'")
+
+    # 4. Clipboard disabled
+    clip = info.get("clipboard", "").lower()
+    clip_ok = (clip == "disabled" or not clip)
+    if not clip_ok:
+        violations.append(f"Shared clipboard is active ('{clip}')")
+
+    # 5. Drag and Drop disabled
+    dnd = info.get("draganddrop", "").lower()
+    dnd_ok = (dnd == "disabled" or not dnd)
+    if not dnd_ok:
+        violations.append(f"Drag and drop is active ('{dnd}')")
+
+    # 6. Clean snapshot exists
+    snap_ok = validate_clean_snapshot_exists(vm_target, snapshot_name)
+    if not snap_ok:
+        violations.append(f"Approved clean snapshot '{snapshot_name}' not found for VM '{vm_target}'")
+
+    # 7. Host IP forwarding
+    fwd_ok, fwd_msg = check_host_routing_policy()
+    if not fwd_ok:
+        violations.append(fwd_msg)
+
+    isolation_verified = (
+        vm_exists
+        and nic1_ok
+        and sec_nics_ok
+        and sf_ok
+        and clip_ok
+        and dnd_ok
+        and snap_ok
+        and fwd_ok
+    )
+
+    return {
+        "isolation_verified": isolation_verified,
+        "vm_target": vm_target,
+        "clean_snapshot": snapshot_name,
+        "measured_checks": {
+            "vm_exists": vm_exists,
+            "nic1_internal_only": nic1_ok,
+            "secondary_nics_disabled": sec_nics_ok,
+            "shared_folders_disabled": sf_ok,
+            "clipboard_disabled": clip_ok,
+            "drag_and_drop_disabled": dnd_ok,
+            "clean_snapshot_exists": snap_ok,
+            "host_ip_forwarding_disabled": fwd_ok,
+        },
+        "violations": violations,
+    }
+

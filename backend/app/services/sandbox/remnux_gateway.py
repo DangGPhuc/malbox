@@ -68,14 +68,34 @@ class RemnuxGatewayBackend(SandboxBackend):
             return {"success": False, "status": 500, "error": str(e)}
 
     def check_readiness(self, timeout: float = 2.0) -> Dict[str, Any]:
-        """Validates that REMnux gateway and physical Kali host controller are ready."""
+        """Validates that REMnux gateway and physical Kali host controller are ready and isolation is measured."""
+        # 1. Fail closed if management credentials are not configured or too weak
+        if (
+            not self.gateway_token
+            or len(self.gateway_token.strip()) < 16
+            or not self.host_controller_secret
+            or len(self.host_controller_secret.strip()) < 16
+        ):
+            return {
+                "ready": False,
+                "gateway_reachable": False,
+                "gateway_authenticated": False,
+                "host_controller_reachable": False,
+                "confinement_verified": False,
+                "guest_vm_ready": False,
+                "guest_vms_available": 0,
+                "guest_vms_total": 1,
+                "error": "REMnux gateway token or VirtualBox host controller secret is unconfigured or fails minimum 16-character requirement.",
+                "backend": "remnux_gateway",
+            }
+
         gw_reachable = False
         gw_authenticated = False
         hc_reachable = False
         isolation_verified = False
         error_msg = None
 
-        # 1. Probe REMnux Gateway
+        # 2. Probe REMnux Gateway
         res_gw = self._http_call(f"{self.gateway_url}/v1/health", timeout=timeout)
         if res_gw.get("success"):
             gw_reachable = True
@@ -85,18 +105,42 @@ class RemnuxGatewayBackend(SandboxBackend):
         else:
             error_msg = f"REMnux Gateway unreachable at {self.gateway_url}: {res_gw.get('error')}"
 
-        # 2. Probe Kali VirtualBox Host Controller
+        # 3. Probe Kali VirtualBox Host Controller
         res_hc = self._http_call(f"{self.host_controller_url}/health", timeout=timeout)
         if res_hc.get("success"):
             hc_reachable = True
             hc_data = res_hc.get("data", {})
-            if isinstance(hc_data, dict) and hc_data.get("vbox_installed"):
-                isolation_verified = True
+            if isinstance(hc_data, dict) and hc_data.get("lockdown"):
+                error_msg = f"VirtualBox Host Controller is in lockdown: {hc_data.get('lockdown_reason')}"
+            else:
+                # 4. Measure live hypervisor isolation (never infer from HTTP reachability alone)
+                try:
+                    from integrations.virtualbox_host_controller.security import generate_hmac_headers
+                    target_vm = getattr(settings, "REMNUX_GUEST_VM_UUID", "REMWin")
+                    hmac_headers = generate_hmac_headers(b"", self.host_controller_secret)
+                    res_iso = self._http_call(
+                        f"{self.host_controller_url}/isolation/verify?vm_target={target_vm}",
+                        headers=hmac_headers,
+                        timeout=timeout,
+                    )
+                    if res_iso.get("success"):
+                        iso_data = res_iso.get("data", {})
+                        if isinstance(iso_data, dict):
+                            isolation_verified = bool(iso_data.get("isolation_verified", False))
+                            if not isolation_verified and not error_msg:
+                                violations = iso_data.get("violations", [])
+                                error_msg = f"VirtualBox isolation verification failed: {', '.join(violations)}"
+                    else:
+                        if not error_msg:
+                            error_msg = f"Host Controller isolation verification failed ({res_iso.get('status')}): {res_iso.get('error')}"
+                except Exception as e:
+                    if not error_msg:
+                        error_msg = f"Failed to verify hypervisor isolation: {str(e)}"
         else:
             if not error_msg:
                 error_msg = f"Host Controller unreachable at {self.host_controller_url}: {res_hc.get('error')}"
 
-        ready = bool(gw_reachable and hc_reachable)
+        ready = bool(gw_reachable and gw_authenticated and hc_reachable and isolation_verified)
         return {
             "ready": ready,
             "gateway_reachable": gw_reachable,
@@ -172,7 +216,7 @@ class RemnuxGatewayBackend(SandboxBackend):
             return {"status": "failed", "is_ready_for_report": False, "error": "Malformed response"}
 
         raw_status = data.get("status", "SUBMITTED")
-        is_ready = raw_status in ("EVIDENCE_READY", "COMPLETED", "GUEST_RESTORED")
+        is_ready = raw_status in ("EVIDENCE_READY", "COMPLETED")
         is_failed = raw_status in ("FAILED", "TIMED_OUT", "CLEANUP_FAILED")
 
         return {
@@ -234,6 +278,12 @@ class RemnuxGatewayBackend(SandboxBackend):
             val_ok, manifest, val_err = validate_and_extract_evidence_bundle(archive_file, extract_dir)
             if not val_ok:
                 raise RuntimeError(f"Evidence bundle validation failed: {val_err}")
+
+            if manifest:
+                if expected_sha256 and manifest.sample_sha256.lower() != expected_sha256.lower():
+                    raise RuntimeError(f"Evidence bundle hash mismatch: expected {expected_sha256}, got {manifest.sample_sha256}")
+                if backend_task_id.startswith("gw_") and manifest.job_id != backend_task_id:
+                    raise RuntimeError(f"Evidence bundle job_id mismatch: expected {backend_task_id}, got {manifest.job_id}")
 
             # 4. Read process events & network events
             proc_file = extract_dir / "dynamic" / "process_events.json"
