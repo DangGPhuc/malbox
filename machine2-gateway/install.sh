@@ -7,8 +7,20 @@ VENV_DIR="${SCRIPT_DIR}/.venv"
 echo "[INSTALL] Setting up MalBox Machine 2 Gateway in ${SCRIPT_DIR}..."
 
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "[ERROR] python3 is required. Install python3 and python3-venv first."
+    echo "[ERROR] python3 (>= 3.10) is required. Install python3 and python3-venv first."
     exit 1
+fi
+
+if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >/dev/null 2>&1; then
+    echo "[ERROR] Python 3.10+ is required (found $(python3 --version 2>&1))."
+    exit 1
+fi
+
+if [ -x "${VENV_DIR}/bin/python" ]; then
+    if ! "${VENV_DIR}/bin/python" -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >/dev/null 2>&1; then
+        echo "[WARN] Existing .venv uses Python < 3.10; recreating .venv..."
+        rm -rf "${VENV_DIR}"
+    fi
 fi
 
 if ! python3 -m venv "${VENV_DIR}"; then

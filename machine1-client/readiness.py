@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""MalBox Machine 1 (Kali Linux Client) Environment Readiness Checker."""
+"""MalBox Machine 1 (Kali Linux Client) Environment Readiness Checker.
+
+Exit codes (standardized across all MalBox readiness checkers):
+  0: Mandatory local checks passed (LOCAL_READINESS is READY or LIMITED).
+  1: LOCAL_READINESS is NOT_READY (missing/failing mandatory check or invalid config)
+     in either setup or check-only mode, or setup_report.json could not be written.
+  2: Invalid command-line arguments.
+"""
 
 from __future__ import annotations
 
 import argparse
-import importlib
-import importlib.metadata
 import json
+import math
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.error
@@ -21,6 +28,7 @@ from typing import Any
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_REPORT_PATH = BASE_DIR / "setup_report.json"
+MIN_PYTHON = (3, 10)
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -99,6 +107,130 @@ def make_check(
     }
 
 
+def _validate_str(cfg: dict[str, Any], key: str, errors: list[str], allow_empty: bool = False) -> str | None:
+    if key not in cfg:
+        errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if not isinstance(val, str):
+        errors.append(f"Key '{key}' must be a string (got {type(val).__name__})")
+        return None
+    if "\x00" in val:
+        errors.append(f"Key '{key}' contains embedded null byte")
+        return None
+    if not allow_empty and not val.strip():
+        errors.append(f"Key '{key}' must not be empty")
+        return None
+    return val.strip()
+
+
+def _validate_int(
+    cfg: dict[str, Any],
+    key: str,
+    errors: list[str],
+    min_val: int,
+    max_val: int | None = None,
+    required: bool = True,
+) -> int | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if isinstance(val, bool) or not isinstance(val, int):
+        errors.append(f"Key '{key}' must be an integer (got {type(val).__name__})")
+        return None
+    if val < min_val or (max_val is not None and val > max_val):
+        bound = f"{min_val}..{max_val}" if max_val is not None else f">= {min_val}"
+        errors.append(f"Key '{key}' out of range ({bound}): {val}")
+        return None
+    return val
+
+
+def _validate_number(
+    cfg: dict[str, Any],
+    key: str,
+    errors: list[str],
+    min_val: float,
+    required: bool = True,
+) -> float | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+        errors.append(f"Key '{key}' must be a finite number (got {type(val).__name__})")
+        return None
+    fval = float(val)
+    if fval < min_val:
+        errors.append(f"Key '{key}' must be >= {min_val} (got {fval})")
+        return None
+    return fval
+
+
+def _validate_bool(cfg: dict[str, Any], key: str, errors: list[str], required: bool = False) -> None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return
+    if not isinstance(cfg[key], bool):
+        errors.append(f"Key '{key}' must be a boolean (got {type(cfg[key]).__name__})")
+
+
+def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[str], str]:
+    """Validate config.json without crashing; always returns safe fallback dict for downstream probes."""
+    defaults: dict[str, Any] = {
+        "gateway_host": "10.10.10.20",
+        "gateway_port": 8000,
+        "evidence_dir": "./evidence",
+        "connect_timeout_seconds": 5.0,
+    }
+    errors: list[str] = []
+    if not config_path.is_file():
+        errors.append(f"Missing configuration file: {config_path}")
+        return defaults, errors, "missing"
+
+    try:
+        raw_text = config_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        errors.append(f"Failed reading {config_path.name}: {exc}")
+        return defaults, errors, "read_error"
+
+    try:
+        parsed = json.loads(raw_text)
+    except ValueError as exc:
+        errors.append(f"Invalid JSON in {config_path.name}: {exc}")
+        return defaults, errors, "invalid_json"
+
+    if not isinstance(parsed, dict):
+        errors.append(f"Root of {config_path.name} must be a JSON object (got {type(parsed).__name__})")
+        return defaults, errors, "invalid_type"
+
+    gw_host = _validate_str(parsed, "gateway_host", errors)
+    gw_port = _validate_int(parsed, "gateway_port", errors, min_val=1, max_val=65535, required=True)
+    ev_dir = _validate_str(parsed, "evidence_dir", errors)
+    conn_t = _validate_number(parsed, "connect_timeout_seconds", errors, min_val=0.1, required=True)
+    _validate_number(parsed, "request_timeout_seconds", errors, min_val=0.1, required=False)
+    _validate_number(parsed, "poll_interval_seconds", errors, min_val=0.1, required=False)
+    _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
+    _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    _validate_bool(parsed, "extract_archive", errors, required=False)
+    _validate_bool(parsed, "keep_zip", errors, required=False)
+
+    safe_cfg = dict(defaults)
+    if gw_host:
+        safe_cfg["gateway_host"] = gw_host
+    if gw_port is not None:
+        safe_cfg["gateway_port"] = gw_port
+    if ev_dir:
+        safe_cfg["evidence_dir"] = ev_dir
+    if conn_t is not None:
+        safe_cfg["connect_timeout_seconds"] = conn_t
+
+    return safe_cfg, errors, "valid" if not errors else "validation_error"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="MalBox Machine 1 Readiness Checker")
     parser.add_argument("--mode", choices=("setup", "check-only"), default="check-only")
@@ -133,9 +265,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # 2. Python runtime
+    # 2. Python runtime (>= 3.10 standardized across MalBox)
     py_ver = platform.python_version()
-    py_ok = sys.version_info >= (3, 9)
+    py_ok = sys.version_info >= MIN_PYTHON
     checks.append(
         make_check(
             name="python_runtime",
@@ -148,27 +280,43 @@ def main(argv: list[str] | None = None) -> int:
             runtime_verified=py_ok,
             feature_verified=py_ok,
             diagnostic_message=f"Python {py_ver} ({platform.machine()})",
-            recommended_action="" if py_ok else "Install Python 3.9+ and recreate .venv.",
+            recommended_action="" if py_ok else "Install Python 3.10+ and recreate .venv.",
         )
     )
 
-    # 3. Virtual environment
+    # 3. Virtual environment (verify binary runs cleanly AND meets >= 3.10)
+    venv_py_ok = False
     if venv_python.is_file():
-        v_probe = run_bounded([str(venv_python), "--version"], timeout=10.0)
-        v_ok = v_probe["returncode"] == 0
+        v_probe = run_bounded(
+            [
+                str(venv_python),
+                "-c",
+                "import platform, sys; print(platform.python_version()); sys.exit(0 if sys.version_info >= (3, 10) else 3)",
+            ],
+            timeout=10.0,
+        )
+        v_ver = v_probe["stdout"].splitlines()[0].strip() if v_probe["stdout"] else None
+        venv_py_ok = v_probe["returncode"] == 0
+        if v_probe["returncode"] == 3:
+            diag = f".venv Python {v_ver} is below required minimum 3.10."
+        elif venv_py_ok:
+            diag = f"Virtual environment Python {v_ver} executes cleanly."
+        else:
+            v_err_detail = v_probe["stderr"] or v_probe["error"] or f"exit {v_probe['returncode']}"
+            diag = f"venv probe failed: {v_err_detail}"
         checks.append(
             make_check(
                 name="python_venv",
                 category="runtime",
                 required=True,
-                status=STATUS_PASS if v_ok else STATUS_FAIL,
-                detected_version=v_probe["stdout"] or None,
+                status=STATUS_PASS if venv_py_ok else STATUS_FAIL,
+                detected_version=v_ver,
                 configured_path=str(venv_dir),
                 resolved_path=str(venv_python),
                 installed=True,
-                runtime_verified=v_ok,
-                diagnostic_message="Virtual environment Python executes cleanly." if v_ok else f"venv probe failed: {v_probe['stderr'] or v_probe['error']}",
-                recommended_action="" if v_ok else "Run bash setup.sh to recreate .venv.",
+                runtime_verified=venv_py_ok,
+                diagnostic_message=diag,
+                recommended_action="" if venv_py_ok else "Run bash setup.sh to recreate .venv with Python 3.10+.",
             )
         )
     else:
@@ -217,12 +365,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    # 5. Python packages & dependency consistency (explicitly inspect .venv)
+    # 5. Python packages & dependency consistency inside .venv
     pkg_versions: dict[str, str] = {}
     req_ver = None
     pip_check_ok = False
     pip_check_msg = ""
-    if venv_python.is_file():
+    if venv_py_ok:
         req_probe = run_bounded(
             [str(venv_python), "-c", "import requests; print(requests.__version__)"],
             timeout=10.0,
@@ -234,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         pip_check_ok = pc["returncode"] == 0
         pip_check_msg = pc["stdout"] or pc["stderr"] or pc["error"] or ""
     else:
-        pip_check_msg = ".venv missing"
+        pip_check_msg = ".venv missing or unsupported Python version"
 
     pkg_ok = bool(req_ver) and pip_check_ok
     checks.append(
@@ -256,36 +404,21 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # 6. config.json parsing and validation
-    cfg: dict[str, Any] = {}
-    cfg_errors: list[str] = []
-    if not config_path.is_file():
-        cfg_errors.append(f"Missing {config_path}")
-    else:
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8-sig"))
-            for key in ("gateway_host", "gateway_port", "evidence_dir", "connect_timeout_seconds"):
-                if key not in cfg:
-                    cfg_errors.append(f"Missing key '{key}'")
-            port_val = int(cfg.get("gateway_port", 0))
-            if not (1 <= port_val <= 65535):
-                cfg_errors.append(f"Invalid gateway_port: {port_val}")
-        except (ValueError, TypeError) as exc:
-            cfg_errors.append(f"Invalid config.json: {exc}")
-
+    # 6. Strict, crash-safe config.json validation
+    cfg, cfg_errors, cfg_state = load_and_validate_config(config_path)
     checks.append(
         make_check(
             name="config_json",
             category="config",
             required=True,
-            status=STATUS_PASS if not cfg_errors else STATUS_FAIL,
+            status=STATUS_PASS if not cfg_errors else (STATUS_MISSING if cfg_state == "missing" else STATUS_FAIL),
             configured_path=str(config_path),
             resolved_path=str(config_path) if config_path.is_file() else None,
             installed=config_path.is_file(),
             runtime_verified=not cfg_errors,
             feature_verified=not cfg_errors,
             diagnostic_message=(
-                f"Gateway target {cfg.get('gateway_host')}:{cfg.get('gateway_port')}"
+                f"Gateway target {cfg['gateway_host']}:{cfg['gateway_port']}"
                 if not cfg_errors
                 else "; ".join(cfg_errors)
             ),
@@ -337,67 +470,115 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    # 8. Evidence directory permissions
-    raw_ev = str(cfg.get("evidence_dir", "./evidence"))
-    ev_dir = Path(raw_ev) if Path(raw_ev).is_absolute() else (config_path.parent / raw_ev).resolve()
+    # 8. Evidence directory permissions (non-destructive probe cleanup in finally)
+    raw_ev = str(cfg["evidence_dir"])
     ev_ok = False
-    ev_msg = ""
-    if ev_dir.is_dir():
-        probe_file = ev_dir / f".readiness_probe_{os.getpid()}"
-        try:
-            probe_file.write_text("ok", encoding="utf-8")
-            _ = probe_file.read_text(encoding="utf-8")
-            probe_file.unlink()
-            ev_ok = True
-            ev_msg = f"Writable evidence directory: {ev_dir}"
-        except OSError as exc:
-            ev_msg = f"Evidence directory not writable: {exc}"
-    else:
-        ev_msg = f"Evidence directory missing: {ev_dir}"
+    ev_exists = False
+    ev_dir_resolved: Path | None = None
+    try:
+        ev_candidate = Path(raw_ev)
+        ev_dir = ev_candidate if ev_candidate.is_absolute() else (config_path.parent / ev_candidate).resolve()
+        ev_exists = ev_dir.exists()
+        if ev_dir.is_dir():
+            ev_dir_resolved = ev_dir
+            probe_file = ev_dir / f".readiness_probe_{os.getpid()}"
+            try:
+                probe_file.write_text("ok", encoding="utf-8")
+                _ = probe_file.read_text(encoding="utf-8")
+                ev_ok = True
+                ev_msg = f"Writable evidence directory: {ev_dir}"
+            except OSError as exc:
+                ev_msg = f"Evidence directory not writable: {exc}"
+            finally:
+                try:
+                    if probe_file.exists():
+                        probe_file.unlink()
+                except OSError:
+                    pass
+        elif ev_exists:
+            ev_msg = f"Configured evidence_dir is not a directory: {ev_dir}"
+        else:
+            ev_msg = f"Evidence directory missing: {ev_dir}"
+    except (ValueError, OSError) as exc:
+        ev_msg = f"Invalid evidence_dir path '{raw_ev}': {exc}"
 
     checks.append(
         make_check(
             name="evidence_directory",
             category="filesystem",
             required=True,
-            status=STATUS_PASS if ev_ok else (STATUS_MISSING if not ev_dir.exists() else STATUS_FAIL),
+            status=STATUS_PASS if ev_ok else (STATUS_MISSING if not ev_exists else STATUS_FAIL),
             configured_path=raw_ev,
-            resolved_path=str(ev_dir) if ev_dir.exists() else None,
-            installed=ev_dir.is_dir(),
+            resolved_path=str(ev_dir_resolved) if ev_dir_resolved else None,
+            installed=bool(ev_dir_resolved),
             runtime_verified=ev_ok,
             feature_verified=ev_ok,
             diagnostic_message=ev_msg,
-            recommended_action="" if ev_ok else "Run bash setup.sh or check directory permissions.",
+            recommended_action="" if ev_ok else "Run bash setup.sh or check directory permissions/path.",
         )
     )
 
     # 9. Disk space
-    disk_target = ev_dir if ev_dir.exists() else BASE_DIR
-    free_mb = shutil.disk_usage(disk_target).free // (1024 * 1024)
-    disk_ok = free_mb >= 512
+    disk_target = ev_dir_resolved if ev_dir_resolved else BASE_DIR
+    try:
+        free_mb = shutil.disk_usage(disk_target).free // (1024 * 1024)
+        disk_ok = free_mb >= 512
+        disk_status = STATUS_PASS if disk_ok else STATUS_FAIL
+        disk_ver = f"{free_mb} MB free"
+        disk_msg = f"{free_mb} MB free disk space on client partition."
+    except OSError as exc:
+        disk_ok = False
+        disk_status = STATUS_FAIL
+        disk_ver = None
+        disk_msg = f"Failed checking disk space on {disk_target}: {exc}"
+
     checks.append(
         make_check(
             name="disk_space",
             category="filesystem",
             required=True,
-            status=STATUS_PASS if disk_ok else STATUS_FAIL,
-            detected_version=f"{free_mb} MB free",
+            status=disk_status,
+            detected_version=disk_ver,
             resolved_path=str(disk_target),
             installed=True,
-            runtime_verified=True,
+            runtime_verified=disk_ver is not None,
             feature_verified=disk_ok,
-            diagnostic_message=f"{free_mb} MB free disk space on client partition.",
+            diagnostic_message=disk_msg,
             recommended_action="" if disk_ok else "Free at least 512 MB for evidence downloads.",
         )
     )
 
-    # 10. Optional peer check: Gateway health & status (stdlib urllib works even if .venv missing)
-    gw_host = str(cfg.get("gateway_host", "10.10.10.20"))
-    gw_port = int(cfg.get("gateway_port", 8000))
+    # 10. Network / Peer checks (distinguishing local service, peer connectivity, application state, snapshot state)
+    gw_host = str(cfg["gateway_host"])
+    gw_port = int(cfg["gateway_port"])
     gw_url = f"http://{gw_host}:{gw_port}"
-    gw_health_status = STATUS_PENDING
-    gw_status_val = STATUS_PENDING
-    timeout_s = float(cfg.get("connect_timeout_seconds", 5))
+    timeout_s = float(cfg["connect_timeout_seconds"])
+
+    # Advisory check for default Internal Network 1 IP (10.10.10.10) when pointing to 10.10.10.20
+    if gw_host == "10.10.10.20":
+        nic_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            nic_sock.bind(("10.10.10.10", 0))
+            nic1_ok = True
+        except OSError:
+            nic1_ok = False
+        finally:
+            nic_sock.close()
+        checks.append(
+            make_check(
+                name="internal_network1_ip",
+                category="peer",
+                required=False,
+                status=STATUS_PASS if nic1_ok else STATUS_PENDING,
+                detected_version="10.10.10.10" if nic1_ok else None,
+                diagnostic_message=(
+                    "Internal Network 1 IP 10.10.10.10 is assigned locally."
+                    if nic1_ok
+                    else "Default Client static IP 10.10.10.10 not assigned yet (pending manual network setup)."
+                ),
+                recommended_action="" if nic1_ok else "Assign 10.10.10.10/24 on Internal Network 1 (see docs/network-setup.md).",
+            )
+        )
 
     def _http_get_json(url: str) -> tuple[int, dict[str, Any], str | None]:
         req = urllib.request.Request(url, method="GET")
@@ -405,18 +586,23 @@ def main(argv: list[str] | None = None) -> int:
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 raw = resp.read().decode("utf-8-sig", errors="replace")
                 try:
-                    return resp.status, json.loads(raw), None
+                    data = json.loads(raw)
+                    return resp.status, data if isinstance(data, dict) else {}, None if isinstance(data, dict) else "JSON root not object"
                 except ValueError:
                     return resp.status, {}, "non-JSON response"
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8-sig", errors="replace") if exc.fp else ""
             try:
-                return exc.code, json.loads(raw), None
+                data = json.loads(raw)
+                return exc.code, data if isinstance(data, dict) else {}, None
             except ValueError:
                 return exc.code, {}, f"HTTP {exc.code}"
         except (urllib.error.URLError, OSError) as exc:
             return 0, {}, str(exc)
 
+    gw_health_status = STATUS_PENDING
+    gw_status_val = STATUS_PENDING
+    sandbox_app_state = "UNKNOWN"
     h_code, h_data, h_err = _http_get_json(f"{gw_url}/health")
     if h_code == 0:
         gw_health_status = STATUS_PENDING
@@ -442,8 +628,7 @@ def main(argv: list[str] | None = None) -> int:
                 configured_path=f"{gw_url}/health",
                 resolved_path=gw_url,
                 runtime_verified=True,
-                feature_verified=True,
-                diagnostic_message="Gateway health endpoint responded with valid MalBox Gateway identity.",
+                diagnostic_message="Gateway HTTP /health endpoint responded with valid MalBox Gateway identity (full submission not tested).",
             )
         )
     else:
@@ -462,7 +647,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if gw_health_status == STATUS_PASS:
         st_code, st_data, st_err = _http_get_json(f"{gw_url}/status")
-        sb_state = str(st_data.get("sandbox", {}).get("state", "UNAVAILABLE")).upper()
+        sb_block = st_data.get("sandbox")
+        sb_state = str(sb_block.get("state", "UNAVAILABLE")).upper() if isinstance(sb_block, dict) else "UNAVAILABLE"
         if st_code == 200 and st_data.get("gateway") == "ok" and sb_state in (
             "READY",
             "ANALYZING",
@@ -470,16 +656,20 @@ def main(argv: list[str] | None = None) -> int:
             "RESTORE_REQUIRED",
         ):
             gw_status_val = STATUS_PASS
+            sandbox_app_state = sb_state
             checks.append(
                 make_check(
                     name="gateway_sandbox_relay_status",
                     category="peer",
                     required=False,
                     status=STATUS_PASS,
+                    detected_version=f"sandbox_state={sb_state}",
                     configured_path=f"{gw_url}/status",
                     runtime_verified=True,
-                    feature_verified=True,
-                    diagnostic_message=f"Gateway reached Sandbox (Sandbox state: {sb_state}).",
+                    diagnostic_message=(
+                        f"HTTP control plane reachable through Gateway -> Sandbox (application state: {sb_state}; "
+                        "end-to-end upload/analysis/download flow verified only during controlled test)."
+                    ),
                     recommended_action=(
                         "Restore Windows 11 CLEAN snapshot on Machine 3."
                         if sb_state == "RESTORE_REQUIRED"
@@ -489,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif st_code == 200 and st_data.get("gateway") == "ok":
             gw_status_val = STATUS_PENDING
+            sandbox_app_state = "UNREACHABLE"
             checks.append(
                 make_check(
                     name="gateway_sandbox_relay_status",
@@ -514,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
 
-    # Overall readiness computation
+    # Separated Readiness Semantics
     required_bad = [c for c in checks if c["required"] and c["status"] in (STATUS_FAIL, STATUS_MISSING)]
     optional_degraded = [
         c
@@ -530,12 +721,25 @@ def main(argv: list[str] | None = None) -> int:
     else:
         local_readiness = "READY"
 
+    local_service_state = "NOT_APPLICABLE"
+
     if gw_health_status == STATUS_FAIL or gw_status_val == STATUS_FAIL:
+        peer_connectivity = "PEER_ERROR"
         network_readiness = "NOT_READY"
     elif gw_health_status == STATUS_PASS and gw_status_val == STATUS_PASS:
-        network_readiness = "READY"
-    else:
+        peer_connectivity = "GATEWAY_AND_SANDBOX_HTTP_REACHABLE"
+        if sandbox_app_state == "READY":
+            network_readiness = "CONTROL_PATH_READY"
+        else:
+            network_readiness = "CONTROL_PATH_SANDBOX_NOT_READY"
+    elif gw_health_status == STATUS_PASS:
+        peer_connectivity = "GATEWAY_ONLY_SANDBOX_UNREACHABLE"
         network_readiness = "PENDING"
+    else:
+        peer_connectivity = "GATEWAY_UNREACHABLE"
+        network_readiness = "PENDING"
+
+    snapshot_state = "NOT_APPLICABLE"
 
     missing_required = [c["name"] for c in checks if c["required"] and c["status"] in (STATUS_MISSING, STATUS_FAIL)]
     missing_optional = [c["name"] for c in checks if not c["required"] and c["status"] in (STATUS_MISSING, STATUS_OPTIONAL)]
@@ -544,13 +748,17 @@ def main(argv: list[str] | None = None) -> int:
             manual_actions.append(f"[{c['name']}] {c['recommended_action']}")
 
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "machine": "machine1-client",
         "mode": args.mode,
         "generated_at": utc_now_iso(),
         "local_readiness": local_readiness,
+        "local_service_state": local_service_state,
         "network_readiness": network_readiness,
-        "snapshot_state": "NOT_APPLICABLE",
+        "peer_connectivity": peer_connectivity,
+        "application_state": sandbox_app_state,
+        "snapshot_state": snapshot_state,
+        "config_validation_state": cfg_state,
         "environment": {
             "os": os_ver,
             "python_version": py_ver,
@@ -564,8 +772,6 @@ def main(argv: list[str] | None = None) -> int:
         "manual_actions_required": list(dict.fromkeys(manual_actions)),
     }
 
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
     print("")
     print("=== MalBox Machine 1 Readiness Report ===")
     for c in checks:
@@ -574,15 +780,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [{c['status']:<8}] [{req_tag}] {c['name']:<30}{ver} - {c['diagnostic_message']}")
 
     print("")
-    print(f"LOCAL_READINESS   : {local_readiness}")
-    print(f"NETWORK_READINESS : {network_readiness}")
-    print(f"REPORT_SAVED      : {report_path}")
+    print(f"LOCAL_READINESS     : {local_readiness}")
+    print(f"LOCAL_SERVICE_STATE : {local_service_state}")
+    print(f"NETWORK_READINESS   : {network_readiness}")
+    print(f"PEER_CONNECTIVITY   : {peer_connectivity}")
+    print(f"APPLICATION_STATE   : {sandbox_app_state} (remote Sandbox reported state)")
+    print(f"SNAPSHOT_STATE      : {snapshot_state}")
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"REPORT_SAVED        : {report_path}")
+    except OSError as exc:
+        print(f"[ERROR] Failed writing report {report_path}: {exc}", file=sys.stderr)
+        return 1
+
     if report["manual_actions_required"]:
         print("\nNext Actions:")
         for act in report["manual_actions_required"]:
             print(f"  - {act}")
 
-    if args.mode == "check-only" and local_readiness == "NOT_READY":
+    if local_readiness == "NOT_READY":
         return 1
     return 0
 

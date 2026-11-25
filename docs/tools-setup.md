@@ -8,7 +8,7 @@ Install and verify all tools **while Machine 3 has temporary Internet access**, 
 
 ## 1. Base Python Setup
 
-1. Install **Python 3.11+** (x64) and **Git for Windows**.
+1. Install **Python 3.10+ (64-bit)** (recommended: Python 3.11 or 3.12 x64) and **Git for Windows**.
 2. Clone the repository into `C:\malbox` (or your chosen directory).
 3. Run the setup helper in Windows PowerShell 5.1 or PowerShell 7+:
    ```powershell
@@ -85,7 +85,7 @@ Download official releases into `machine3-sandbox\tools\` (or default install lo
 - **GhidraMCP** (`https://github.com/LaurieWired/GhidraMCP`) is **optional** and **separate** from headless Ghidra analysis:
   1. Cloning `tools\GhidraMCP\` only provides the repository and bridge script (`bridge_mcp_ghidra.py`).
   2. To actually use `GhidraMCP`, you must manually install/build its Ghidra extension inside Ghidra GUI (`File -> Install Extensions...`), open the binary in Ghidra GUI, and start its local HTTP server (`127.0.0.1:8080`) before launching `bridge_mcp_ghidra.py`.
-  3. The automated pipeline (`ghidra_analysis.py`) never starts or runtime-verifies `GhidraMCP`, and reports repo clone / extension / dependency / runtime status separately in `manifest.json`.
+  3. The automated pipeline (`ghidra_analysis.py`) never starts or runtime-verifies `GhidraMCP`, and reports repo clone / extension / dependency / runtime status separately in `manifest.json`. Likewise, `readiness.py` never treats an HTTP `200` on `127.0.0.1:8080/methods` alone as verified MCP bridge functionality.
 
 ---
 

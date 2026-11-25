@@ -8,9 +8,9 @@ Maintaining a clean Windows 11 VM baseline is critical for valid dynamic analysi
 
 Complete these checks **before** taking your `CLEAN` snapshot on Machine 3:
 
-1. All tools installed and verified via `.\setup.ps1 -CheckOnly` (`LOCAL_READINESS` is `READY` or accepted `LIMITED`, and `SNAPSHOT_STATE` is `CLEAN_MARKER_NOT_PRESENT`).
+1. All tools installed and verified via `.\setup.ps1 -CheckOnly` (`LOCAL_READINESS` is `READY` or accepted `LIMITED`, and `SNAPSHOT_STATE` is `NO_DIRTY_MARKER`).
 2. Sysmon service is installed and active (`Get-Service Sysmon64` shows `Running`).
-3. Internal Network 2 static IP (`10.10.20.30/24`) is configured; NAT/Bridged adapters and Internet access are disconnected (`NETWORK_READINESS` = `READY` when `sandbox.py` is started).
+3. Internal Network 2 static IP (`10.10.20.30/24`) is configured; NAT/Bridged adapters and Internet access are disconnected (`NETWORK_READINESS` = `LOCAL_SERVICE_ONLY` on Machine 3 once `sandbox.py` is started, and `CONTROL_PATH_READY` on Machine 1 once Machine 2 + Machine 3 are running).
 4. `machine3-sandbox\workspace\` and `machine3-sandbox\evidence\` are empty (no `.dirty_state` marker exists).
 5. `machine3-sandbox\config.json` has your preferred settings (`observation_duration_seconds`, `require_local_approval`, `network_interface`, etc.).
 6. Optional convenience: Open PowerShell in `C:\malbox\machine3-sandbox`, activate `.venv`, and verify `python sandbox.py` starts in `READY` state (`[SANDBOX] Waiting for sample...`).

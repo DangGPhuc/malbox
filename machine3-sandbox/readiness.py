@@ -2,18 +2,24 @@
 """MalBox Machine 3 (Windows 11 Sandbox) Environment Readiness Checker.
 
 Performs non-destructive, offline-capable readiness verification across
-Windows environment, static tools, dynamic monitors, memory tools,
-MalBox MCP stdio handshake, optional GhidraMCP, and sandbox snapshot state.
-Never clears .dirty_state, never runs malware, and never modifies protections.
+Windows 11 OS/build, Python runtime, tools, collectors, MalBox MCP stdio handshake,
+Ghidra Headless, optional GhidraMCP, service/network separation, and snapshot state.
+Never clears .dirty_state, never runs malware, and never modifies drivers/protections.
+
+Exit codes (standardized across all MalBox readiness checkers):
+  0: Mandatory local checks passed (LOCAL_READINESS is READY or LIMITED).
+  1: LOCAL_READINESS is NOT_READY (missing/failing mandatory check, RESTORE_REQUIRED
+     dirty marker, or invalid config) in either setup or check-only mode, or report
+     could not be saved.
+  2: Invalid command-line arguments.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import hashlib
-import importlib.util
 import json
+import math
 import os
 import platform
 import re
@@ -32,6 +38,8 @@ BASE_DIR = Path(__file__).resolve().parent
 MCP_DIR = BASE_DIR / "mcp"
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_REPORT_PATH = BASE_DIR / "setup_report.json"
+MIN_PYTHON = (3, 10)
+WIN11_MIN_BUILD = 22000
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -58,6 +66,18 @@ EXPECTED_MCP_TOOLS = {
     "list_evidence",
     "get_evidence_summary",
 }
+
+CORE_TOOL_KEYS = (
+    "floss",
+    "capa",
+    "capa_rules",
+    "yara_rules_dir",
+    "ghidra_headless",
+    "ghidra_script_dir",
+    "sysmon",
+    "dumpcap",
+    "tshark",
+)
 
 
 def utc_now_iso() -> str:
@@ -110,6 +130,8 @@ def make_check(
     installed: bool = False,
     runtime_verified: bool = False,
     feature_verified: bool = False,
+    verification_stages: dict[str, Any] | None = None,
+    unavailable_evidence_if_missing: str | None = None,
 ) -> dict[str, Any]:
     if feature_verified:
         vstate = "feature_verified"
@@ -121,7 +143,7 @@ def make_check(
         vstate = "installed_only"
     else:
         vstate = "not_verified"
-    return {
+    item: dict[str, Any] = {
         "name": name,
         "category": category,
         "required": required,
@@ -136,19 +158,229 @@ def make_check(
         "diagnostic_message": diagnostic_message,
         "recommended_action": recommended_action,
     }
+    if verification_stages is not None:
+        item["verification_stages"] = verification_stages
+    if unavailable_evidence_if_missing is not None:
+        item["unavailable_evidence_if_missing"] = unavailable_evidence_if_missing
+    return item
+
+
+def _validate_str(
+    cfg: dict[str, Any],
+    key: str,
+    errors: list[str],
+    allow_empty: bool = False,
+    required: bool = True,
+) -> str | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if not isinstance(val, str):
+        errors.append(f"Key '{key}' must be a string (got {type(val).__name__})")
+        return None
+    if "\x00" in val:
+        errors.append(f"Key '{key}' contains embedded null byte")
+        return None
+    if not allow_empty and not val.strip():
+        errors.append(f"Key '{key}' must not be empty")
+        return None
+    return val.strip()
+
+
+def _validate_int(
+    cfg: dict[str, Any],
+    key: str,
+    errors: list[str],
+    min_val: int,
+    max_val: int | None = None,
+    required: bool = True,
+) -> int | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if isinstance(val, bool) or not isinstance(val, int):
+        errors.append(f"Key '{key}' must be an integer (got {type(val).__name__})")
+        return None
+    if val < min_val or (max_val is not None and val > max_val):
+        bound = f"{min_val}..{max_val}" if max_val is not None else f">= {min_val}"
+        errors.append(f"Key '{key}' out of range ({bound}): {val}")
+        return None
+    return val
+
+
+def _validate_number(
+    cfg: dict[str, Any],
+    key: str,
+    errors: list[str],
+    min_val: float,
+    required: bool = True,
+) -> float | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+        errors.append(f"Key '{key}' must be a finite number (got {type(val).__name__})")
+        return None
+    fval = float(val)
+    if fval < min_val:
+        errors.append(f"Key '{key}' must be >= {min_val} (got {fval})")
+        return None
+    return fval
+
+
+def _validate_bool(cfg: dict[str, Any], key: str, errors: list[str], required: bool = False) -> bool | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    if not isinstance(cfg[key], bool):
+        errors.append(f"Key '{key}' must be a boolean (got {type(cfg[key]).__name__})")
+        return None
+    return cfg[key]
+
+
+def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[str], str]:
+    """Strictly validate sandbox config.json while returning safe fallback values for remaining probes."""
+    default_tools: dict[str, str] = {
+        "floss": "./tools/floss/floss.exe",
+        "capa": "./tools/capa/capa.exe",
+        "capa_rules": "./tools/capa-rules",
+        "yara": "./tools/yara/yara64.exe",
+        "yara_rules_dir": "./scripts/yara_rules",
+        "ghidra_headless": "./tools/ghidra/support/analyzeHeadless.bat",
+        "ghidra_script_dir": "./scripts",
+        "ghidra_mcp_dir": "./tools/GhidraMCP",
+        "sysmon": "C:\\Windows\\Sysmon64.exe",
+        "procmon": "./tools/sysinternals/Procmon64.exe",
+        "procdump": "./tools/sysinternals/procdump64.exe",
+        "dumpcap": "C:\\Program Files\\Wireshark\\dumpcap.exe",
+        "tshark": "C:\\Program Files\\Wireshark\\tshark.exe",
+        "winpmem": "./tools/winpmem/winpmem.exe",
+        "volatility3": "./tools/volatility3/vol.py",
+        "volatility_symbols_dir": "./tools/volatility3/symbols",
+    }
+    defaults: dict[str, Any] = {
+        "listen_host": "0.0.0.0",
+        "listen_port": 8001,
+        "workspace_dir": "./workspace",
+        "evidence_dir": "./evidence",
+        "observation_duration_seconds": 120,
+        "require_local_approval": True,
+        "ghidra_timeout_seconds": 300,
+        "min_free_disk_mb": 2048,
+        "procdump_enabled": True,
+        "winpmem_enabled": False,
+        "network_interface": "",
+        "tools": dict(default_tools),
+    }
+
+    errors: list[str] = []
+    if not config_path.is_file():
+        errors.append(f"Missing configuration file: {config_path}")
+        return defaults, errors, "missing"
+
+    try:
+        raw_text = config_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        errors.append(f"Failed reading {config_path.name}: {exc}")
+        return defaults, errors, "read_error"
+
+    try:
+        parsed = json.loads(raw_text)
+    except ValueError as exc:
+        errors.append(f"Invalid JSON in {config_path.name}: {exc}")
+        return defaults, errors, "invalid_json"
+
+    if not isinstance(parsed, dict):
+        errors.append(f"Root of {config_path.name} must be a JSON object (got {type(parsed).__name__})")
+        return defaults, errors, "invalid_type"
+
+    lhost = _validate_str(parsed, "listen_host", errors)
+    lport = _validate_int(parsed, "listen_port", errors, min_val=1, max_val=65535, required=True)
+    ws_dir = _validate_str(parsed, "workspace_dir", errors)
+    ev_dir = _validate_str(parsed, "evidence_dir", errors)
+    obs_dur = _validate_number(parsed, "observation_duration_seconds", errors, min_val=1.0, required=True)
+    req_app = _validate_bool(parsed, "require_local_approval", errors, required=True)
+    gh_timeout = _validate_number(parsed, "ghidra_timeout_seconds", errors, min_val=1.0, required=True)
+    min_disk = _validate_int(parsed, "min_free_disk_mb", errors, min_val=1, required=True)
+
+    _validate_number(parsed, "poll_sample_interval_seconds", errors, min_val=0.05, required=False)
+    _validate_number(parsed, "floss_timeout_seconds", errors, min_val=1.0, required=False)
+    _validate_number(parsed, "capa_timeout_seconds", errors, min_val=1.0, required=False)
+    _validate_number(parsed, "volatility_timeout_seconds", errors, min_val=1.0, required=False)
+    _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    pd_en = _validate_bool(parsed, "procdump_enabled", errors, required=False)
+    wp_en = _validate_bool(parsed, "winpmem_enabled", errors, required=False)
+    net_if = _validate_str(parsed, "network_interface", errors, allow_empty=True, required=False)
+
+    safe_tools = dict(default_tools)
+    if "tools" not in parsed:
+        errors.append("Missing key 'tools'")
+    elif not isinstance(parsed["tools"], dict):
+        errors.append(f"Key 'tools' must be a JSON object (got {type(parsed['tools']).__name__})")
+    else:
+        raw_tools = parsed["tools"]
+        for tkey, tval in raw_tools.items():
+            if not isinstance(tval, str):
+                errors.append(f"tools.{tkey} must be a string path (got {type(tval).__name__})")
+            elif "\x00" in tval:
+                errors.append(f"tools.{tkey} contains embedded null byte")
+            elif tkey in CORE_TOOL_KEYS and not tval.strip():
+                errors.append(f"tools.{tkey} must not be empty")
+            elif tval.strip():
+                safe_tools[tkey] = tval.strip()
+
+    safe_cfg = dict(defaults)
+    if lhost:
+        safe_cfg["listen_host"] = lhost
+    if lport is not None:
+        safe_cfg["listen_port"] = lport
+    if ws_dir:
+        safe_cfg["workspace_dir"] = ws_dir
+    if ev_dir:
+        safe_cfg["evidence_dir"] = ev_dir
+    if obs_dur is not None:
+        safe_cfg["observation_duration_seconds"] = obs_dur
+    if req_app is not None:
+        safe_cfg["require_local_approval"] = req_app
+    if gh_timeout is not None:
+        safe_cfg["ghidra_timeout_seconds"] = gh_timeout
+    if min_disk is not None:
+        safe_cfg["min_free_disk_mb"] = min_disk
+    if pd_en is not None:
+        safe_cfg["procdump_enabled"] = pd_en
+    if wp_en is not None:
+        safe_cfg["winpmem_enabled"] = wp_en
+    if net_if is not None:
+        safe_cfg["network_interface"] = net_if
+    safe_cfg["tools"] = safe_tools
+
+    return safe_cfg, errors, "valid" if not errors else "validation_error"
 
 
 def resolve_cfg_path(raw: str | None) -> Path | None:
-    if not raw:
+    if not raw or not isinstance(raw, str) or "\x00" in raw or not raw.strip():
         return None
-    p = Path(raw)
-    return p if p.is_absolute() else (BASE_DIR / p).resolve()
+    try:
+        p = Path(raw.strip())
+        return p if p.is_absolute() else (BASE_DIR / p).resolve()
+    except (ValueError, OSError):
+        return None
 
 
 def resolve_tool(raw_cfg: str | None, fallbacks: list[str]) -> Path | None:
     cand = resolve_cfg_path(raw_cfg)
-    if cand and cand.exists():
-        return cand
+    try:
+        if cand and cand.exists():
+            return cand
+    except OSError:
+        pass
     for name in fallbacks:
         found = shutil.which(name)
         if found:
@@ -184,6 +416,20 @@ def get_windows_file_version(file_path: Path) -> str | None:
     if res["returncode"] == 0 and res["stdout"]:
         return res["stdout"].splitlines()[0].strip()
     return None
+
+
+def check_sysinternals_eula(tool_reg_name: str) -> bool | None:
+    """Read-only HKCU registry check so -CheckOnly never hangs on interactive EULA modal or mutates HKCU."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import winreg  # type: ignore
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Sysinternals\{tool_reg_name}") as key:
+            val, _ = winreg.QueryValueEx(key, "EulaAccepted")
+            return int(val) == 1
+    except OSError:
+        return False
 
 
 def query_windows_service(service_names: list[str]) -> tuple[str, str]:
@@ -224,15 +470,37 @@ def get_ghidra_version(headless_bin: Path | None) -> str | None:
     return None
 
 
+def check_python_syntax_ast(script_path: Path) -> tuple[bool, str | None]:
+    """Verify static Python syntax only without executing the file."""
+    try:
+        src = script_path.read_text(encoding="utf-8-sig", errors="replace")
+        compile(src, str(script_path), "exec")
+        return True, None
+    except (OSError, SyntaxError) as exc:
+        return False, str(exc)
+
+
+def parse_requirements_names(req_path: Path) -> list[str]:
+    names: list[str] = []
+    if not req_path.is_file():
+        return names
+    for line in req_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        pkg = re.split(r"[<>=!~;\[\s]", line, maxsplit=1)[0].strip()
+        if pkg:
+            names.append(pkg)
+    return names
+
+
 def build_synthetic_pe_fixture() -> bytes:
     """Build a harmless minimal synthetic PE32 byte sequence purely in memory for pefile parsing."""
     buf = bytearray(0x200)
     buf[0:2] = b"MZ"
     struct.pack_into("<I", buf, 0x3C, 0x80)
     buf[0x80:0x84] = b"PE\x00\x00"
-    # IMAGE_FILE_HEADER (Machine=0x014c i386, NumberOfSections=0, SizeOfOptionalHeader=0xE0)
     struct.pack_into("<HHIIIHH", buf, 0x84, 0x014C, 0, 0, 0, 0, 0xE0, 0x0102)
-    # Minimal IMAGE_OPTIONAL_HEADER32 magic (0x010b)
     struct.pack_into("<H", buf, 0x98, 0x010B)
     return bytes(buf)
 
@@ -306,20 +574,47 @@ def main(argv: list[str] | None = None) -> int:
     manual_actions: list[str] = []
     cloned_repos: dict[str, str | None] = {}
 
-    # === 10.1 Windows Environment ===
+    # === 1. Windows OS Detection vs Windows 11 Build/Version Verification ===
     is_win = sys.platform.startswith("win")
-    win_build = None
-    win_display = None
+    win_build_int: int | None = None
+    win_ubr: str | None = None
+    win_display: str | None = None
+    win_edition: str | None = None
+    win_product: str | None = None
     if is_win:
         try:
-            win_build = str(sys.getwindowsversion().build)
+            win_build_int = int(sys.getwindowsversion().build)
+        except Exception:
+            win_build_int = None
+        try:
             import winreg  # type: ignore
 
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") as key:
-                win_display, _ = winreg.QueryValueEx(key, "DisplayVersion")
+                for reg_name, setter in (
+                    ("DisplayVersion", "disp"),
+                    ("EditionID", "ed"),
+                    ("ProductName", "prod"),
+                    ("CurrentBuildNumber", "build"),
+                    ("UBR", "ubr"),
+                ):
+                    try:
+                        val, _ = winreg.QueryValueEx(key, reg_name)
+                        if setter == "disp":
+                            win_display = str(val)
+                        elif setter == "ed":
+                            win_edition = str(val)
+                        elif setter == "prod":
+                            win_product = str(val)
+                        elif setter == "ubr":
+                            win_ubr = str(val)
+                        elif setter == "build" and win_build_int is None:
+                            win_build_int = int(str(val))
+                    except (OSError, ValueError):
+                        pass
         except Exception:
             pass
-    os_desc = f"{platform.system()} {platform.release()} (build={win_build or 'N/A'}, display={win_display or 'N/A'}, arch={platform.machine()})"
+
+    os_desc = f"{platform.system()} {platform.release()} (arch={platform.machine()})"
     checks.append(
         make_check(
             name="windows_os",
@@ -330,10 +625,78 @@ def main(argv: list[str] | None = None) -> int:
             installed=True,
             runtime_verified=is_win,
             feature_verified=is_win,
-            diagnostic_message=f"Detected OS: {os_desc}",
+            diagnostic_message=f"Detected host OS: {os_desc}",
             recommended_action="" if is_win else "Machine 3 Sandbox must run on Windows 11 VM.",
         )
     )
+
+    win11_verified = bool(is_win and win_build_int is not None and win_build_int >= WIN11_MIN_BUILD)
+    win11_ver_label = (
+        f"build={win_build_int}.{win_ubr or '0'}, display={win_display or 'N/A'}, edition={win_edition or 'N/A'}"
+        if is_win and win_build_int is not None
+        else None
+    )
+    if not is_win:
+        checks.append(
+            make_check(
+                name="windows_11_version",
+                category="os",
+                required=True,
+                status=STATUS_SKIPPED,
+                installed=False,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message="Skipped Windows 11 version/build verification: host OS is not Windows.",
+                recommended_action="Run setup.ps1 inside a Windows 11 VM.",
+            )
+        )
+    elif win11_verified:
+        checks.append(
+            make_check(
+                name="windows_11_version",
+                category="os",
+                required=True,
+                status=STATUS_PASS,
+                detected_version=win11_ver_label,
+                installed=True,
+                runtime_verified=True,
+                feature_verified=True,
+                diagnostic_message=(
+                    f"Verified Windows 11 (build {win_build_int} >= {WIN11_MIN_BUILD}, {win_display or 'N/A'}, {win_edition or win_product or 'Windows'})."
+                ),
+            )
+        )
+    elif win_build_int is not None:
+        checks.append(
+            make_check(
+                name="windows_11_version",
+                category="os",
+                required=True,
+                status=STATUS_FAIL,
+                detected_version=win11_ver_label,
+                installed=True,
+                runtime_verified=True,
+                feature_verified=False,
+                diagnostic_message=(
+                    f"Windows detected (build {win_build_int}), which is below Windows 11 minimum build {WIN11_MIN_BUILD}."
+                ),
+                recommended_action="Deploy Machine 3 Sandbox on a Windows 11 (build >= 22000) x64 VM.",
+            )
+        )
+    else:
+        checks.append(
+            make_check(
+                name="windows_11_version",
+                category="os",
+                required=True,
+                status=STATUS_FAIL,
+                installed=True,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message="Windows OS detected, but build number could not be read to verify Windows 11.",
+                recommended_action="Verify Windows version (winver) is Windows 11 build >= 22000.",
+            )
+        )
 
     # PowerShell check
     ps_bin = shutil.which("pwsh") or shutil.which("powershell")
@@ -360,10 +723,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # Python version & architecture check
+    # Python version (>= 3.10 standardized) & 64-bit architecture check
     py_ver = platform.python_version()
     py_bits = struct.calcsize("P") * 8
-    py_ok = sys.version_info >= (3, 10) and py_bits == 64
+    py_ok = sys.version_info >= MIN_PYTHON and py_bits == 64
     checks.append(
         make_check(
             name="python_runtime",
@@ -380,14 +743,33 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # Virtual environment
+    # Virtual environment (verifies >= 3.10 & 64-bit)
     venv_exists = venv_python.is_file()
     venv_ok = False
     venv_ver = None
     if venv_exists:
-        vp = run_bounded([str(venv_python), "--version"], timeout=10.0)
+        vp = run_bounded(
+            [
+                str(venv_python),
+                "-c",
+                "import platform, struct, sys; print(f'{platform.python_version()} ({struct.calcsize(\"P\")*8}-bit)'); sys.exit(0 if (sys.version_info >= (3, 10) and struct.calcsize('P')*8 == 64) else 3)",
+            ],
+            timeout=10.0,
+        )
+        venv_ver = vp["stdout"].splitlines()[0].strip() if vp["stdout"] else None
         venv_ok = vp["returncode"] == 0
-        venv_ver = vp["stdout"] or None
+        venv_msg = (
+            f"Sandbox .venv Python {venv_ver} runs cleanly."
+            if venv_ok
+            else (
+                f".venv Python {venv_ver} does not meet 64-bit Python 3.10+ requirement."
+                if vp["returncode"] == 3
+                else f"Sandbox .venv failed to execute: {vp['stderr'] or vp['error']}"
+            )
+        )
+    else:
+        venv_msg = "Sandbox .venv not created."
+
     checks.append(
         make_check(
             name="python_venv",
@@ -399,8 +781,8 @@ def main(argv: list[str] | None = None) -> int:
             resolved_path=str(venv_python) if venv_exists else None,
             installed=venv_exists,
             runtime_verified=venv_ok,
-            diagnostic_message="Sandbox .venv Python runs cleanly." if venv_ok else "Sandbox .venv not created or broken.",
-            recommended_action="" if venv_ok else "Run .\\setup.ps1 while online.",
+            diagnostic_message=venv_msg,
+            recommended_action="" if venv_ok else "Run .\\setup.ps1 while online to create 64-bit Python 3.10+ .venv.",
         )
     )
 
@@ -432,32 +814,38 @@ def main(argv: list[str] | None = None) -> int:
     pip_check_msg = ""
     if venv_ok:
         ver_script = (
-            "import json, importlib.metadata as m; "
-            f"names={req_pkgs!r}; "
-            "out={}; "
-            "\nfor n in names:\n"
-            "  try: out[n]=m.version(n)\n"
-            "  except Exception: pass\n"
-            "import flask, requests, psutil, pefile, yara, Evtx, mcp; "
-            "print(json.dumps(out))"
+            "import json, importlib.metadata as m\n"
+            f"names = {req_pkgs!r}\n"
+            "out = {}\n"
+            "for n in names:\n"
+            "    try:\n"
+            "        out[n] = m.version(n)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "import flask, requests, psutil, pefile, yara, Evtx, mcp\n"
+            "print(json.dumps(out))\n"
         )
         p_res = run_bounded([str(venv_python), "-c", ver_script], timeout=15.0)
         if p_res["returncode"] == 0 and p_res["stdout"]:
             try:
-                pkg_versions = json.loads(p_res["stdout"])
+                parsed_pkgs = json.loads(p_res["stdout"])
+                if isinstance(parsed_pkgs, dict):
+                    pkg_versions = parsed_pkgs
             except ValueError:
                 pass
         pc_res = run_bounded([str(venv_python), "-m", "pip", "check"], timeout=20.0)
         pip_check_ok = pc_res["returncode"] == 0
         pip_check_msg = pc_res["stdout"] or pc_res["stderr"] or pc_res["error"] or ""
         pkg_ok = len(pkg_versions) == len(req_pkgs) and pip_check_ok
+    else:
+        pip_check_msg = ".venv missing or unsupported Python version"
 
     checks.append(
         make_check(
             name="python_packages",
             category="runtime",
             required=True,
-            status=STATUS_PASS if pkg_ok else (STATUS_MISSING if not venv_ok or not pkg_versions else STATUS_FAIL),
+            status=STATUS_PASS if pkg_ok else (STATUS_MISSING if not venv_exists or not pkg_versions else STATUS_FAIL),
             detected_version=", ".join(f"{k}=={v}" for k, v in pkg_versions.items()) if pkg_versions else None,
             installed=len(pkg_versions) == len(req_pkgs),
             runtime_verified=len(pkg_versions) == len(req_pkgs),
@@ -471,43 +859,22 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # Config parsing
-    cfg: dict[str, Any] = {}
-    cfg_errors: list[str] = []
-    if not config_path.is_file():
-        cfg_errors.append(f"Missing {config_path}")
-    else:
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8-sig"))
-            for key in (
-                "listen_host",
-                "listen_port",
-                "workspace_dir",
-                "evidence_dir",
-                "observation_duration_seconds",
-                "require_local_approval",
-                "ghidra_timeout_seconds",
-                "min_free_disk_mb",
-                "tools",
-            ):
-                if key not in cfg:
-                    cfg_errors.append(f"Missing key '{key}'")
-        except (ValueError, TypeError) as exc:
-            cfg_errors.append(f"Invalid config.json: {exc}")
-
+    # Strict, crash-safe config.json parsing & validation
+    cfg, cfg_errors, cfg_state = load_and_validate_config(config_path)
+    tools_cfg: dict[str, str] = cfg["tools"]
     checks.append(
         make_check(
             name="config_json",
             category="config",
             required=True,
-            status=STATUS_PASS if not cfg_errors else STATUS_FAIL,
+            status=STATUS_PASS if not cfg_errors else (STATUS_MISSING if cfg_state == "missing" else STATUS_FAIL),
             configured_path=str(config_path),
             resolved_path=str(config_path) if config_path.is_file() else None,
             installed=config_path.is_file(),
             runtime_verified=not cfg_errors,
             feature_verified=not cfg_errors,
             diagnostic_message=(
-                f"Sandbox listens {cfg.get('listen_host')}:{cfg.get('listen_port')}; require_local_approval={cfg.get('require_local_approval')}"
+                f"Sandbox listens {cfg['listen_host']}:{cfg['listen_port']}; require_local_approval={cfg['require_local_approval']}"
                 if not cfg_errors
                 else "; ".join(cfg_errors)
             ),
@@ -515,11 +882,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    tools_cfg: dict[str, Any] = cfg.get("tools", {}) if isinstance(cfg.get("tools"), dict) else {}
-
     # Workspace & evidence directories + disk space
-    ws_dir = resolve_cfg_path(str(cfg.get("workspace_dir", "./workspace"))) or (BASE_DIR / "workspace")
-    ev_dir = resolve_cfg_path(str(cfg.get("evidence_dir", "./evidence"))) or (BASE_DIR / "evidence")
+    ws_dir = resolve_cfg_path(cfg["workspace_dir"]) or (BASE_DIR / "workspace")
+    ev_dir = resolve_cfg_path(cfg["evidence_dir"]) or (BASE_DIR / "evidence")
     ws_ok = False
     ev_ok = False
     dir_msgs: list[str] = []
@@ -529,13 +894,20 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 probe.write_text("ok", encoding="utf-8")
                 _ = probe.read_text(encoding="utf-8")
-                probe.unlink()
                 if label == "workspace":
                     ws_ok = True
                 else:
                     ev_ok = True
             except OSError as exc:
                 dir_msgs.append(f"{label} not writable: {exc}")
+            finally:
+                try:
+                    if probe.exists():
+                        probe.unlink()
+                except OSError:
+                    pass
+        elif dpath.exists():
+            dir_msgs.append(f"{label} is not a directory: {dpath}")
         else:
             dir_msgs.append(f"{label} missing: {dpath}")
 
@@ -545,7 +917,7 @@ def main(argv: list[str] | None = None) -> int:
             name="workspace_and_evidence_dirs",
             category="filesystem",
             required=True,
-            status=STATUS_PASS if dirs_ok else (STATUS_MISSING if not ws_dir.exists() or not ev_dir.exists() else STATUS_FAIL),
+            status=STATUS_PASS if dirs_ok else (STATUS_MISSING if (not ws_dir.exists() or not ev_dir.exists()) else STATUS_FAIL),
             resolved_path=f"{ws_dir}; {ev_dir}",
             installed=ws_dir.is_dir() and ev_dir.is_dir(),
             runtime_verified=dirs_ok,
@@ -555,22 +927,32 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    min_disk_mb = int(cfg.get("min_free_disk_mb", 2048))
-    disk_target = ws_dir if ws_dir.exists() else BASE_DIR
-    free_mb = shutil.disk_usage(disk_target).free // (1024 * 1024)
-    disk_ok = free_mb >= min_disk_mb
+    min_disk_mb = int(cfg["min_free_disk_mb"])
+    disk_target = ws_dir if ws_dir.is_dir() else BASE_DIR
+    try:
+        free_mb = shutil.disk_usage(disk_target).free // (1024 * 1024)
+        disk_ok = free_mb >= min_disk_mb
+        disk_status = STATUS_PASS if disk_ok else STATUS_FAIL
+        disk_ver = f"{free_mb} MB free (min {min_disk_mb} MB)"
+        disk_msg = f"{free_mb} MB free (required >= {min_disk_mb} MB)."
+    except OSError as exc:
+        disk_ok = False
+        disk_status = STATUS_FAIL
+        disk_ver = None
+        disk_msg = f"Failed checking disk space on {disk_target}: {exc}"
+
     checks.append(
         make_check(
             name="disk_space",
             category="filesystem",
             required=True,
-            status=STATUS_PASS if disk_ok else STATUS_FAIL,
-            detected_version=f"{free_mb} MB free (min {min_disk_mb} MB)",
+            status=disk_status,
+            detected_version=disk_ver,
             resolved_path=str(disk_target),
             installed=True,
-            runtime_verified=True,
+            runtime_verified=disk_ver is not None,
             feature_verified=disk_ok,
-            diagnostic_message=f"{free_mb} MB free (required >= {min_disk_mb} MB).",
+            diagnostic_message=disk_msg,
             recommended_action="" if disk_ok else f"Free at least {min_disk_mb} MB on Windows VM disk.",
         )
     )
@@ -597,14 +979,14 @@ def main(argv: list[str] | None = None) -> int:
             runtime_verified=True,
             feature_verified=True,
             diagnostic_message=(
-                "Running elevated (Procmon/Security log/WinPmem available if installed; note samples should run non-elevated)."
+                "Running elevated (Procmon/Security log/WinPmem privileges available; note samples should normally run non-elevated)."
                 if is_admin
-                else "Running as Standard User (recommended for sample safety; Procmon/Security EVTX/WinPmem may require Admin)."
+                else "Running as Standard User (recommended for sample isolation; Procmon, Security EVTX, and WinPmem are unavailable or limited without elevation)."
             ),
         )
     )
 
-    # === 10.2 Static Analysis Tools ===
+    # === 2. Static Analysis Tools ===
     try:
         h_val = hashlib.sha256(b"MalBoxReadinessFixture").hexdigest()
         checks.append(
@@ -679,7 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
                 category="static",
                 required=True,
                 status=STATUS_MISSING,
-                diagnostic_message="Skipped pefile probe: .venv missing.",
+                diagnostic_message="Skipped pefile probe: valid .venv missing.",
                 recommended_action="Run .\\setup.ps1.",
             )
         )
@@ -713,7 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
                 required=True,
                 status=STATUS_MISSING,
                 configured_path=str(tools_cfg.get("floss")),
-                diagnostic_message="floss.exe not found (built-in Python string extractor exists only as partial fallback).",
+                diagnostic_message="floss.exe not found (built-in Python string extractor handles basic ASCII/UTF-16LE fallback only; stack/decoded strings unavailable).",
                 recommended_action="Download official FLOSS release zip to tools\\floss\\floss.exe.",
             )
         )
@@ -807,8 +1189,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         y_res = run_bounded([str(venv_python), "-c", y_code], timeout=12.0)
         if y_res["returncode"] == 0 and y_res["stdout"]:
-            y_info = json.loads(y_res["stdout"].splitlines()[-1])
-            if y_info["rules"] == 0:
+            try:
+                y_info = json.loads(y_res["stdout"].splitlines()[-1])
+            except ValueError as exc:
+                y_info = None
+                checks.append(
+                    make_check(
+                        name="yara_python",
+                        category="static",
+                        required=True,
+                        status=STATUS_FAIL,
+                        diagnostic_message=f"yara-python probe output parse failed: {exc}",
+                    )
+                )
+            if y_info is None:
+                pass
+            elif y_info["rules"] == 0:
                 checks.append(
                     make_check(
                         name="yara_python",
@@ -857,7 +1253,7 @@ def main(argv: list[str] | None = None) -> int:
                 category="static",
                 required=True,
                 status=STATUS_MISSING,
-                diagnostic_message="Skipped yara-python probe: .venv missing.",
+                diagnostic_message="Skipped yara-python probe: valid .venv missing.",
                 recommended_action="Run .\\setup.ps1.",
             )
         )
@@ -879,6 +1275,7 @@ def main(argv: list[str] | None = None) -> int:
                 installed=True,
                 runtime_verified=yc["returncode"] == 0,
                 diagnostic_message=f"Optional YARA CLI {yc_ver}" if yc["returncode"] == 0 else f"YARA CLI probe failed: {yc['stderr']}",
+                unavailable_evidence_if_missing="CLI fallback only; static/yara.json remains available via yara-python.",
             )
         )
     else:
@@ -889,11 +1286,12 @@ def main(argv: list[str] | None = None) -> int:
                 required=False,
                 status=STATUS_OPTIONAL,
                 configured_path=str(tools_cfg.get("yara")),
-                diagnostic_message="Optional YARA CLI not installed (yara-python handles rule scanning).",
+                diagnostic_message="Optional YARA CLI not installed (static/yara.json remains available via yara-python).",
+                unavailable_evidence_if_missing="CLI fallback only; static/yara.json remains available via yara-python.",
             )
         )
 
-    # Java runtime + Ghidra Headless compatibility
+    # Java runtime + Separated Ghidra Headless checks (installation vs version/JDK compat vs launcher/functional verification)
     java_bin = shutil.which("java")
     java_ver_str = None
     java_major = None
@@ -921,63 +1319,261 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     ghidra_bin = resolve_tool(tools_cfg.get("ghidra_headless"), ["analyzeHeadless.bat", "analyzeHeadless"])
-    ghidra_script = (resolve_cfg_path(tools_cfg.get("ghidra_script_dir")) or (BASE_DIR / "scripts")) / "ghidra_export.py"
-    ghidra_ver = get_ghidra_version(ghidra_bin)
-    if ghidra_bin and ghidra_script.is_file():
-        compat_msg = ""
-        compat_ok = True
-        if ghidra_ver and java_major:
-            m = re.match(r"(\d+)\.(\d+)", ghidra_ver)
-            if m:
-                g_maj, g_min = int(m.group(1)), int(m.group(2))
-                if (g_maj > 11 or (g_maj == 11 and g_min >= 2)) and java_major < 21:
-                    compat_ok = False
-                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 21+, detected JDK {java_major}."
-                elif g_maj == 11 and java_major < 17:
-                    compat_ok = False
-                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 17+, detected JDK {java_major}."
-        elif not java_ok:
-            compat_ok = False
-            compat_msg = "Java runtime missing/broken; analyzeHeadless cannot execute."
-        else:
-            compat_msg = "Java/Ghidra version pair parsed partially; runtime compatibility unverified."
+    ghidra_script_dir = resolve_cfg_path(tools_cfg.get("ghidra_script_dir")) or (BASE_DIR / "scripts")
+    ghidra_script = ghidra_script_dir / "ghidra_export.py"
+    ghidra_script_exists = ghidra_script.is_file()
+    ghidra_script_syntax_ok, ghidra_script_err = check_python_syntax_ast(ghidra_script) if ghidra_script_exists else (False, "missing")
+    ghidra_root_valid = bool(ghidra_bin and (ghidra_bin.parent.parent / "Ghidra").is_dir())
+    ghidra_installed = bool(ghidra_bin) and ghidra_root_valid and ghidra_script_exists
 
-        # Safe launcher probe without importing any binary
-        g_probe = run_bounded([str(ghidra_bin)], timeout=20.0)
-        probe_out = f"{g_probe['stdout']}\n{g_probe['stderr']}".lower()
-        launcher_responded = ("usage:" in probe_out or "analyzeheadless" in probe_out) and not g_probe["timed_out"]
-        g_ok = compat_ok and java_ok and (launcher_responded or g_probe["returncode"] in (0, 1))
+    # Stage A: Ghidra Headless installation check (never equates file existence with verified functionality)
+    if ghidra_installed and ghidra_script_syntax_ok:
         checks.append(
             make_check(
-                name="ghidra_headless",
+                name="ghidra_headless_install",
                 category="static",
                 required=True,
-                status=STATUS_PASS if g_ok else STATUS_FAIL,
-                detected_version=f"Ghidra {ghidra_ver or 'unknown'} (Java {java_major or 'N/A'})",
+                status=STATUS_PASS,
                 configured_path=str(tools_cfg.get("ghidra_headless")),
                 resolved_path=str(ghidra_bin),
                 installed=True,
-                runtime_verified=launcher_responded and compat_ok,
+                runtime_verified=False,
+                feature_verified=False,
+                verification_stages={
+                    "binary_present": True,
+                    "ghidra_home_present": True,
+                    "export_script_present": True,
+                    "export_script_syntax_valid": True,
+                },
                 diagnostic_message=(
-                    compat_msg or f"Ghidra {ghidra_ver or 'unknown'} launcher & ghidra_export.py verified (full export tested during sample run)."
+                    f"Ghidra headless binary and scripts/ghidra_export.py exist with valid Python syntax "
+                    "(installation check only; execution not yet verified)."
                 ),
-                recommended_action="" if g_ok else (compat_msg or "Verify Ghidra release archive and JDK 17/21 installation."),
+            )
+        )
+    elif ghidra_installed and not ghidra_script_syntax_ok:
+        checks.append(
+            make_check(
+                name="ghidra_headless_install",
+                category="static",
+                required=True,
+                status=STATUS_FAIL,
+                configured_path=str(tools_cfg.get("ghidra_headless")),
+                resolved_path=str(ghidra_bin),
+                installed=True,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message=f"scripts/ghidra_export.py syntax check failed: {ghidra_script_err}",
+                recommended_action="Restore scripts/ghidra_export.py from repository.",
             )
         )
     else:
+        missing_parts = []
+        if not ghidra_bin:
+            missing_parts.append("analyzeHeadless binary")
+        elif not ghidra_root_valid:
+            missing_parts.append("Ghidra/ layout directory next to support/")
+        if not ghidra_script_exists:
+            missing_parts.append("scripts/ghidra_export.py")
         checks.append(
             make_check(
-                name="ghidra_headless",
+                name="ghidra_headless_install",
                 category="static",
                 required=True,
                 status=STATUS_MISSING,
                 configured_path=str(tools_cfg.get("ghidra_headless")),
-                diagnostic_message="Ghidra analyzeHeadless binary or scripts/ghidra_export.py missing.",
-                recommended_action="Extract official Ghidra release to tools\\ghidra\\ (with JDK 17/21).",
+                resolved_path=str(ghidra_bin) if ghidra_bin else None,
+                installed=bool(ghidra_bin),
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message=f"Ghidra Headless installation incomplete: missing {', '.join(missing_parts)}.",
+                recommended_action="Extract official Ghidra release to tools\\ghidra\\ (with scripts\\ghidra_export.py present).",
             )
         )
 
-    # === 10.3 Process & System Monitoring Tools ===
+    # Stage B: Ghidra version detection & JDK compatibility
+    ghidra_ver = get_ghidra_version(ghidra_bin)
+    compat_ok = False
+    compat_msg = ""
+    if not ghidra_bin:
+        compat_msg = "Ghidra binary missing; version & JDK compatibility cannot be checked."
+        checks.append(
+            make_check(
+                name="ghidra_version_compat",
+                category="static",
+                required=True,
+                status=STATUS_MISSING,
+                configured_path=str(tools_cfg.get("ghidra_headless")),
+                installed=False,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message=compat_msg,
+                recommended_action="Install official Ghidra release first.",
+            )
+        )
+    else:
+        if not ghidra_ver:
+            compat_msg = "Ghidra/application.properties missing or application.version unreadable; version compatibility unverified."
+        elif not java_ok or java_major is None:
+            compat_msg = f"Ghidra {ghidra_ver} detected, but Java runtime is missing or failed `java -version`."
+        else:
+            m = re.match(r"(\d+)\.(\d+)", ghidra_ver)
+            if not m:
+                compat_msg = f"Unrecognized Ghidra version '{ghidra_ver}'; JDK compatibility unverified."
+            else:
+                g_maj, g_min = int(m.group(1)), int(m.group(2))
+                if (g_maj > 11 or (g_maj == 11 and g_min >= 2)) and java_major < 21:
+                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 21+, detected JDK {java_major}."
+                elif g_maj == 11 and java_major < 17:
+                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 17+, detected JDK {java_major}."
+                elif g_maj < 11 and java_major < 17:
+                    compat_msg = f"Ghidra {ghidra_ver} detected with JDK {java_major}; JDK 17+ recommended."
+                else:
+                    compat_ok = True
+
+        checks.append(
+            make_check(
+                name="ghidra_version_compat",
+                category="static",
+                required=True,
+                status=STATUS_PASS if compat_ok else STATUS_FAIL,
+                detected_version=f"Ghidra {ghidra_ver or 'unknown'} / JDK {java_major or 'N/A'}",
+                configured_path=str(tools_cfg.get("ghidra_headless")),
+                resolved_path=str(ghidra_bin),
+                installed=True,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message=(
+                    f"Ghidra {ghidra_ver} and JDK {java_major} version metadata match requirements (functional export not tested here)."
+                    if compat_ok
+                    else compat_msg
+                ),
+                recommended_action="" if compat_ok else (compat_msg or "Verify Ghidra version and JDK 17/21 installation."),
+            )
+        )
+
+    # Stage C: Honest Ghidra Headless launcher & functional verification reporting
+    if ghidra_installed and compat_ok and ghidra_bin:
+        g_probe = run_bounded([str(ghidra_bin), "-help"], timeout=20.0)
+        rc = g_probe["returncode"]
+        probe_out = f"{g_probe['stdout']}\n{g_probe['stderr']}"
+        lower_out = probe_out.lower()
+        fatal_markers = (
+            "unsupportedclassversionerror",
+            "could not find",
+            "is not recognized",
+            "exception in thread",
+            "java_home",
+            "error occurred during initialization of vm",
+        )
+        has_fatal = g_probe["timed_out"] or bool(g_probe["error"]) or any(tok in lower_out for tok in fatal_markers)
+        # Specific HeadlessAnalyzer CLI flags (not generic "usage:" or filename echo)
+        has_specific_cli_flags = all(opt in lower_out for opt in ("-import", "-postscript", "-deleteproject"))
+
+        if has_fatal or rc not in (0, 1) or not has_specific_cli_flags:
+            err_hint = (
+                g_probe["error"]
+                or (probe_out.splitlines()[0][:140] if probe_out else f"exit code {rc}")
+            )
+            checks.append(
+                make_check(
+                    name="ghidra_headless_verification",
+                    category="static",
+                    required=True,
+                    status=STATUS_FAIL,
+                    detected_version=f"exit_code={rc}",
+                    configured_path=str(tools_cfg.get("ghidra_headless")),
+                    resolved_path=str(ghidra_bin),
+                    installed=True,
+                    runtime_verified=False,
+                    feature_verified=False,
+                    verification_stages={
+                        "installed": True,
+                        "version_compatible": True,
+                        "launcher_exit_zero": False,
+                        "specific_cli_flags_seen": has_specific_cli_flags,
+                        "functional_export_verified": False,
+                    },
+                    diagnostic_message=(
+                        f"Ghidra analyzeHeadless probe failed or did not emit HeadlessAnalyzer CLI options "
+                        f"(exit_code={rc}; detail={err_hint})."
+                    ),
+                    recommended_action="Inspect JDK/Ghidra path and run analyzeHeadless.bat manually on Windows 11.",
+                )
+            )
+        elif rc == 0:
+            checks.append(
+                make_check(
+                    name="ghidra_headless_verification",
+                    category="static",
+                    required=False,
+                    status=STATUS_PENDING,
+                    detected_version=f"exit_code=0 (launcher only)",
+                    configured_path=str(tools_cfg.get("ghidra_headless")),
+                    resolved_path=str(ghidra_bin),
+                    installed=True,
+                    runtime_verified=True,
+                    feature_verified=False,
+                    verification_stages={
+                        "installed": True,
+                        "version_compatible": True,
+                        "launcher_exit_zero": True,
+                        "specific_cli_flags_seen": True,
+                        "functional_export_verified": False,
+                    },
+                    diagnostic_message=(
+                        "analyzeHeadless -help exited 0 and displayed HeadlessAnalyzer options, but end-to-end binary "
+                        "import, auto-analysis, and scripts/ghidra_export.py export remain UNVERIFIED until VM testing."
+                    ),
+                    recommended_action="Verify full Ghidra Headless export on Windows 11 VM using a harmless test binary.",
+                    unavailable_evidence_if_missing="If Ghidra Headless fails at runtime, ghidra/functions.json, disassembly.txt, and decompiled/*.c are unavailable.",
+                )
+            )
+        else:
+            # rc == 1 with specific HeadlessAnalyzer usage flags: NEVER promote non-zero exit code to PASS/runtime_verified
+            checks.append(
+                make_check(
+                    name="ghidra_headless_verification",
+                    category="static",
+                    required=False,
+                    status=STATUS_PENDING,
+                    detected_version=f"exit_code={rc} (unsuccessful exit code)",
+                    configured_path=str(tools_cfg.get("ghidra_headless")),
+                    resolved_path=str(ghidra_bin),
+                    installed=True,
+                    runtime_verified=False,
+                    feature_verified=False,
+                    verification_stages={
+                        "installed": True,
+                        "version_compatible": True,
+                        "launcher_exit_zero": False,
+                        "specific_cli_flags_seen": True,
+                        "functional_export_verified": False,
+                    },
+                    diagnostic_message=(
+                        f"analyzeHeadless -help exited {rc} (unsuccessful exit code; normal for Ghidra CLI usage banner, "
+                        "NOT proof of verified execution). Runtime execution and ghidra_export.py export remain UNVERIFIED until VM testing."
+                    ),
+                    recommended_action="Verify full Ghidra Headless export on Windows 11 VM using a harmless test binary.",
+                    unavailable_evidence_if_missing="If Ghidra Headless fails at runtime, ghidra/functions.json, disassembly.txt, and decompiled/*.c are unavailable.",
+                )
+            )
+    else:
+        checks.append(
+            make_check(
+                name="ghidra_headless_verification",
+                category="static",
+                required=False,
+                status=STATUS_SKIPPED,
+                installed=ghidra_installed,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message="Skipped Ghidra launcher probe because installation or JDK compatibility prerequisites failed.",
+                recommended_action="Fix ghidra_headless_install and ghidra_version_compat first.",
+            )
+        )
+
+    # === 3. Process & System Monitoring Tools ===
     sysmon_bin = resolve_tool(tools_cfg.get("sysmon"), ["Sysmon64.exe", "Sysmon.exe"])
     sysmon_ver = get_windows_file_version(sysmon_bin) if sysmon_bin else None
     checks.append(
@@ -990,7 +1586,7 @@ def main(argv: list[str] | None = None) -> int:
             configured_path=str(tools_cfg.get("sysmon")),
             resolved_path=str(sysmon_bin) if sysmon_bin else None,
             installed=bool(sysmon_bin),
-            runtime_verified=bool(sysmon_bin),
+            runtime_verified=bool(sysmon_ver),
             diagnostic_message=f"Sysmon binary present ({sysmon_bin})." if sysmon_bin else "Sysmon64.exe not found.",
             recommended_action="" if sysmon_bin else "Download Sysinternals Sysmon64.exe to tools\\sysinternals\\.",
         )
@@ -1039,12 +1635,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-        # Standard Windows Event Logs
+        # Standard Windows Event Logs (non-destructive wevtutil read check)
         sys_chk = run_bounded(["wevtutil.exe", "qe", "System", "/c:1", "/f:text"], timeout=10.0)
         app_chk = run_bounded(["wevtutil.exe", "qe", "Application", "/c:1", "/f:text"], timeout=10.0)
         sec_chk = run_bounded(["wevtutil.exe", "qe", "Security", "/c:1", "/f:text"], timeout=10.0)
         core_ev_ok = sys_chk["returncode"] == 0 and app_chk["returncode"] == 0
-        sec_note = "Security readable" if sec_chk["returncode"] == 0 else "Security denied (expected for standard user)"
+        sec_note = (
+            "Security channel readable"
+            if sec_chk["returncode"] == 0
+            else "Security channel denied (normal for standard user; security.evtx unavailable unless elevated)"
+        )
         checks.append(
             make_check(
                 name="windows_event_logs",
@@ -1090,20 +1690,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         ps_res = run_bounded([str(venv_python), "-c", ps_code], timeout=10.0)
         if ps_res["returncode"] == 0 and ps_res["stdout"]:
-            ps_info = json.loads(ps_res["stdout"].splitlines()[-1])
-            checks.append(
-                make_check(
-                    name="psutil_monitor",
-                    category="process",
-                    required=True,
-                    status=STATUS_PASS,
-                    detected_version=ps_info.get("ver"),
-                    installed=True,
-                    runtime_verified=True,
-                    feature_verified=True,
-                    diagnostic_message=f"psutil probed self process '{ps_info.get('pname')}' & RAM ({ps_info.get('pct')}% used).",
+            try:
+                ps_info = json.loads(ps_res["stdout"].splitlines()[-1])
+            except ValueError as exc:
+                ps_info = None
+                checks.append(
+                    make_check(
+                        name="psutil_monitor",
+                        category="process",
+                        required=True,
+                        status=STATUS_FAIL,
+                        diagnostic_message=f"psutil probe output parse failed: {exc}",
+                    )
                 )
-            )
+            if ps_info is not None:
+                checks.append(
+                    make_check(
+                        name="psutil_monitor",
+                        category="process",
+                        required=True,
+                        status=STATUS_PASS,
+                        detected_version=ps_info.get("ver"),
+                        installed=True,
+                        runtime_verified=True,
+                        feature_verified=True,
+                        diagnostic_message=f"psutil probed self process '{ps_info.get('pname')}' & RAM ({ps_info.get('pct')}% used).",
+                    )
+                )
         else:
             checks.append(
                 make_check(
@@ -1122,30 +1735,42 @@ def main(argv: list[str] | None = None) -> int:
                 category="process",
                 required=True,
                 status=STATUS_MISSING,
-                diagnostic_message="Skipped psutil probe: .venv missing.",
+                diagnostic_message="Skipped psutil probe: valid .venv missing.",
                 recommended_action="Run .\\setup.ps1.",
             )
         )
 
-    # Optional Procmon & ProcDump
+    # Optional Procmon (never loads driver or pops EULA dialog in readiness check)
     procmon_bin = resolve_tool(tools_cfg.get("procmon"), ["Procmon64.exe", "Procmon.exe"])
+    procmon_unavail_msg = (
+        "raw/procmon.pml and Procmon-derived filesystem/registry rows unavailable "
+        "(Sysmon EID 11/12/13/14/23 continues providing file and registry coverage)."
+    )
     if procmon_bin:
         pm_ver = get_windows_file_version(procmon_bin)
+        pm_eula = check_sysinternals_eula("Process Monitor")
         checks.append(
             make_check(
                 name="procmon_optional",
                 category="process",
                 required=False,
-                status=STATUS_PASS if is_admin else STATUS_OPTIONAL,
+                status=STATUS_PENDING if is_admin else STATUS_OPTIONAL,
                 detected_version=pm_ver,
                 configured_path=str(tools_cfg.get("procmon")),
                 resolved_path=str(procmon_bin),
                 installed=True,
                 runtime_verified=False,
+                feature_verified=False,
                 diagnostic_message=(
-                    f"Procmon binary present ({pm_ver or 'version N/A'}); requires Admin elevation to load capture driver (GUI not launched in check)."
+                    f"Procmon binary present (ver={pm_ver or 'N/A'}, hkcu_eula={pm_eula}, admin={is_admin}); "
+                    "driver not loaded during non-destructive check."
                 ),
-                recommended_action="" if is_admin else "Optional: Procmon requires elevated privileges; Sysmon provides non-admin coverage.",
+                recommended_action=(
+                    "Optional: Run Procmon64.exe once to accept EULA if using elevated capture; driver requires Admin privilege."
+                    if (is_admin and pm_eula is False)
+                    else ("Optional: Running non-admin; Procmon kernel capture skipped, Sysmon provides coverage." if not is_admin else "")
+                ),
+                unavailable_evidence_if_missing=procmon_unavail_msg,
             )
         )
     else:
@@ -1157,28 +1782,74 @@ def main(argv: list[str] | None = None) -> int:
                 status=STATUS_OPTIONAL,
                 configured_path=str(tools_cfg.get("procmon")),
                 diagnostic_message="Optional Procmon64.exe not installed (Sysmon provides process/file/registry coverage).",
+                unavailable_evidence_if_missing=procmon_unavail_msg,
             )
         )
 
+    # Optional ProcDump (only invokes `-?` if HKCU EULA already accepted so CheckOnly never hangs or edits HKCU)
     procdump_bin = resolve_tool(tools_cfg.get("procdump"), ["procdump64.exe", "procdump.exe"])
+    procdump_unavail_msg = (
+        "User-mode process memory minidumps (dynamic/memory/dumps/proc_<pid>.dmp) unavailable "
+        "(psutil RAM telemetry in memory_usage.json remains available)."
+    )
     if procdump_bin:
-        pd_res = run_bounded([str(procdump_bin), "-?"], timeout=10.0)
-        pd_banner = (pd_res["stdout"] or pd_res["stderr"]).splitlines()[0][:120] if (pd_res["stdout"] or pd_res["stderr"]) else get_windows_file_version(procdump_bin)
-        pd_ok = bool(pd_banner and "procdump" in pd_banner.lower())
-        checks.append(
-            make_check(
-                name="procdump_optional",
-                category="memory",
-                required=False,
-                status=STATUS_PASS if pd_ok else STATUS_FAIL,
-                detected_version=pd_banner,
-                configured_path=str(tools_cfg.get("procdump")),
-                resolved_path=str(procdump_bin),
-                installed=True,
-                runtime_verified=pd_ok,
-                diagnostic_message=f"ProcDump responded ({pd_banner}); no arbitrary process dumped." if pd_ok else "ProcDump probe failed.",
+        pd_eula = check_sysinternals_eula("ProcDump")
+        pd_fver = get_windows_file_version(procdump_bin)
+        if not is_win:
+            checks.append(
+                make_check(
+                    name="procdump_optional",
+                    category="memory",
+                    required=False,
+                    status=STATUS_PENDING,
+                    detected_version=pd_fver,
+                    configured_path=str(tools_cfg.get("procdump")),
+                    resolved_path=str(procdump_bin),
+                    installed=True,
+                    runtime_verified=False,
+                    diagnostic_message="ProcDump file found on non-Windows host; runtime unverified.",
+                    unavailable_evidence_if_missing=procdump_unavail_msg,
+                )
             )
-        )
+        elif pd_eula is False:
+            checks.append(
+                make_check(
+                    name="procdump_optional",
+                    category="memory",
+                    required=False,
+                    status=STATUS_PENDING,
+                    detected_version=pd_fver,
+                    configured_path=str(tools_cfg.get("procdump")),
+                    resolved_path=str(procdump_bin),
+                    installed=True,
+                    runtime_verified=False,
+                    diagnostic_message=(
+                        f"ProcDump present (ver={pd_fver or 'N/A'}), but HKCU Sysinternals EULA is not accepted yet; "
+                        "skipping binary launch in non-modifying probe to avoid modal GUI prompt."
+                    ),
+                    recommended_action="Optional: Run `procdump64.exe -accepteula -?` once before taking CLEAN snapshot.",
+                    unavailable_evidence_if_missing=procdump_unavail_msg,
+                )
+            )
+        else:
+            pd_res = run_bounded([str(procdump_bin), "-?"], timeout=10.0)
+            pd_banner = (pd_res["stdout"] or pd_res["stderr"]).splitlines()[0][:120] if (pd_res["stdout"] or pd_res["stderr"]) else pd_fver
+            pd_ok = bool(pd_banner and "procdump" in pd_banner.lower())
+            checks.append(
+                make_check(
+                    name="procdump_optional",
+                    category="memory",
+                    required=False,
+                    status=STATUS_PASS if pd_ok else STATUS_FAIL,
+                    detected_version=pd_banner,
+                    configured_path=str(tools_cfg.get("procdump")),
+                    resolved_path=str(procdump_bin),
+                    installed=True,
+                    runtime_verified=pd_ok,
+                    diagnostic_message=f"ProcDump responded ({pd_banner}); no arbitrary process dumped." if pd_ok else "ProcDump probe failed.",
+                    unavailable_evidence_if_missing=procdump_unavail_msg,
+                )
+            )
     else:
         checks.append(
             make_check(
@@ -1188,10 +1859,11 @@ def main(argv: list[str] | None = None) -> int:
                 status=STATUS_OPTIONAL,
                 configured_path=str(tools_cfg.get("procdump")),
                 diagnostic_message="Optional procdump64.exe not installed (RAM telemetry still available via psutil).",
+                unavailable_evidence_if_missing=procdump_unavail_msg,
             )
         )
 
-    # === 10.4 Network Monitoring Tools ===
+    # === 4. Network Monitoring Tools ===
     dumpcap_bin = resolve_tool(tools_cfg.get("dumpcap"), ["dumpcap.exe", "dumpcap"])
     tshark_bin = resolve_tool(tools_cfg.get("tshark"), ["tshark.exe", "tshark"])
 
@@ -1276,7 +1948,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    configured_iface = str(cfg.get("network_interface") or "").strip()
+    configured_iface = str(cfg["network_interface"])
     if dumpcap_bin:
         if_res = run_bounded([str(dumpcap_bin), "-D"], timeout=10.0)
         if if_res["returncode"] == 0 and if_res["stdout"]:
@@ -1332,6 +2004,7 @@ def main(argv: list[str] | None = None) -> int:
                         runtime_verified=True,
                         diagnostic_message="Only loopback capture interface detected; Internal Network 2 NIC may not be attached yet.",
                         recommended_action="Attach Internal Network 2 NIC and re-run setup.ps1 -CheckOnly.",
+                        unavailable_evidence_if_missing="Off-host packet capture in dynamic/network/capture.pcapng requires a non-loopback capture adapter.",
                     )
                 )
         else:
@@ -1346,33 +2019,64 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
 
-    # === 10.5 Memory Analysis Tools ===
+    # === 5. Memory Analysis Tools (Optional) ===
     winpmem_bin = resolve_tool(tools_cfg.get("winpmem"), ["winpmem.exe", "winpmem_mini_x64_rc2.exe"])
-    winpmem_enabled = bool(cfg.get("winpmem_enabled", False))
-    checks.append(
-        make_check(
-            name="winpmem_optional",
-            category="memory",
-            required=False,
-            status=STATUS_OPTIONAL if not winpmem_bin else STATUS_PASS,
-            configured_path=str(tools_cfg.get("winpmem")),
-            resolved_path=str(winpmem_bin) if winpmem_bin else None,
-            installed=bool(winpmem_bin),
-            runtime_verified=False,
-            feature_verified=False,
-            diagnostic_message=(
-                f"WinPmem executable present (winpmem_enabled={winpmem_enabled}); Windows 11 driver compatibility NOT verified by executable presence alone."
-                if winpmem_bin
-                else f"Optional WinPmem not installed (winpmem_enabled={winpmem_enabled})."
-            ),
-        )
+    winpmem_enabled = bool(cfg["winpmem_enabled"])
+    winpmem_unavail_msg = (
+        "Full physical RAM acquisition (dynamic/memory/dumps/physical_memory.raw) unavailable; "
+        "RAM usage telemetry (psutil) and process dumps (ProcDump) remain independent."
     )
+    if not winpmem_bin:
+        checks.append(
+            make_check(
+                name="winpmem_optional",
+                category="memory",
+                required=False,
+                status=STATUS_OPTIONAL,
+                configured_path=str(tools_cfg.get("winpmem")),
+                installed=False,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message=f"Optional WinPmem not installed (winpmem_enabled={winpmem_enabled}).",
+                unavailable_evidence_if_missing=winpmem_unavail_msg,
+            )
+        )
+    else:
+        # Never mark PASS or verified just from binary presence — driver compatibility on Win 11 is NOT tested offline
+        checks.append(
+            make_check(
+                name="winpmem_optional",
+                category="memory",
+                required=False,
+                status=STATUS_PENDING if winpmem_enabled else STATUS_OPTIONAL,
+                detected_version=get_windows_file_version(winpmem_bin),
+                configured_path=str(tools_cfg.get("winpmem")),
+                resolved_path=str(winpmem_bin),
+                installed=True,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message=(
+                    f"WinPmem executable present (winpmem_enabled={winpmem_enabled}), but Windows 11 kernel driver "
+                    "loading and acquisition are NOT verified offline."
+                ),
+                recommended_action=(
+                    "Optional: Test WinPmem acquisition manually as Administrator on Windows 11 if full physical RAM dumps are desired."
+                    if winpmem_enabled
+                    else ""
+                ),
+                unavailable_evidence_if_missing=winpmem_unavail_msg,
+            )
+        )
 
     vol_script = resolve_cfg_path(tools_cfg.get("volatility3"))
     vol_sym_dir = resolve_cfg_path(tools_cfg.get("volatility_symbols_dir"))
     vol_commit = get_git_commit(vol_script.parent if vol_script else None)
     if vol_commit:
         cloned_repos["volatility3"] = vol_commit
+    vol_unavail_msg = (
+        "Offline physical RAM forensic tables (dynamic/memory/volatility/windows.{pslist,pstree,cmdline,netscan,malfind}.json) unavailable "
+        "(Volatility 3 runs only when WinPmem full physical RAM dump succeeds)."
+    )
     if vol_script and vol_script.is_file() and venv_ok:
         v_help = run_bounded([str(venv_python), str(vol_script), "--help"], timeout=15.0)
         sym_count = (
@@ -1392,12 +2096,14 @@ def main(argv: list[str] | None = None) -> int:
                 resolved_path=str(vol_script),
                 installed=True,
                 runtime_verified=v_ok,
+                feature_verified=False,
                 diagnostic_message=(
-                    f"Volatility 3 --help succeeded (offline symbols files={sym_count})."
+                    f"Volatility 3 --help succeeded (offline symbols files={sym_count}; plugin analysis against a RAM image requires WinPmem dump)."
                     if v_ok
                     else f"Volatility 3 --help failed: {v_help['stderr'] or v_help['error']}"
                 ),
                 recommended_action="" if (v_ok and sym_count > 0) else "Pre-cache offline Windows ISF symbol packs under tools\\volatility3\\symbols\\ before isolating VM.",
+                unavailable_evidence_if_missing=vol_unavail_msg,
             )
         )
     else:
@@ -1408,11 +2114,12 @@ def main(argv: list[str] | None = None) -> int:
                 required=False,
                 status=STATUS_OPTIONAL,
                 configured_path=str(tools_cfg.get("volatility3")),
-                diagnostic_message="Optional Volatility 3 not cloned.",
+                diagnostic_message="Optional Volatility 3 not cloned (requires full physical RAM dump from WinPmem).",
+                unavailable_evidence_if_missing=vol_unavail_msg,
             )
         )
 
-    # === 10.6 MCP Verification ===
+    # === 6. MalBox MCP & Optional GhidraMCP ===
     mcp_cfg_path = MCP_DIR / "config.json"
     mcp_ex_path = MCP_DIR / "config.example.json"
     mcp_cfg_ok = mcp_cfg_path.is_file()
@@ -1455,58 +2162,27 @@ def main(argv: list[str] | None = None) -> int:
                 required=True,
                 status=STATUS_MISSING,
                 resolved_path=str(MCP_DIR / "server.py"),
-                diagnostic_message="MalBox MCP cannot be verified until .venv and mcp SDK are installed.",
+                diagnostic_message="MalBox MCP cannot be verified until valid .venv and mcp SDK are installed.",
                 recommended_action="Run .\\setup.ps1 while online.",
             )
         )
 
-    # GhidraMCP optional verification
+    # Optional GhidraMCP (multi-stage; HTTP 200 alone NEVER equates to working MCP integration!)
     gmcp_dir = resolve_cfg_path(tools_cfg.get("ghidra_mcp_dir"))
     gmcp_commit = get_git_commit(gmcp_dir)
     if gmcp_commit:
         cloned_repos["GhidraMCP"] = gmcp_commit
     gmcp_bridge = (gmcp_dir / "bridge_mcp_ghidra.py") if gmcp_dir else None
-    gmcp_cloned = bool(gmcp_dir and gmcp_dir.is_dir() and ((gmcp_dir / ".git").exists() or (gmcp_bridge and gmcp_bridge.is_file())))
+    gmcp_bridge_present = bool(gmcp_bridge and gmcp_bridge.is_file())
+    gmcp_dir_exists = bool(gmcp_dir and gmcp_dir.is_dir())
+    gmcp_cloned = gmcp_dir_exists and (gmcp_bridge_present or (gmcp_dir / ".git").exists())
 
-    # Check Ghidra Extensions dirs for GhidraMCP plugin
-    ext_installed = False
-    ext_dirs: list[Path] = []
-    if ghidra_bin:
-        ext_dirs.append(ghidra_bin.parent.parent / "Ghidra" / "Extensions")
-    user_gh = Path.home() / ".ghidra"
-    if user_gh.is_dir():
-        for sub in user_gh.iterdir():
-            if sub.is_dir() and (sub / "Extensions").is_dir():
-                ext_dirs.append(sub / "Extensions")
-    for ed in ext_dirs:
-        if ed.is_dir() and any("ghidramcp" in p.name.lower() for p in ed.iterdir()):
-            ext_installed = True
-            break
+    gmcp_unavail_msg = (
+        "Optional interactive Ghidra GUI MCP bridge unavailable; automated ghidra/ headless exports "
+        "and MalBox's own 16-tool stdio MCP server remain completely unaffected."
+    )
 
-    def _http_get_json(url: str, timeout_val: float) -> tuple[int, dict[str, Any], str | None]:
-        req = urllib.request.Request(url, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout_val) as resp:
-                raw = resp.read().decode("utf-8-sig", errors="replace")
-                try:
-                    return resp.status, json.loads(raw), None
-                except ValueError:
-                    return resp.status, {}, "non-JSON response"
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8-sig", errors="replace") if exc.fp else ""
-            try:
-                return exc.code, json.loads(raw), None
-            except ValueError:
-                return exc.code, {}, f"HTTP {exc.code}"
-        except (urllib.error.URLError, OSError) as exc:
-            return 0, {}, str(exc)
-
-    gmcp_active = False
-    if gmcp_cloned:
-        gc, _, _ = _http_get_json("http://127.0.0.1:8080/methods", 1.5)
-        gmcp_active = gc == 200
-
-    if not gmcp_cloned:
+    if not gmcp_dir_exists:
         checks.append(
             make_check(
                 name="ghidramcp_optional",
@@ -1514,35 +2190,160 @@ def main(argv: list[str] | None = None) -> int:
                 required=False,
                 status=STATUS_OPTIONAL,
                 configured_path=str(tools_cfg.get("ghidra_mcp_dir")),
-                diagnostic_message="Optional GhidraMCP not cloned (Ghidra Headless works independently).",
+                installed=False,
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message="Optional GhidraMCP not cloned (Ghidra Headless & MalBox MCP operate independently).",
+                unavailable_evidence_if_missing=gmcp_unavail_msg,
             )
         )
-    else:
+    elif not gmcp_bridge_present:
         checks.append(
             make_check(
                 name="ghidramcp_optional",
                 category="mcp",
                 required=False,
-                status=STATUS_PASS if gmcp_active else STATUS_PENDING,
-                detected_version=f"commit={gmcp_commit or 'unknown'}, plugin_installed={ext_installed}, active={gmcp_active}",
+                status=STATUS_FAIL,
                 configured_path=str(tools_cfg.get("ghidra_mcp_dir")),
-                resolved_path=str(gmcp_bridge) if (gmcp_bridge and gmcp_bridge.is_file()) else str(gmcp_dir),
+                resolved_path=str(gmcp_dir),
                 installed=True,
-                runtime_verified=gmcp_active,
-                feature_verified=gmcp_active,
-                diagnostic_message=(
-                    "GhidraMCP GUI server responded locally on 127.0.0.1:8080."
-                    if gmcp_active
-                    else f"GhidraMCP cloned (plugin_installed={ext_installed}), but interactive Ghidra GUI server is not currently active."
+                runtime_verified=False,
+                feature_verified=False,
+                diagnostic_message="GhidraMCP directory exists without bridge_mcp_ghidra.py; incomplete clone.",
+                recommended_action="Optional: Remove tools\\GhidraMCP and re-run .\\setup.ps1 -CloneGitTools.",
+                unavailable_evidence_if_missing=gmcp_unavail_msg,
+            )
+        )
+    else:
+        bridge_syntax_ok, bridge_syntax_err = check_python_syntax_ast(gmcp_bridge) if gmcp_bridge else (False, "missing")
+        gmcp_reqs_file = gmcp_dir / "requirements.txt" if gmcp_dir else None
+        expected_gmcp_deps = parse_requirements_names(gmcp_reqs_file) if gmcp_reqs_file else []
+        if not expected_gmcp_deps:
+            expected_gmcp_deps = ["mcp", "requests"]
+        gmcp_deps_missing: list[str] = expected_gmcp_deps
+        if venv_ok:
+            dep_code = (
+                "import importlib.metadata as m, json\n"
+                f"names = {expected_gmcp_deps!r}\n"
+                "missing = []\n"
+                "for n in names:\n"
+                "    try: m.version(n)\n"
+                "    except Exception: missing.append(n)\n"
+                "print(json.dumps(missing))\n"
+            )
+            dep_res = run_bounded([str(venv_python), "-c", dep_code], timeout=10.0)
+            if dep_res["returncode"] == 0 and dep_res["stdout"]:
+                try:
+                    gmcp_deps_missing = json.loads(dep_res["stdout"].splitlines()[-1])
+                except ValueError:
+                    pass
+        gmcp_deps_ok = venv_ok and len(gmcp_deps_missing) == 0
+
+        ext_installed = False
+        ext_dirs: list[Path] = []
+        if ghidra_bin:
+            ext_dirs.append(ghidra_bin.parent.parent / "Ghidra" / "Extensions")
+        user_gh = Path.home() / ".ghidra"
+        if user_gh.is_dir():
+            for sub in user_gh.iterdir():
+                if sub.is_dir() and (sub / "Extensions").is_dir():
+                    ext_dirs.append(sub / "Extensions")
+        for ed in ext_dirs:
+            if ed.is_dir() and any("ghidramcp" in p.name.lower() for p in ed.iterdir()):
+                ext_installed = True
+                break
+
+        # Raw HTTP probe on 127.0.0.1:8080/methods (HTTP 200 alone NEVER proves a working MCP bridge!)
+        port8080_code = 0
+        port8080_kind = "unreachable"
+        try:
+            with urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8080/methods", method="GET"), timeout=1.5) as resp:
+                port8080_code = resp.status
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                snippet = resp.read(512).decode("utf-8-sig", errors="replace").lstrip()
+                if "html" in ctype or snippet.lower().startswith(("<!doctype", "<html")):
+                    port8080_kind = "html_non_ghidramcp_or_unknown"
+                elif snippet.startswith(("[", "{")) or "text/plain" in ctype or snippet:
+                    port8080_kind = "http_response_unverified"
+                else:
+                    port8080_kind = "empty_200"
+        except urllib.error.HTTPError as exc:
+            port8080_code = exc.code
+            port8080_kind = f"http_{exc.code}"
+        except (urllib.error.URLError, OSError):
+            port8080_code = 0
+            port8080_kind = "unreachable"
+
+        stages = {
+            "repo_cloned": gmcp_cloned,
+            "repo_commit": gmcp_commit,
+            "bridge_script_present": gmcp_bridge_present,
+            "bridge_script_syntax_ok": bridge_syntax_ok,
+            "bridge_script_syntax_error": bridge_syntax_err,
+            "bridge_deps_installed": gmcp_deps_ok,
+            "bridge_deps_missing": gmcp_deps_missing,
+            "plugin_extension_installed": ext_installed,
+            "http_8080_status_code": port8080_code,
+            "http_8080_payload_type": port8080_kind,
+            "mcp_bridge_verified": False,
+        }
+
+        if not bridge_syntax_ok:
+            diag_msg = (
+                f"GhidraMCP cloned, but bridge_mcp_ghidra.py failed syntax check ({bridge_syntax_err}); "
+                "interactive MCP bridge UNVERIFIED."
+            )
+            gmcp_status = STATUS_FAIL
+        elif port8080_code == 200 and port8080_kind == "html_non_ghidramcp_or_unknown":
+            diag_msg = (
+                f"GhidraMCP cloned (commit={gmcp_commit or 'unknown'}, deps_ok={gmcp_deps_ok}, "
+                f"plugin_installed={ext_installed}); port 8080 returned HTML HTTP 200 (likely another service), "
+                "and interactive MCP bridge integration remains UNVERIFIED."
+            )
+            gmcp_status = STATUS_PENDING
+        elif port8080_code == 200:
+            diag_msg = (
+                f"GhidraMCP cloned (commit={gmcp_commit or 'unknown'}, deps_ok={gmcp_deps_ok}, "
+                f"plugin_installed={ext_installed}); 127.0.0.1:8080/methods returned HTTP 200, "
+                "which is insufficient alone to verify working MCP bridge/plugin integration (end-to-end MCP bridge UNVERIFIED)."
+            )
+            gmcp_status = STATUS_PENDING
+        else:
+            diag_msg = (
+                f"GhidraMCP cloned (commit={gmcp_commit or 'unknown'}, deps_ok={gmcp_deps_ok}, "
+                f"plugin_installed={ext_installed}, http_8080={port8080_code}); Ghidra GUI HTTP/MCP integration NOT verified."
+            )
+            gmcp_status = STATUS_PENDING
+
+        checks.append(
+            make_check(
+                name="ghidramcp_optional",
+                category="mcp",
+                required=False,
+                status=gmcp_status,
+                detected_version=(
+                    f"commit={gmcp_commit or 'unknown'}, plugin={ext_installed}, deps_ok={gmcp_deps_ok}, http_8080={port8080_code}"
                 ),
-                recommended_action="" if gmcp_active else "Optional: Install GhidraMCP extension inside Ghidra GUI when performing interactive RE.",
+                configured_path=str(tools_cfg.get("ghidra_mcp_dir")),
+                resolved_path=str(gmcp_bridge),
+                installed=True,
+                runtime_verified=False,
+                feature_verified=False,
+                verification_stages=stages,
+                diagnostic_message=diag_msg,
+                recommended_action=(
+                    "Optional: Install GhidraMCP extension inside Ghidra GUI and test bridge_mcp_ghidra.py manually during interactive RE."
+                    if ext_installed and gmcp_deps_ok
+                    else "Optional: Install GhidraMCP GUI extension inside Ghidra and verify requirements inside .venv before interactive use."
+                ),
+                unavailable_evidence_if_missing=gmcp_unavail_msg,
             )
         )
 
-    # === 10.7 Sandbox State & Network Service ===
+    # === 7. Snapshot State, Local HTTP Service & Separated Network Semantics ===
     dirty_marker = ws_dir / ".dirty_state"
     dirty_present = dirty_marker.exists()
-    snapshot_state = "RESTORE_REQUIRED" if dirty_present else "CLEAN_MARKER_NOT_PRESENT"
+    snapshot_state = "RESTORE_REQUIRED" if dirty_present else "NO_DIRTY_MARKER"
     checks.append(
         make_check(
             name="sandbox_snapshot_state",
@@ -1557,36 +2358,78 @@ def main(argv: list[str] | None = None) -> int:
             diagnostic_message=(
                 "Dirty marker workspace/.dirty_state exists; RESTORE_REQUIRED before analyzing new samples."
                 if dirty_present
-                else "No dirty marker present (verify VM cleanliness manually before taking CLEAN snapshot)."
+                else "No workspace/.dirty_state marker on disk (absence of marker does not verify VM cleanliness; confirm CLEAN snapshot manually)."
             ),
             recommended_action="Restore the Windows 11 CLEAN VM snapshot." if dirty_present else "",
         )
     )
 
-    listen_host = str(cfg.get("listen_host", "0.0.0.0"))
-    listen_port = int(cfg.get("listen_port", 8001))
-    sb_net_status = STATUS_PENDING
+    def _http_get_json(url: str, timeout_val: float) -> tuple[int, dict[str, Any], str | None]:
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_val) as resp:
+                raw = resp.read().decode("utf-8-sig", errors="replace")
+                try:
+                    data = json.loads(raw)
+                    return resp.status, data if isinstance(data, dict) else {}, None if isinstance(data, dict) else "JSON root not object"
+                except ValueError:
+                    return resp.status, {}, "non-JSON response"
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8-sig", errors="replace") if exc.fp else ""
+            try:
+                data = json.loads(raw)
+                return exc.code, data if isinstance(data, dict) else {}, None
+            except ValueError:
+                return exc.code, {}, f"HTTP {exc.code}"
+        except (urllib.error.URLError, OSError) as exc:
+            return 0, {}, str(exc)
+
+    listen_host = str(cfg["listen_host"])
+    listen_port = int(cfg["listen_port"])
+    loopback_only = listen_host in ("127.0.0.1", "localhost", "::1")
     probe_host = "127.0.0.1" if listen_host in ("0.0.0.0", "") else listen_host
     sc_code, sdata, s_err = _http_get_json(f"http://{probe_host}:{listen_port}/status", 2.0)
     s_state = str(sdata.get("state", "")).upper()
 
-    if sc_code == 200 and s_state in ("READY", "ANALYZING", "RETURNING_EVIDENCE", "RESTORE_REQUIRED"):
+    if loopback_only:
+        local_service_state = "LOOPBACK_ONLY_MISCONFIGURED"
+        sb_net_status = STATUS_FAIL
+        application_state = s_state if sc_code == 200 and s_state else ("RESTORE_REQUIRED" if dirty_present else "LOOPBACK_ONLY")
+        checks.append(
+            make_check(
+                name="sandbox_http_service",
+                category="peer",
+                required=False,
+                status=STATUS_FAIL,
+                configured_path=f"{listen_host}:{listen_port}",
+                diagnostic_message=f"listen_host is '{listen_host}'; Machine 2 Gateway cannot reach loopback-only Sandbox.",
+                recommended_action="Set listen_host to '0.0.0.0' or '10.10.20.30' in machine3-sandbox/config.json.",
+            )
+        )
+    elif sc_code == 200 and s_state in ("READY", "ANALYZING", "RETURNING_EVIDENCE", "RESTORE_REQUIRED"):
+        local_service_state = "RUNNING"
         sb_net_status = STATUS_PASS
+        application_state = s_state
         checks.append(
             make_check(
                 name="sandbox_http_service",
                 category="peer",
                 required=False,
                 status=STATUS_PASS,
+                detected_version=f"application_state={s_state}",
                 configured_path=f"{listen_host}:{listen_port}",
                 resolved_path=f"http://{probe_host}:{listen_port}/status",
                 runtime_verified=True,
-                feature_verified=True,
-                diagnostic_message=f"Sandbox HTTP server is running (state={s_state}).",
+                diagnostic_message=(
+                    f"Local Sandbox HTTP /status responded (application_state={s_state}); "
+                    "this checks local service availability only — inbound reachability from Machine 2 is NOT verified by localhost."
+                ),
             )
         )
     elif sc_code > 0:
+        local_service_state = "PORT_CONFLICT"
         sb_net_status = STATUS_FAIL
+        application_state = "INVALID_ENDPOINT"
         checks.append(
             make_check(
                 name="sandbox_http_service",
@@ -1599,7 +2442,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     elif check_port_free(listen_host, listen_port):
+        local_service_state = "NOT_STARTED"
         sb_net_status = STATUS_PENDING
+        application_state = "RESTORE_REQUIRED" if dirty_present else "NOT_RUNNING"
         checks.append(
             make_check(
                 name="sandbox_http_service",
@@ -1607,12 +2452,14 @@ def main(argv: list[str] | None = None) -> int:
                 required=False,
                 status=STATUS_PENDING,
                 configured_path=f"{listen_host}:{listen_port}",
-                diagnostic_message=f"Sandbox server not started yet; port {listen_port} is free.",
+                diagnostic_message=f"Sandbox HTTP server not started yet; port {listen_port} is free.",
                 recommended_action="Start Sandbox with: .\\.venv\\Scripts\\Activate.ps1; python sandbox.py",
             )
         )
     else:
+        local_service_state = "PORT_CONFLICT"
         sb_net_status = STATUS_FAIL
+        application_state = "PORT_OCCUPIED"
         checks.append(
             make_check(
                 name="sandbox_http_service",
@@ -1625,7 +2472,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    # Check if Internal Network 2 static IP (10.10.20.30) is assigned locally (pure stdlib)
+    # Check if Internal Network 2 static IP (10.10.20.30) is assigned locally
     nic_ok = False
     nic_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -1643,15 +2490,15 @@ def main(argv: list[str] | None = None) -> int:
             status=STATUS_PASS if nic_ok else STATUS_PENDING,
             detected_version="10.10.20.30" if nic_ok else None,
             diagnostic_message=(
-                "Internal Network 2 IP 10.10.20.30 is assigned."
+                "Internal Network 2 IP 10.10.20.30 is assigned on local interface (firewall/peer routing still must be tested from Machine 2)."
                 if nic_ok
-                else "Static IP 10.10.20.30 not assigned yet (expected until manual network setup)."
+                else "Static IP 10.10.20.30 not assigned yet (pending manual network setup)."
             ),
             recommended_action="" if nic_ok else "Manually assign 10.10.20.30/24 on Internal Network 2 (see docs\\network-setup.md).",
         )
     )
 
-    # Overall readiness computation
+    # Overall readiness computations (strictly separated)
     required_bad = [c for c in checks if c["required"] and c["status"] in (STATUS_FAIL, STATUS_MISSING)]
     optional_degraded = [
         c
@@ -1668,31 +2515,46 @@ def main(argv: list[str] | None = None) -> int:
     else:
         local_readiness = "READY"
 
+    peer_connectivity = "UNVERIFIED_PASSIVE_LISTENER"
     if sb_net_status == STATUS_FAIL:
         network_readiness = "NOT_READY"
     elif sb_net_status == STATUS_PASS and nic_ok:
-        network_readiness = "READY"
+        # Never claim end-to-end NETWORK_READINESS=READY from localhost HTTP check alone
+        network_readiness = "LOCAL_SERVICE_ONLY"
     else:
         network_readiness = "PENDING"
 
     missing_required = [c["name"] for c in checks if c["required"] and c["status"] in (STATUS_MISSING, STATUS_FAIL)]
     missing_optional = [c["name"] for c in checks if not c["required"] and c["status"] in (STATUS_MISSING, STATUS_OPTIONAL)]
+    evidence_impact_summary = {
+        c["name"]: c["unavailable_evidence_if_missing"]
+        for c in checks
+        if c.get("unavailable_evidence_if_missing") and c["status"] != STATUS_PASS
+    }
     for c in checks:
         if c["recommended_action"] and c["status"] != STATUS_PASS:
             manual_actions.append(f"[{c['name']}] {c['recommended_action']}")
 
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "machine": "machine3-sandbox",
         "mode": args.mode,
         "generated_at": utc_now_iso(),
         "local_readiness": local_readiness,
+        "local_service_state": local_service_state,
         "network_readiness": network_readiness,
+        "peer_connectivity": peer_connectivity,
+        "application_state": application_state,
         "snapshot_state": snapshot_state,
+        "config_validation_state": cfg_state,
         "environment": {
             "os": os_desc,
-            "windows_build": win_build,
+            "windows_11_verified": win11_verified,
+            "windows_build": str(win_build_int) if win_build_int is not None else None,
+            "windows_ubr": win_ubr,
             "windows_display_version": win_display,
+            "windows_edition": win_edition,
+            "windows_product_name": win_product,
             "python_version": py_ver,
             "python_bits": py_bits,
             "pip_version": pip_ver,
@@ -1706,30 +2568,43 @@ def main(argv: list[str] | None = None) -> int:
         "checks": checks,
         "missing_required_tools": missing_required,
         "missing_optional_tools": missing_optional,
+        "evidence_impact_when_optional_missing": evidence_impact_summary,
         "manual_actions_required": list(dict.fromkeys(manual_actions)),
     }
-
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print("")
     print("=== MalBox Machine 3 Readiness Report ===")
     for c in checks:
         ver = f" ({c['detected_version']})" if c["detected_version"] else ""
         req_tag = "REQ" if c["required"] else "OPT"
-        print(f"  [{c['status']:<8}] [{req_tag}] {c['name']:<28}{ver} - {c['diagnostic_message']}")
+        print(f"  [{c['status']:<8}] [{req_tag}] {c['name']:<29}{ver} - {c['diagnostic_message']}")
 
     print("")
-    print(f"LOCAL_READINESS   : {local_readiness}")
-    print(f"NETWORK_READINESS : {network_readiness}")
-    print(f"SNAPSHOT_STATE    : {snapshot_state}")
-    print(f"REPORT_SAVED      : {report_path}")
+    print(f"LOCAL_READINESS     : {local_readiness}")
+    print(f"LOCAL_SERVICE_STATE : {local_service_state} ({listen_host}:{listen_port})")
+    print(f"NETWORK_READINESS   : {network_readiness}")
+    print(f"PEER_CONNECTIVITY   : {peer_connectivity} (verify Gateway <-> Sandbox from Machine 2/1)")
+    print(f"APPLICATION_STATE   : {application_state}")
+    print(f"SNAPSHOT_STATE      : {snapshot_state}")
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"REPORT_SAVED        : {report_path}")
+    except OSError as exc:
+        print(f"[ERROR] Failed writing report {report_path}: {exc}", file=sys.stderr)
+        return 1
+
+    if evidence_impact_summary:
+        print("\nEvidence Unavailable / Degraded While Optional/Pending Checks Remain:")
+        for cname, impact in evidence_impact_summary.items():
+            print(f"  - {cname}: {impact}")
 
     if report["manual_actions_required"]:
         print("\nManual Actions / Next Steps:")
         for act in report["manual_actions_required"]:
             print(f"  - {act}")
 
-    if args.mode == "check-only" and local_readiness == "NOT_READY":
+    if local_readiness == "NOT_READY":
         return 1
     return 0
 

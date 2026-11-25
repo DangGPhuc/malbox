@@ -55,7 +55,7 @@ if [ "$FORCE_INSTALL" = true ]; then
     NEEDS_INSTALL=true
 elif [ ! -x "$VENV_PYTHON" ]; then
     NEEDS_INSTALL=true
-elif ! "$VENV_PYTHON" -c "import flask, requests" >/dev/null 2>&1; then
+elif ! "$VENV_PYTHON" -c "import sys, flask, requests; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >/dev/null 2>&1; then
     NEEDS_INSTALL=true
 fi
 

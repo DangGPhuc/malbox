@@ -81,27 +81,71 @@ foreach ($d in $dirs) {
     }
 }
 
-# 2. Locate Python and create virtual environment + install required Python packages
-$PythonCmd = Get-Command python -ErrorAction SilentlyContinue
-if (-not $PythonCmd) {
-    $PythonCmd = Get-Command py -ErrorAction SilentlyContinue
+# 2. Locate 64-bit Python 3.10+ and create virtual environment + install required Python packages
+function Find-ValidPython {
+    $candidates = @()
+    $pyCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pyCmd -and $pyCmd.Source -notlike "*\WindowsApps\python*.exe") {
+        $candidates += @{ Source = $pyCmd.Source; Prefix = @() }
+    }
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        $candidates += @{ Source = $pyLauncher.Source; Prefix = @("-3") }
+    }
+    if ($pyCmd -and $pyCmd.Source -like "*\WindowsApps\python*.exe") {
+        $candidates += @{ Source = $pyCmd.Source; Prefix = @() }
+    }
+
+    foreach ($cand in $candidates) {
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $global:LASTEXITCODE = 0
+            $probeArgs = $cand.Prefix + @(
+                "-c",
+                "import struct, sys; sys.exit(0 if (sys.version_info >= (3, 10) and struct.calcsize('P') * 8 == 64) else 1)"
+            )
+            $null = & $cand.Source @probeArgs 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                return $cand
+            }
+        } catch {
+            # Ignore invalid/alias interpreter
+        } finally {
+            $ErrorActionPreference = $prevPref
+        }
+    }
+    return $null
 }
-if (-not $PythonCmd) {
-    Write-Host "[ERROR] Python 3.11+ not found in PATH. Install Python first." -ForegroundColor Red
+
+$ValidPython = Find-ValidPython
+if (-not $ValidPython) {
+    Write-Host "[ERROR] 64-bit Python 3.10+ (recommended 3.11/3.12 x64) is required in PATH or py launcher." -ForegroundColor Red
     exit 1
 }
 
 $VenvDir = Join-Path $SandboxDir ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 
+if (Test-Path $VenvPython) {
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $global:LASTEXITCODE = 0
+        $null = & $VenvPython -c "import struct, sys; sys.exit(0 if (sys.version_info >= (3, 10) and struct.calcsize('P') * 8 == 64) else 1)" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[WARN] Existing .venv uses unsupported Python (< 3.10 or 32-bit); recreating .venv..." -ForegroundColor Yellow
+            Remove-Item -Path $VenvDir -Recurse -Force
+        }
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
+}
+
 try {
     if (-not (Test-Path $VenvPython)) {
-        Write-Host "[INSTALL] Creating Python virtual environment..."
-        if ($PythonCmd.Name -eq "py.exe" -or $PythonCmd.Name -eq "py") {
-            Invoke-Checked $PythonCmd.Source @("-3", "-m", "venv", $VenvDir) "Create virtual environment"
-        } else {
-            Invoke-Checked $PythonCmd.Source @("-m", "venv", $VenvDir) "Create virtual environment"
-        }
+        Write-Host "[INSTALL] Creating 64-bit Python 3.10+ virtual environment..."
+        Invoke-Checked $ValidPython.Source ($ValidPython.Prefix + @("-m", "venv", $VenvDir)) "Create virtual environment"
     }
 
     if (-not (Test-Path $VenvPython)) {
@@ -304,3 +348,4 @@ Write-Host "6. Verify sandbox startup and save the Windows 11 CLEAN snapshot."
 Write-Host "`nTo start Sandbox server:"
 Write-Host "  .\.venv\Scripts\Activate.ps1"
 Write-Host "  python sandbox.py"
+exit 0

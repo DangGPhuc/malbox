@@ -47,6 +47,6 @@
 - `doctor.py`, `gateway.py`, `sandbox.py`, `analyzer.py`, `readiness.py`, and `mcp/tools.py` all read JSON with `utf-8-sig`, so manual edits saved with BOM in Windows editors are tolerated safely.
 
 ## 11. `LOCAL_READINESS` Shows `NOT_READY` or `LIMITED`
-- Inspect `setup_report.json` in the corresponding `machine*` directory (`missing_required_tools`, `missing_optional_tools`, `manual_actions_required`).
-- `NOT_READY` means a mandatory dependency failed or is missing (or `.dirty_state` requires restoring the `CLEAN` snapshot).
-- `LIMITED` means all mandatory checks passed, while optional tools (`Procmon64`, `ProcDump64`, `WinPmem`, `Volatility 3`, `YARA CLI`, or `GhidraMCP`) are absent or unverified. See [setup-and-readiness.md](setup-and-readiness.md).
+- Inspect `setup_report.json` in the corresponding `machine*` directory (`missing_required_tools`, `missing_optional_tools`, `evidence_impact_when_optional_missing`, `manual_actions_required`).
+- `NOT_READY` (exit code `1` in both `setup` and `--check-only` / `-CheckOnly` modes) means a mandatory dependency failed or is missing (including invalid `config.json`, Python `< 3.10`, non-Windows-11 build `< 22000`, or `.dirty_state` requiring CLEAN snapshot restore).
+- `LIMITED` (exit code `0`) means all mandatory local checks passed, while optional or offline-unverified items (`Procmon64`, `ProcDump64`, `WinPmem`, `Volatility 3`, `YARA CLI`, `GhidraMCP`, or offline `ghidra_headless_verification`) are absent, disabled, or pending VM testing. See [setup-and-readiness.md](setup-and-readiness.md).

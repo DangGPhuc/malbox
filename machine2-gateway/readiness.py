@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""MalBox Machine 2 (REMnux/Kali Gateway) Environment Readiness Checker."""
+"""MalBox Machine 2 (REMnux/Kali Gateway) Environment Readiness Checker.
+
+Exit codes (standardized across all MalBox readiness checkers):
+  0: Mandatory local checks passed (LOCAL_READINESS is READY or LIMITED).
+  1: LOCAL_READINESS is NOT_READY (missing/failing mandatory check or invalid config)
+     in either setup or check-only mode, or setup_report.json could not be written.
+  2: Invalid command-line arguments.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import shutil
@@ -20,6 +28,7 @@ from typing import Any
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_REPORT_PATH = BASE_DIR / "setup_report.json"
+MIN_PYTHON = (3, 10)
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -98,18 +107,166 @@ def make_check(
     }
 
 
-def probe_dir_rw(label: str, raw_path: str, config_dir: Path) -> tuple[str, Path, bool, str]:
-    target = Path(raw_path) if Path(raw_path).is_absolute() else (config_dir / raw_path).resolve()
-    if not target.is_dir():
-        return STATUS_MISSING, target, False, f"{label} missing: {target}"
+def _validate_str(cfg: dict[str, Any], key: str, errors: list[str]) -> str | None:
+    if key not in cfg:
+        errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if not isinstance(val, str):
+        errors.append(f"Key '{key}' must be a string (got {type(val).__name__})")
+        return None
+    if "\x00" in val:
+        errors.append(f"Key '{key}' contains embedded null byte")
+        return None
+    if not val.strip():
+        errors.append(f"Key '{key}' must not be empty")
+        return None
+    return val.strip()
+
+
+def _validate_int(
+    cfg: dict[str, Any],
+    key: str,
+    errors: list[str],
+    min_val: int,
+    max_val: int | None = None,
+    required: bool = True,
+) -> int | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if isinstance(val, bool) or not isinstance(val, int):
+        errors.append(f"Key '{key}' must be an integer (got {type(val).__name__})")
+        return None
+    if val < min_val or (max_val is not None and val > max_val):
+        bound = f"{min_val}..{max_val}" if max_val is not None else f">= {min_val}"
+        errors.append(f"Key '{key}' out of range ({bound}): {val}")
+        return None
+    return val
+
+
+def _validate_number(
+    cfg: dict[str, Any],
+    key: str,
+    errors: list[str],
+    min_val: float,
+    required: bool = True,
+) -> float | None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return None
+    val = cfg[key]
+    if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+        errors.append(f"Key '{key}' must be a finite number (got {type(val).__name__})")
+        return None
+    fval = float(val)
+    if fval < min_val:
+        errors.append(f"Key '{key}' must be >= {min_val} (got {fval})")
+        return None
+    return fval
+
+
+def _validate_bool(cfg: dict[str, Any], key: str, errors: list[str], required: bool = False) -> None:
+    if key not in cfg:
+        if required:
+            errors.append(f"Missing key '{key}'")
+        return
+    if not isinstance(cfg[key], bool):
+        errors.append(f"Key '{key}' must be a boolean (got {type(cfg[key]).__name__})")
+
+
+def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[str], str]:
+    defaults: dict[str, Any] = {
+        "listen_host": "0.0.0.0",
+        "listen_port": 8000,
+        "sandbox_host": "10.10.20.30",
+        "sandbox_port": 8001,
+        "temp_dir": "./tmp",
+        "evidence_archive_dir": "./retained_evidence",
+        "retain_evidence_archives": True,
+        "connect_timeout_seconds": 5.0,
+    }
+    errors: list[str] = []
+    if not config_path.is_file():
+        errors.append(f"Missing configuration file: {config_path}")
+        return defaults, errors, "missing"
+
+    try:
+        raw_text = config_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        errors.append(f"Failed reading {config_path.name}: {exc}")
+        return defaults, errors, "read_error"
+
+    try:
+        parsed = json.loads(raw_text)
+    except ValueError as exc:
+        errors.append(f"Invalid JSON in {config_path.name}: {exc}")
+        return defaults, errors, "invalid_json"
+
+    if not isinstance(parsed, dict):
+        errors.append(f"Root of {config_path.name} must be a JSON object (got {type(parsed).__name__})")
+        return defaults, errors, "invalid_type"
+
+    lhost = _validate_str(parsed, "listen_host", errors)
+    lport = _validate_int(parsed, "listen_port", errors, min_val=1, max_val=65535, required=True)
+    shost = _validate_str(parsed, "sandbox_host", errors)
+    sport = _validate_int(parsed, "sandbox_port", errors, min_val=1, max_val=65535, required=True)
+    tmp_dir = _validate_str(parsed, "temp_dir", errors)
+    ret_dir = _validate_str(parsed, "evidence_archive_dir", errors)
+    _validate_bool(parsed, "retain_evidence_archives", errors, required=True)
+    conn_t = _validate_number(parsed, "connect_timeout_seconds", errors, min_val=0.1, required=False)
+    _validate_number(parsed, "request_timeout_seconds", errors, min_val=0.1, required=False)
+    _validate_number(parsed, "poll_interval_seconds", errors, min_val=0.1, required=False)
+    _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
+    _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    _validate_number(parsed, "max_sample_size_mb", errors, min_val=1.0, required=False)
+
+    safe_cfg = dict(defaults)
+    if lhost:
+        safe_cfg["listen_host"] = lhost
+    if lport is not None:
+        safe_cfg["listen_port"] = lport
+    if shost:
+        safe_cfg["sandbox_host"] = shost
+    if sport is not None:
+        safe_cfg["sandbox_port"] = sport
+    if tmp_dir:
+        safe_cfg["temp_dir"] = tmp_dir
+    if ret_dir:
+        safe_cfg["evidence_archive_dir"] = ret_dir
+    if conn_t is not None:
+        safe_cfg["connect_timeout_seconds"] = conn_t
+
+    return safe_cfg, errors, "valid" if not errors else "validation_error"
+
+
+def probe_dir_rw(label: str, raw_path: str, config_dir: Path) -> tuple[str, Path | None, bool, str]:
+    try:
+        candidate = Path(raw_path)
+        target = candidate if candidate.is_absolute() else (config_dir / candidate).resolve()
+        if not target.exists():
+            return STATUS_MISSING, None, False, f"{label} missing: {target}"
+        if not target.is_dir():
+            return STATUS_FAIL, None, False, f"{label} is not a directory: {target}"
+    except (ValueError, OSError) as exc:
+        return STATUS_FAIL, None, False, f"{label} invalid path '{raw_path}': {exc}"
+
     probe = target / f".readiness_probe_{os.getpid()}"
     try:
         probe.write_text("ok", encoding="utf-8")
         _ = probe.read_text(encoding="utf-8")
-        probe.unlink()
         return STATUS_PASS, target, True, f"{label} is readable and writable: {target}"
     except OSError as exc:
         return STATUS_FAIL, target, False, f"{label} permission error: {exc}"
+    finally:
+        try:
+            if probe.exists():
+                probe.unlink()
+        except OSError:
+            pass
 
 
 def check_port_free(host: str, port: int) -> bool:
@@ -118,6 +275,17 @@ def check_port_free(host: str, port: int) -> bool:
     try:
         bind_host = "0.0.0.0" if host in ("0.0.0.0", "") else host
         sock.bind((bind_host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def check_ip_assigned(ip_addr: str) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((ip_addr, 0))
         return True
     except OSError:
         return False
@@ -159,9 +327,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # 2. Python runtime
+    # 2. Python runtime (>= 3.10 standardized across MalBox)
     py_ver = platform.python_version()
-    py_ok = sys.version_info >= (3, 9)
+    py_ok = sys.version_info >= MIN_PYTHON
     checks.append(
         make_check(
             name="python_runtime",
@@ -174,27 +342,43 @@ def main(argv: list[str] | None = None) -> int:
             runtime_verified=py_ok,
             feature_verified=py_ok,
             diagnostic_message=f"Python {py_ver} ({platform.machine()})",
-            recommended_action="" if py_ok else "Install Python 3.9+ and recreate .venv.",
+            recommended_action="" if py_ok else "Install Python 3.10+ and recreate .venv.",
         )
     )
 
     # 3. Virtual environment
+    venv_py_ok = False
     if venv_python.is_file():
-        v_probe = run_bounded([str(venv_python), "--version"], timeout=10.0)
-        v_ok = v_probe["returncode"] == 0
+        v_probe = run_bounded(
+            [
+                str(venv_python),
+                "-c",
+                "import platform, sys; print(platform.python_version()); sys.exit(0 if sys.version_info >= (3, 10) else 3)",
+            ],
+            timeout=10.0,
+        )
+        v_ver = v_probe["stdout"].splitlines()[0].strip() if v_probe["stdout"] else None
+        venv_py_ok = v_probe["returncode"] == 0
+        if v_probe["returncode"] == 3:
+            diag = f".venv Python {v_ver} is below required minimum 3.10."
+        elif venv_py_ok:
+            diag = f"Virtual environment Python {v_ver} executes cleanly."
+        else:
+            v_err_detail = v_probe["stderr"] or v_probe["error"] or f"exit {v_probe['returncode']}"
+            diag = f"venv probe failed: {v_err_detail}"
         checks.append(
             make_check(
                 name="python_venv",
                 category="runtime",
                 required=True,
-                status=STATUS_PASS if v_ok else STATUS_FAIL,
-                detected_version=v_probe["stdout"] or None,
+                status=STATUS_PASS if venv_py_ok else STATUS_FAIL,
+                detected_version=v_ver,
                 configured_path=str(venv_dir),
                 resolved_path=str(venv_python),
                 installed=True,
-                runtime_verified=v_ok,
-                diagnostic_message="Virtual environment Python executes cleanly." if v_ok else f"venv probe failed: {v_probe['stderr'] or v_probe['error']}",
-                recommended_action="" if v_ok else "Run bash setup.sh to recreate .venv.",
+                runtime_verified=venv_py_ok,
+                diagnostic_message=diag,
+                recommended_action="" if venv_py_ok else "Run bash setup.sh to recreate .venv with Python 3.10+.",
             )
         )
     else:
@@ -243,16 +427,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    # 5. Flask & Requests versions + pip check (explicitly inspect .venv)
+    # 5. Flask & Requests versions + pip check
     pkg_versions: dict[str, str] = {}
     pip_check_ok = False
     pip_check_msg = ""
-    if venv_python.is_file():
+    if venv_py_ok:
         pkg_probe = run_bounded(
             [
                 str(venv_python),
                 "-c",
-                "import json, importlib.metadata as m; print(json.dumps({'flask': m.version('Flask'), 'requests': m.version('requests')}))",
+                "import flask, requests, json, importlib.metadata as m; print(json.dumps({'flask': m.version('Flask'), 'requests': m.version('requests')}))",
             ],
             timeout=10.0,
         )
@@ -265,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
         pip_check_ok = pc["returncode"] == 0
         pip_check_msg = pc["stdout"] or pc["stderr"] or pc["error"] or ""
     else:
-        pip_check_msg = ".venv missing"
+        pip_check_msg = ".venv missing or unsupported Python version"
 
     pkgs_installed = "flask" in pkg_versions and "requests" in pkg_versions
     pkgs_ok = pkgs_installed and pip_check_ok
@@ -289,47 +473,21 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # 6. config.json
-    cfg: dict[str, Any] = {}
-    cfg_errors: list[str] = []
-    if not config_path.is_file():
-        cfg_errors.append(f"Missing {config_path}")
-    else:
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8-sig"))
-            for key in (
-                "listen_host",
-                "listen_port",
-                "sandbox_host",
-                "sandbox_port",
-                "temp_dir",
-                "evidence_archive_dir",
-                "retain_evidence_archives",
-            ):
-                if key not in cfg:
-                    cfg_errors.append(f"Missing key '{key}'")
-            lport = int(cfg.get("listen_port", 0))
-            sport = int(cfg.get("sandbox_port", 0))
-            if not (1 <= lport <= 65535):
-                cfg_errors.append(f"Invalid listen_port: {lport}")
-            if not (1 <= sport <= 65535):
-                cfg_errors.append(f"Invalid sandbox_port: {sport}")
-        except (ValueError, TypeError) as exc:
-            cfg_errors.append(f"Invalid config.json: {exc}")
-
+    # 6. Strict, crash-safe config.json validation
+    cfg, cfg_errors, cfg_state = load_and_validate_config(config_path)
     checks.append(
         make_check(
             name="config_json",
             category="config",
             required=True,
-            status=STATUS_PASS if not cfg_errors else STATUS_FAIL,
+            status=STATUS_PASS if not cfg_errors else (STATUS_MISSING if cfg_state == "missing" else STATUS_FAIL),
             configured_path=str(config_path),
             resolved_path=str(config_path) if config_path.is_file() else None,
             installed=config_path.is_file(),
             runtime_verified=not cfg_errors,
             feature_verified=not cfg_errors,
             diagnostic_message=(
-                f"Listen {cfg.get('listen_host')}:{cfg.get('listen_port')} -> Sandbox {cfg.get('sandbox_host')}:{cfg.get('sandbox_port')}"
+                f"Listen {cfg['listen_host']}:{cfg['listen_port']} -> Sandbox {cfg['sandbox_host']}:{cfg['sandbox_port']}"
                 if not cfg_errors
                 else "; ".join(cfg_errors)
             ),
@@ -338,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # 7 & 8. Temporary and retained evidence directories
-    raw_tmp = str(cfg.get("temp_dir", "./tmp"))
+    raw_tmp = str(cfg["temp_dir"])
     tmp_st, tmp_path, tmp_ok, tmp_msg = probe_dir_rw("Temp directory", raw_tmp, config_path.parent)
     checks.append(
         make_check(
@@ -347,16 +505,16 @@ def main(argv: list[str] | None = None) -> int:
             required=True,
             status=tmp_st,
             configured_path=raw_tmp,
-            resolved_path=str(tmp_path) if tmp_path.exists() else None,
-            installed=tmp_path.is_dir(),
+            resolved_path=str(tmp_path) if tmp_path else None,
+            installed=bool(tmp_path),
             runtime_verified=tmp_ok,
             feature_verified=tmp_ok,
             diagnostic_message=tmp_msg,
-            recommended_action="" if tmp_ok else "Run bash setup.sh or fix directory permissions.",
+            recommended_action="" if tmp_ok else "Run bash setup.sh or fix directory permissions/path.",
         )
     )
 
-    raw_ret = str(cfg.get("evidence_archive_dir", "./retained_evidence"))
+    raw_ret = str(cfg["evidence_archive_dir"])
     ret_st, ret_path, ret_ok, ret_msg = probe_dir_rw("Retained evidence directory", raw_ret, config_path.parent)
     checks.append(
         make_check(
@@ -365,37 +523,48 @@ def main(argv: list[str] | None = None) -> int:
             required=True,
             status=ret_st,
             configured_path=raw_ret,
-            resolved_path=str(ret_path) if ret_path.exists() else None,
-            installed=ret_path.is_dir(),
+            resolved_path=str(ret_path) if ret_path else None,
+            installed=bool(ret_path),
             runtime_verified=ret_ok,
             feature_verified=ret_ok,
             diagnostic_message=ret_msg,
-            recommended_action="" if ret_ok else "Run bash setup.sh or fix directory permissions.",
+            recommended_action="" if ret_ok else "Run bash setup.sh or fix directory permissions/path.",
         )
     )
 
     # 9. Disk space
-    disk_target = ret_path if ret_path.exists() else BASE_DIR
-    free_mb = shutil.disk_usage(disk_target).free // (1024 * 1024)
-    disk_ok = free_mb >= 1024
+    disk_target = ret_path if ret_path else BASE_DIR
+    try:
+        free_mb = shutil.disk_usage(disk_target).free // (1024 * 1024)
+        disk_ok = free_mb >= 1024
+        disk_status = STATUS_PASS if disk_ok else STATUS_FAIL
+        disk_ver = f"{free_mb} MB free"
+        disk_msg = f"{free_mb} MB free disk space on gateway partition."
+    except OSError as exc:
+        disk_ok = False
+        disk_status = STATUS_FAIL
+        disk_ver = None
+        disk_msg = f"Failed checking disk space on {disk_target}: {exc}"
+
     checks.append(
         make_check(
             name="disk_space",
             category="filesystem",
             required=True,
-            status=STATUS_PASS if disk_ok else STATUS_FAIL,
-            detected_version=f"{free_mb} MB free",
+            status=disk_status,
+            detected_version=disk_ver,
             resolved_path=str(disk_target),
             installed=True,
-            runtime_verified=True,
+            runtime_verified=disk_ver is not None,
             feature_verified=disk_ok,
-            diagnostic_message=f"{free_mb} MB free disk space on gateway partition.",
+            diagnostic_message=disk_msg,
             recommended_action="" if disk_ok else "Free at least 1024 MB for relaying/retaining evidence archives.",
         )
     )
 
     # 10. Linux IP forwarding safety check (never modify network config!)
     ip_fwd_path = Path("/proc/sys/net/ipv4/ip_forward")
+    fwd_off = True
     if ip_fwd_path.is_file():
         val = ip_fwd_path.read_text(encoding="utf-8", errors="replace").strip()
         fwd_off = val == "0"
@@ -425,26 +594,43 @@ def main(argv: list[str] | None = None) -> int:
             with urllib.request.urlopen(req, timeout=timeout_val) as resp:
                 raw = resp.read().decode("utf-8-sig", errors="replace")
                 try:
-                    return resp.status, json.loads(raw), None
+                    data = json.loads(raw)
+                    return resp.status, data if isinstance(data, dict) else {}, None if isinstance(data, dict) else "JSON root not object"
                 except ValueError:
                     return resp.status, {}, "non-JSON response"
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8-sig", errors="replace") if exc.fp else ""
             try:
-                return exc.code, json.loads(raw), None
+                data = json.loads(raw)
+                return exc.code, data if isinstance(data, dict) else {}, None
             except ValueError:
                 return exc.code, {}, f"HTTP {exc.code}"
         except (urllib.error.URLError, OSError) as exc:
             return 0, {}, str(exc)
 
-    # 11. Local Gateway port & service check
-    listen_host = str(cfg.get("listen_host", "0.0.0.0"))
-    listen_port = int(cfg.get("listen_port", 8000))
-    gw_service_status = STATUS_PENDING
+    # 11. Local Gateway port, bind address & service check
+    listen_host = str(cfg["listen_host"])
+    listen_port = int(cfg["listen_port"])
+    loopback_only = listen_host in ("127.0.0.1", "localhost", "::1")
     probe_host = "127.0.0.1" if listen_host in ("0.0.0.0", "") else listen_host
     g_code, g_body, g_err = _http_get_json(f"http://{probe_host}:{listen_port}/health", 2.0)
 
-    if g_code == 200 and g_body.get("service") == "malbox-gateway":
+    if loopback_only:
+        local_service_state = "LOOPBACK_ONLY_MISCONFIGURED"
+        gw_service_status = STATUS_FAIL
+        checks.append(
+            make_check(
+                name="gateway_listen_service",
+                category="peer",
+                required=False,
+                status=STATUS_FAIL,
+                configured_path=f"{listen_host}:{listen_port}",
+                diagnostic_message=f"listen_host is '{listen_host}'; Machine 1 Client cannot reach loopback-only Gateway.",
+                recommended_action="Set listen_host to '0.0.0.0' or '10.10.10.20' in machine2-gateway/config.json.",
+            )
+        )
+    elif g_code == 200 and g_body.get("service") == "malbox-gateway":
+        local_service_state = "RUNNING"
         gw_service_status = STATUS_PASS
         checks.append(
             make_check(
@@ -455,11 +641,11 @@ def main(argv: list[str] | None = None) -> int:
                 configured_path=f"{listen_host}:{listen_port}",
                 resolved_path=f"http://{probe_host}:{listen_port}/health",
                 runtime_verified=True,
-                feature_verified=True,
-                diagnostic_message="MalBox Gateway service is running and responded with valid identity.",
+                diagnostic_message="Local MalBox Gateway HTTP /health responded cleanly (local service check only).",
             )
         )
     elif g_code > 0:
+        local_service_state = "PORT_CONFLICT"
         gw_service_status = STATUS_FAIL
         checks.append(
             make_check(
@@ -473,6 +659,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     elif check_port_free(listen_host, listen_port):
+        local_service_state = "NOT_STARTED"
         gw_service_status = STATUS_PENDING
         checks.append(
             make_check(
@@ -486,6 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     else:
+        local_service_state = "PORT_CONFLICT"
         gw_service_status = STATUS_FAIL
         checks.append(
             make_check(
@@ -499,13 +687,36 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    # Advisory dual-NIC IP checks (Internal Net 1 & Net 2)
+    sb_host = str(cfg["sandbox_host"])
+    net1_ok = True
+    net2_ok = True
+    if listen_host in ("0.0.0.0", "10.10.10.20") and sb_host == "10.10.20.30":
+        net1_ok = check_ip_assigned("10.10.10.20")
+        net2_ok = check_ip_assigned("10.10.20.20")
+        checks.append(
+            make_check(
+                name="internal_network_ips",
+                category="peer",
+                required=False,
+                status=STATUS_PASS if (net1_ok and net2_ok) else STATUS_PENDING,
+                detected_version=f"net1(10.10.10.20)={net1_ok}, net2(10.10.20.20)={net2_ok}",
+                diagnostic_message=(
+                    "Both Internal Net 1 (10.10.10.20) and Net 2 (10.10.20.20) static IPs are assigned."
+                    if (net1_ok and net2_ok)
+                    else f"Gateway static NIC IPs incomplete (net1_10_10_10_20={net1_ok}, net2_10_10_20_20={net2_ok})."
+                ),
+                recommended_action="" if (net1_ok and net2_ok) else "Manually configure Internal Net 1 and Net 2 static IPs (see docs/network-setup.md).",
+            )
+        )
+
     # 12. Sandbox peer status check
-    sb_host = str(cfg.get("sandbox_host", "10.10.20.30"))
-    sb_port = int(cfg.get("sandbox_port", 8001))
+    sb_port = int(cfg["sandbox_port"])
     sb_url = f"http://{sb_host}:{sb_port}"
-    timeout_s = float(cfg.get("connect_timeout_seconds", 5))
+    timeout_s = float(cfg["connect_timeout_seconds"])
     sb_code, sb_data, sb_err = _http_get_json(f"{sb_url}/status", timeout_s)
     sb_state = str(sb_data.get("state", "")).upper()
+    sandbox_app_state = "UNREACHABLE"
 
     if sb_code == 0:
         sb_peer_status = STATUS_PENDING
@@ -522,17 +733,21 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif sb_code == 200 and sb_state in ("READY", "ANALYZING", "RETURNING_EVIDENCE", "RESTORE_REQUIRED"):
         sb_peer_status = STATUS_PASS
+        sandbox_app_state = sb_state
         checks.append(
             make_check(
                 name="sandbox_peer_status",
                 category="peer",
                 required=False,
                 status=STATUS_PASS,
+                detected_version=f"sandbox_state={sb_state}",
                 configured_path=f"{sb_url}/status",
                 resolved_path=sb_url,
                 runtime_verified=True,
-                feature_verified=True,
-                diagnostic_message=f"Sandbox responded with valid state '{sb_state}'.",
+                diagnostic_message=(
+                    f"Gateway reached Sandbox HTTP /status (application state: {sb_state}; "
+                    "Client inbound connectivity must be verified from Machine 1)."
+                ),
                 recommended_action=(
                     "Restore Windows 11 CLEAN snapshot on Machine 3."
                     if sb_state == "RESTORE_REQUIRED"
@@ -542,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         sb_peer_status = STATUS_FAIL
+        sandbox_app_state = "INVALID_ENDPOINT"
         checks.append(
             make_check(
                 name="sandbox_peer_status",
@@ -554,24 +770,35 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    # Overall readiness
+    # Separated Readiness Semantics
     required_bad = [c for c in checks if c["required"] and c["status"] in (STATUS_FAIL, STATUS_MISSING)]
     if required_bad:
         local_readiness = "NOT_READY"
     elif any(
-        not c["required"] and c["category"] != "peer" and c["status"] in (STATUS_FAIL, STATUS_MISSING, STATUS_OPTIONAL)
+        not c["required"] and c["category"] != "peer" and c["status"] in (STATUS_FAIL, STATUS_MISSING, STATUS_OPTIONAL, STATUS_PENDING)
         for c in checks
     ):
         local_readiness = "LIMITED"
     else:
         local_readiness = "READY"
 
-    if gw_service_status == STATUS_FAIL or sb_peer_status == STATUS_FAIL:
+    if gw_service_status == STATUS_FAIL or sb_peer_status == STATUS_FAIL or not fwd_off:
+        peer_connectivity = "PEER_OR_ISOLATION_ERROR"
         network_readiness = "NOT_READY"
-    elif gw_service_status == STATUS_PASS and sb_peer_status == STATUS_PASS:
-        network_readiness = "READY"
-    else:
+    elif sb_peer_status == STATUS_PASS and gw_service_status == STATUS_PASS and net1_ok and net2_ok:
+        peer_connectivity = "SANDBOX_HTTP_REACHABLE_CLIENT_INBOUND_UNVERIFIED"
+        if sandbox_app_state == "READY":
+            network_readiness = "PARTIAL_PEER_VERIFIED"
+        else:
+            network_readiness = "PEER_REACHABLE_SANDBOX_NOT_READY"
+    elif sb_peer_status == STATUS_PASS:
+        peer_connectivity = "SANDBOX_HTTP_REACHABLE_CLIENT_INBOUND_UNVERIFIED"
         network_readiness = "PENDING"
+    else:
+        peer_connectivity = "SANDBOX_UNREACHABLE_CLIENT_INBOUND_UNVERIFIED"
+        network_readiness = "PENDING"
+
+    snapshot_state = "NOT_APPLICABLE"
 
     missing_required = [c["name"] for c in checks if c["required"] and c["status"] in (STATUS_MISSING, STATUS_FAIL)]
     missing_optional = [c["name"] for c in checks if not c["required"] and c["status"] in (STATUS_MISSING, STATUS_OPTIONAL)]
@@ -580,13 +807,17 @@ def main(argv: list[str] | None = None) -> int:
             manual_actions.append(f"[{c['name']}] {c['recommended_action']}")
 
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "machine": "machine2-gateway",
         "mode": args.mode,
         "generated_at": utc_now_iso(),
         "local_readiness": local_readiness,
+        "local_service_state": local_service_state,
         "network_readiness": network_readiness,
-        "snapshot_state": "NOT_APPLICABLE",
+        "peer_connectivity": peer_connectivity,
+        "application_state": sandbox_app_state,
+        "snapshot_state": snapshot_state,
+        "config_validation_state": cfg_state,
         "environment": {
             "os": os_ver,
             "python_version": py_ver,
@@ -601,8 +832,6 @@ def main(argv: list[str] | None = None) -> int:
         "manual_actions_required": list(dict.fromkeys(manual_actions)),
     }
 
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
     print("")
     print("=== MalBox Machine 2 Readiness Report ===")
     for c in checks:
@@ -611,15 +840,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [{c['status']:<8}] [{req_tag}] {c['name']:<30}{ver} - {c['diagnostic_message']}")
 
     print("")
-    print(f"LOCAL_READINESS   : {local_readiness}")
-    print(f"NETWORK_READINESS : {network_readiness}")
-    print(f"REPORT_SAVED      : {report_path}")
+    print(f"LOCAL_READINESS     : {local_readiness}")
+    print(f"LOCAL_SERVICE_STATE : {local_service_state}")
+    print(f"NETWORK_READINESS   : {network_readiness}")
+    print(f"PEER_CONNECTIVITY   : {peer_connectivity}")
+    print(f"APPLICATION_STATE   : {sandbox_app_state} (downstream Sandbox reported state)")
+    print(f"SNAPSHOT_STATE      : {snapshot_state}")
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"REPORT_SAVED        : {report_path}")
+    except OSError as exc:
+        print(f"[ERROR] Failed writing report {report_path}: {exc}", file=sys.stderr)
+        return 1
+
     if report["manual_actions_required"]:
         print("\nNext Actions:")
         for act in report["manual_actions_required"]:
             print(f"  - {act}")
 
-    if args.mode == "check-only" and local_readiness == "NOT_READY":
+    if local_readiness == "NOT_READY":
         return 1
     return 0
 
