@@ -44,4 +44,9 @@
 
 ## 10. `JSONDecodeError: Unexpected UTF-8 BOM` on Windows
 - `install.ps1` writes UTF-8 files without BOM on both Windows PowerShell 5.1 and PowerShell 7+.
-- `doctor.py`, `gateway.py`, `sandbox.py`, `analyzer.py`, and `mcp/tools.py` all read JSON with `utf-8-sig`, so manual edits saved with BOM in Windows editors are tolerated safely.
+- `doctor.py`, `gateway.py`, `sandbox.py`, `analyzer.py`, `readiness.py`, and `mcp/tools.py` all read JSON with `utf-8-sig`, so manual edits saved with BOM in Windows editors are tolerated safely.
+
+## 11. `LOCAL_READINESS` Shows `NOT_READY` or `LIMITED`
+- Inspect `setup_report.json` in the corresponding `machine*` directory (`missing_required_tools`, `missing_optional_tools`, `manual_actions_required`).
+- `NOT_READY` means a mandatory dependency failed or is missing (or `.dirty_state` requires restoring the `CLEAN` snapshot).
+- `LIMITED` means all mandatory checks passed, while optional tools (`Procmon64`, `ProcDump64`, `WinPmem`, `Volatility 3`, `YARA CLI`, or `GhidraMCP`) are absent or unverified. See [setup-and-readiness.md](setup-and-readiness.md).

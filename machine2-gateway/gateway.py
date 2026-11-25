@@ -159,6 +159,16 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
             return 503, {"error": str(exc), "state": "UNAVAILABLE"}
 
     def monitor_and_fetch_evidence(job_id: str) -> None:
+        try:
+            _monitor_and_fetch_evidence_inner(job_id)
+        except Exception as exc:
+            logger.error("[ERROR] Unhandled Gateway relay error on job %s: %s", job_id, exc)
+            with state.lock:
+                if state.active_job and state.active_job.get("job_id") == job_id:
+                    state.active_job["status"] = "FAILED"
+                    state.active_job["error"] = f"Gateway relay error: {exc}"
+
+    def _monitor_and_fetch_evidence_inner(job_id: str) -> None:
         deadline = time.monotonic() + state.analysis_timeout
         consecutive_errors = 0
         max_consecutive_errors = 5
@@ -235,11 +245,20 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     tmp_download_path.replace(zip_path)
 
                     # Acknowledge transfer so Sandbox moves to RESTORE_REQUIRED.
+                    sandbox_ack_ok = False
                     try:
-                        requests.post(
+                        ack_resp = requests.post(
                             f"{state.sandbox_base_url}/jobs/{job_id}/ack",
                             timeout=(state.connect_timeout, state.request_timeout),
                         )
+                        if ack_resp.status_code == 200:
+                            sandbox_ack_ok = True
+                        else:
+                            logger.warning(
+                                "[WARN] Sandbox ack returned HTTP %s: %s",
+                                ack_resp.status_code,
+                                ack_resp.text.strip(),
+                            )
                     except requests.RequestException as ack_exc:
                         logger.warning("[WARN] Failed to ack evidence receipt to sandbox: %s", ack_exc)
 
@@ -250,6 +269,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             state.active_job["evidence_ready"] = True
                             state.active_job["zip_path"] = zip_path
                             state.active_job["archive_sha256"] = actual_sha256
+                            state.active_job["sandbox_ack_confirmed"] = sandbox_ack_ok
                     return
                 except (requests.RequestException, OSError, RuntimeError, ValueError) as exc:
                     safe_unlink(tmp_download_path)

@@ -143,18 +143,27 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                 if controller.current_job and controller.current_job.get("job_id") == job_id:
                     controller.current_job["stage"] = stage
 
-        result = run_analysis(
-            job_id=job_id,
-            sample_path=sample_path,
-            sample_sha256=sample_sha256,
-            config=controller.config,
-            base_dir=controller.config_dir,
-            workspace_dir=job_workspace,
-            evidence_dir=job_evidence,
-            approval_prompt_fn=controller.prompt_local_approval,
-            stage_callback=update_stage,
-            terminal_logger=logger,
-        )
+        try:
+            result = run_analysis(
+                job_id=job_id,
+                sample_path=sample_path,
+                sample_sha256=sample_sha256,
+                config=controller.config,
+                base_dir=controller.config_dir,
+                workspace_dir=job_workspace,
+                evidence_dir=job_evidence,
+                approval_prompt_fn=controller.prompt_local_approval,
+                stage_callback=update_stage,
+                terminal_logger=logger,
+            )
+        except Exception as exc:
+            logger.error("[ERROR] Unhandled worker exception on job %s: %s", job_id, exc)
+            result = {
+                "job_status": "failed",
+                "zip_path": None,
+                "archive_sha256": "",
+                "error": f"Unhandled worker error: {exc}",
+            }
 
         zip_path = result.get("zip_path")
         evidence_ready = bool(zip_path and Path(zip_path).is_file())
@@ -223,18 +232,39 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     409,
                 )
 
-            free_mb = shutil.disk_usage(controller.workspace_root).free // (1024 * 1024)
-            if free_mb < min_free_disk_mb:
-                logger.error("[ERROR] Insufficient disk space (%d MB free < %d MB required).", free_mb, min_free_disk_mb)
-                return (
-                    jsonify(
-                        {
-                            "error_code": "INSUFFICIENT_DISK_SPACE",
-                            "error": f"Only {free_mb} MB free; at least {min_free_disk_mb} MB required.",
-                        }
-                    ),
-                    507,
-                )
+            for label, target_dir in (("workspace", controller.workspace_root), ("evidence", controller.evidence_root)):
+                free_mb = shutil.disk_usage(target_dir).free // (1024 * 1024)
+                if free_mb < min_free_disk_mb:
+                    logger.error(
+                        "[ERROR] Insufficient disk space on %s (%d MB free < %d MB required).",
+                        label,
+                        free_mb,
+                        min_free_disk_mb,
+                    )
+                    return (
+                        jsonify(
+                            {
+                                "error_code": "INSUFFICIENT_DISK_SPACE",
+                                "error": f"Only {free_mb} MB free on {label}; at least {min_free_disk_mb} MB required.",
+                            }
+                        ),
+                        507,
+                    )
+                probe_file = target_dir / f".write_probe_{os.getpid()}"
+                try:
+                    probe_file.write_text("ok", encoding="utf-8")
+                    probe_file.unlink()
+                except OSError as exc:
+                    logger.error("[ERROR] %s directory is not writable (%s): %s", label, target_dir, exc)
+                    return (
+                        jsonify(
+                            {
+                                "error_code": "DIRECTORY_NOT_WRITABLE",
+                                "error": f"{label} directory is not writable: {exc}",
+                            }
+                        ),
+                        500,
+                    )
 
             # Reserve sandbox immediately before reading sample stream.
             controller.state = STATE_ANALYZING

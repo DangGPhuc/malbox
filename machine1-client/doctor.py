@@ -342,10 +342,16 @@ def download_evidence(
                 zip_path.unlink()
 
         try:
-            requests.post(
+            ack_resp = requests.post(
                 f"{base_url}/jobs/{job_id}/ack",
                 timeout=(connect_timeout, request_timeout),
             )
+            if ack_resp.status_code != 200:
+                logger.warning(
+                    "[WARN] Gateway receipt ack returned HTTP %s: %s",
+                    ack_resp.status_code,
+                    format_gateway_error(ack_resp),
+                )
         except requests.RequestException as ack_exc:
             logger.warning("[WARN] Could not send receipt ack to gateway: %s", ack_exc)
 

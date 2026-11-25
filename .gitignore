@@ -26,6 +26,10 @@ workspace/
 logs/
 **/logs/
 .dirty_state
+setup_report.json
+**/setup_report.json
+.readiness_probe_*
+**/.readiness_probe_*
 
 # Evidence outputs, forensic artifacts, memory dumps, and packet captures
 evidence/

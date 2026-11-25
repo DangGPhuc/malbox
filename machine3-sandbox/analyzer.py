@@ -173,8 +173,12 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **SHA-256:** `{sample.get('sha256')}`",
         f"- **Job Start / End (UTC):** `{manifest.get('analysis_start_time')}` -> `{manifest.get('analysis_end_time')}`",
         f"- **Dynamic Execution Status:** `{manifest.get('dynamic_execution_status')}`",
+        f"- **Dynamic Observation Window (UTC):** `{manifest.get('dynamic_started_at') or 'N/A'}` -> `{manifest.get('dynamic_completed_at') or 'N/A'}`",
         f"- **Configured Observation Duration:** {manifest.get('configured_observation_duration_seconds')}s",
         f"- **Actual Observation Duration:** {manifest.get('actual_observation_duration_seconds')}s",
+        f"- **Process Session Ended (UTC):** `{manifest.get('process_session_ended_at') or 'N/A'}`",
+        f"- **Actual Process Session Duration:** {manifest.get('actual_process_session_duration_seconds')}s",
+        f"- **Evidence Finalized (UTC):** `{manifest.get('evidence_finalized_at') or 'N/A'}`",
         f"- **Final Job Status:** `{manifest.get('final_status')}`",
         "",
         "## 2. Static Findings",
@@ -319,31 +323,6 @@ def run_analysis(
         {"timestamp": start_time_utc, "category": "pipeline", "event": "job_started", "detail": job_id}
     ]
 
-    for sub in (
-        "static",
-        "ghidra/decompiled",
-        "dynamic/process",
-        "dynamic/network",
-        "dynamic/memory/dumps",
-        "dynamic/memory/volatility",
-        "dynamic/filesystem",
-        "dynamic/registry",
-        "dynamic/eventlogs",
-        "raw",
-        "logs",
-    ):
-        (evidence_dir / sub).mkdir(parents=True, exist_ok=True)
-
-    analysis_log, collectors_log, errors_log, log_handlers = _build_job_loggers(
-        evidence_dir / "logs", job_id
-    )
-
-    terminal_logger.info("[SANDBOX] Preparing analysis workspace...")
-    stage_callback("preparing_workspace")
-    analysis_log.info(
-        "Starting job %s for sample %s (SHA-256: %s)", job_id, sample_path.name, sample_sha256
-    )
-
     configured_duration = int(config.get("observation_duration_seconds", 120))
     actual_duration_seconds = 0.0
     obs_start_mono: float | None = None
@@ -351,9 +330,16 @@ def run_analysis(
     dynamic_started_at = ""
     dynamic_completed_at = ""
     evidence_finalized_at = ""
+    process_session_ended_at = ""
+    actual_process_session_duration_seconds = 0.0
 
     collector_results: dict[str, CollectorResult] = {}
     all_limitations: list[str] = []
+
+    analysis_log: logging.Logger | None = None
+    collectors_log: logging.Logger | None = None
+    errors_log: logging.Logger | None = None
+    log_handlers: list[logging.Handler] = []
 
     process_mon: ProcessMonitor | None = None
     network_mon: NetworkMonitor | None = None
@@ -363,6 +349,30 @@ def run_analysis(
     network_stopped = False
 
     try:
+        for sub in (
+            "static",
+            "ghidra/decompiled",
+            "dynamic/process",
+            "dynamic/network",
+            "dynamic/memory/dumps",
+            "dynamic/memory/volatility",
+            "dynamic/filesystem",
+            "dynamic/registry",
+            "dynamic/eventlogs",
+            "raw",
+            "logs",
+        ):
+            (evidence_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        analysis_log, collectors_log, errors_log, log_handlers = _build_job_loggers(
+            evidence_dir / "logs", job_id
+        )
+
+        terminal_logger.info("[SANDBOX] Preparing analysis workspace...")
+        stage_callback("preparing_workspace")
+        analysis_log.info(
+            "Starting job %s for sample %s (SHA-256: %s)", job_id, sample_path.name, sample_sha256
+        )
         # 1. Static analysis + Ghidra Headless
         terminal_logger.info("[SANDBOX] Running static analysis...")
         stage_callback("static_analysis")
@@ -620,6 +630,16 @@ def run_analysis(
         yara_rules = [m.get("rule") for m in yara_doc.get("matches", []) if m.get("rule")]
 
         collector_statuses_short = {k: v["status"] for k, v in collector_status_map.items()}
+        process_session_ended_at = str(
+            proc_doc.get("termination_report", {}).get("process_session_ended_at")
+            or process_mon.process_session_ended_at
+            or ""
+        )
+        actual_process_session_duration_seconds = float(
+            proc_doc.get("termination_report", {}).get("process_session_duration_seconds")
+            or process_mon.process_session_duration_seconds
+            or 0.0
+        )
         evidence_finalized_at = utc_now_iso()
 
         summary_doc = {
@@ -630,9 +650,11 @@ def run_analysis(
                 "analysis_start_time": start_time_utc,
                 "dynamic_started_at": dynamic_started_at or None,
                 "dynamic_completed_at": dynamic_completed_at or None,
+                "process_session_ended_at": process_session_ended_at or None,
                 "evidence_finalized_at": evidence_finalized_at,
                 "configured_observation_duration_seconds": configured_duration,
                 "actual_observation_duration_seconds": actual_duration_seconds,
+                "actual_process_session_duration_seconds": actual_process_session_duration_seconds,
                 "dynamic_execution_status": dynamic_execution_status,
             },
             "sample": {
@@ -772,9 +794,11 @@ def run_analysis(
             "analysis_end_time": end_time_utc,
             "dynamic_started_at": dynamic_started_at or None,
             "dynamic_completed_at": dynamic_completed_at or None,
+            "process_session_ended_at": process_session_ended_at or None,
             "evidence_finalized_at": evidence_finalized_at,
             "configured_observation_duration_seconds": configured_duration,
             "actual_observation_duration_seconds": actual_duration_seconds,
+            "actual_process_session_duration_seconds": actual_process_session_duration_seconds,
             "dynamic_observation_duration_seconds": actual_duration_seconds,
             "dynamic_execution_status": dynamic_execution_status,
             "restore_required": True,
@@ -823,82 +847,97 @@ def run_analysis(
         if dynamic_execution_status == "running":
             dynamic_execution_status = "interrupted"
 
-        errors_log.exception("Fatal pipeline error: %s", exc)
+        if errors_log is not None:
+            errors_log.exception("Fatal pipeline error: %s", exc)
+        else:
+            terminal_logger.error("[ERROR] Fatal pipeline error before logger initialization: %s", exc)
 
         # Clean up any active child processes, dumpcap, and Procmon locks before packaging partial evidence.
         if process_mon is not None and not dynamic_terminated:
             try:
                 process_mon.terminate_tracked_processes()
+                process_session_ended_at = process_mon.process_session_ended_at or utc_now_iso()
+                actual_process_session_duration_seconds = process_mon.process_session_duration_seconds
             except Exception as cleanup_exc:
-                errors_log.error("Process cleanup failed: %s", cleanup_exc)
+                if errors_log is not None:
+                    errors_log.error("Process cleanup failed: %s", cleanup_exc)
         if network_mon is not None and not network_stopped:
             try:
                 network_mon.stop()
             except Exception as cleanup_exc:
-                errors_log.error("Network capture cleanup failed: %s", cleanup_exc)
+                if errors_log is not None:
+                    errors_log.error("Network capture cleanup failed: %s", cleanup_exc)
         if procmon_session is not None:
             try:
                 procmon_session.terminate_only()
             except Exception as cleanup_exc:
-                errors_log.error("Procmon cleanup failed: %s", cleanup_exc)
+                if errors_log is not None:
+                    errors_log.error("Procmon cleanup failed: %s", cleanup_exc)
 
         end_time_utc = utc_now_iso()
         collector_status_map = {k: v.to_dict() for k, v in collector_results.items()}
-        write_json(evidence_dir / "logs" / "tool_status.json", collector_status_map)
 
         _close_job_loggers(job_id, log_handlers)
 
-        failure_manifest = {
-            "job_id": job_id,
-            "sample_filename": sample_path.name,
-            "sample_sha256": sample_sha256,
-            "analysis_start_time": start_time_utc,
-            "analysis_end_time": end_time_utc,
-            "dynamic_started_at": dynamic_started_at or None,
-            "dynamic_completed_at": dynamic_completed_at or None,
-            "evidence_finalized_at": end_time_utc,
-            "configured_observation_duration_seconds": configured_duration,
-            "actual_observation_duration_seconds": actual_duration_seconds,
-            "dynamic_observation_duration_seconds": actual_duration_seconds,
-            "dynamic_execution_status": dynamic_execution_status,
-            "restore_required": True,
-            "windows_version": platform.platform(),
-            "collector_status": {
-                k: {
-                    "status": v["status"],
-                    "errors": v["errors"],
-                    "limitations": v["limitations"],
-                    "artifacts": v["artifacts"],
-                }
-                for k, v in collector_status_map.items()
-            },
-            "analysis_limitations": sorted(set(all_limitations + [f"Fatal error: {exc}"])),
-            "fatal_error": str(exc),
-            "final_status": STATUS_FAILED,
-            "evidence_file_inventory": _build_inventory(evidence_dir),
-        }
-        write_json(evidence_dir / "manifest.json", failure_manifest)
-
-        if not (evidence_dir / "summary.json").is_file():
-            write_json(
-                evidence_dir / "summary.json",
-                {
-                    "job_id": job_id,
-                    "final_status": STATUS_FAILED,
-                    "fatal_error": str(exc),
-                    "collector_statuses": {k: v["status"] for k, v in collector_status_map.items()},
+        try:
+            write_json(evidence_dir / "logs" / "tool_status.json", collector_status_map)
+            failure_manifest = {
+                "job_id": job_id,
+                "sample_filename": sample_path.name,
+                "sample_sha256": sample_sha256,
+                "analysis_start_time": start_time_utc,
+                "analysis_end_time": end_time_utc,
+                "dynamic_started_at": dynamic_started_at or None,
+                "dynamic_completed_at": dynamic_completed_at or None,
+                "process_session_ended_at": process_session_ended_at or None,
+                "evidence_finalized_at": end_time_utc,
+                "configured_observation_duration_seconds": configured_duration,
+                "actual_observation_duration_seconds": actual_duration_seconds,
+                "actual_process_session_duration_seconds": actual_process_session_duration_seconds,
+                "dynamic_observation_duration_seconds": actual_duration_seconds,
+                "dynamic_execution_status": dynamic_execution_status,
+                "restore_required": True,
+                "windows_version": platform.platform(),
+                "collector_status": {
+                    k: {
+                        "status": v["status"],
+                        "errors": v["errors"],
+                        "limitations": v["limitations"],
+                        "artifacts": v["artifacts"],
+                    }
+                    for k, v in collector_status_map.items()
                 },
-            )
-        if not (evidence_dir / "report.md").is_file():
-            (evidence_dir / "report.md").write_text(
-                f"# MalBox Analysis Report — `{job_id}` (FAILED)\n\n"
-                f"- **Fatal Error:** {exc}\n"
-                "- **Snapshot Status:** Restore the `CLEAN` snapshot before running another analysis.\n",
-                encoding="utf-8",
-            )
+                "analysis_limitations": sorted(set(all_limitations + [f"Fatal error: {exc}"])),
+                "fatal_error": str(exc),
+                "final_status": STATUS_FAILED,
+                "evidence_file_inventory": _build_inventory(evidence_dir),
+            }
+            write_json(evidence_dir / "manifest.json", failure_manifest)
+
+            if not (evidence_dir / "summary.json").is_file():
+                write_json(
+                    evidence_dir / "summary.json",
+                    {
+                        "job_id": job_id,
+                        "final_status": STATUS_FAILED,
+                        "fatal_error": str(exc),
+                        "collector_statuses": {k: v["status"] for k, v in collector_status_map.items()},
+                    },
+                )
+            if not (evidence_dir / "report.md").is_file():
+                (evidence_dir / "report.md").write_text(
+                    f"# MalBox Analysis Report — `{job_id}` (FAILED)\n\n"
+                    f"- **Fatal Error:** {exc}\n"
+                    "- **Snapshot Status:** Restore the `CLEAN` snapshot before running another analysis.\n",
+                    encoding="utf-8",
+                )
+        except OSError as io_exc:
+            terminal_logger.error("[ERROR] Could not write failure artifacts to %s: %s", evidence_dir, io_exc)
 
         zip_path = workspace_dir / f"evidence_{job_id}.zip"
         try:
+            if not evidence_dir.exists():
+                raise FileNotFoundError(f"Evidence directory unavailable: {evidence_dir}")
             archive_sha256 = _package_evidence_zip(
                 evidence_dir=evidence_dir, zip_path=zip_path, sample_filename=sample_path.name
             )

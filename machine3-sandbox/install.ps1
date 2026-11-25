@@ -108,8 +108,7 @@ try {
         throw "Virtual environment Python not found at $VenvPython"
     }
 
-    Write-Host "[INSTALL] Upgrading pip and installing requirements.txt..."
-    Invoke-Checked $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "Upgrade pip"
+    Write-Host "[INSTALL] Installing Python dependencies from requirements.txt (without forcing pip upgrade)..."
     Invoke-Checked $VenvPython @("-m", "pip", "install", "-r", (Join-Path $SandboxDir "requirements.txt")) "Install requirements.txt"
 
     Write-Host "[INSTALL] Verifying core Python imports in .venv..."
@@ -190,48 +189,69 @@ if ((Test-Path $McpExample) -and (-not (Test-Path $McpTarget))) {
     Write-Host "[OK] Generated local MCP config (UTF-8 without BOM): mcp\config.json"
 }
 
-# 5. Auto-discover common tool paths and update config.json WITHOUT UTF-8 BOM
+# 5. Auto-discover common tool paths only when configured path is missing on disk
 $ConfigPath = Join-Path $SandboxDir "config.json"
 $cfgRaw = Read-Utf8Text -Path $ConfigPath
 $cfg = $cfgRaw | ConvertFrom-Json
+$cfgChanged = $false
 
-$GhidraHeadless = Get-ChildItem -Path (Join-Path $SandboxDir "tools") -Filter "analyzeHeadless.bat" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-if ($GhidraHeadless) { $cfg.tools.ghidra_headless = $GhidraHeadless }
+function Resolve-CfgPath([string]$RawPath) {
+    if (-not $RawPath) { return $null }
+    if ([System.IO.Path]::IsPathRooted($RawPath)) { return $RawPath }
+    return (Join-Path $SandboxDir $RawPath)
+}
 
-$SysmonPath = Find-FirstExisting @(
+function Update-ToolIfMissing([string]$ToolKey, [string[]]$Candidates) {
+    $current = [string]$cfg.tools.$ToolKey
+    $resolved = Resolve-CfgPath $current
+    if ($resolved -and (Test-Path $resolved)) {
+        return
+    }
+    $found = Find-FirstExisting $Candidates
+    if ($found -and ($found -ne $current)) {
+        $cfg.tools.$ToolKey = $found
+        $script:cfgChanged = $true
+    }
+}
+
+$ghidraCurrent = Resolve-CfgPath ([string]$cfg.tools.ghidra_headless)
+if (-not ($ghidraCurrent -and (Test-Path $ghidraCurrent))) {
+    $GhidraHeadless = Get-ChildItem -Path (Join-Path $SandboxDir "tools") -Filter "analyzeHeadless.bat" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+    if ($GhidraHeadless -and ($GhidraHeadless -ne [string]$cfg.tools.ghidra_headless)) {
+        $cfg.tools.ghidra_headless = $GhidraHeadless
+        $cfgChanged = $true
+    }
+}
+
+Update-ToolIfMissing "sysmon" @(
     "C:\Windows\Sysmon64.exe",
     "C:\Windows\Sysmon.exe",
     (Join-Path $SandboxDir "tools\sysinternals\Sysmon64.exe")
 )
-if ($SysmonPath) { $cfg.tools.sysmon = $SysmonPath }
-
-$ProcmonPath = Find-FirstExisting @(
+Update-ToolIfMissing "procmon" @(
     (Join-Path $SandboxDir "tools\sysinternals\Procmon64.exe"),
     (Join-Path $SandboxDir "tools\sysinternals\Procmon.exe")
 )
-if ($ProcmonPath) { $cfg.tools.procmon = $ProcmonPath }
-
-$ProcdumpPath = Find-FirstExisting @(
+Update-ToolIfMissing "procdump" @(
     (Join-Path $SandboxDir "tools\sysinternals\procdump64.exe"),
     (Join-Path $SandboxDir "tools\sysinternals\procdump.exe")
 )
-if ($ProcdumpPath) { $cfg.tools.procdump = $ProcdumpPath }
-
-$DumpcapPath = Find-FirstExisting @(
+Update-ToolIfMissing "dumpcap" @(
     "C:\Program Files\Wireshark\dumpcap.exe",
     "C:\Program Files (x86)\Wireshark\dumpcap.exe"
 )
-if ($DumpcapPath) { $cfg.tools.dumpcap = $DumpcapPath }
-
-$TsharkPath = Find-FirstExisting @(
+Update-ToolIfMissing "tshark" @(
     "C:\Program Files\Wireshark\tshark.exe",
     "C:\Program Files (x86)\Wireshark\tshark.exe"
 )
-if ($TsharkPath) { $cfg.tools.tshark = $TsharkPath }
 
-$cfgJson = $cfg | ConvertTo-Json -Depth 5
-Write-Utf8NoBom -Path $ConfigPath -Content ($cfgJson + "`n")
-Write-Host "[OK] Updated discovered tool paths in config.json (UTF-8 without BOM)."
+if ($cfgChanged) {
+    $cfgJson = $cfg | ConvertTo-Json -Depth 5
+    Write-Utf8NoBom -Path $ConfigPath -Content ($cfgJson + "`n")
+    Write-Host "[OK] Updated newly discovered tool paths in config.json (UTF-8 without BOM)."
+} else {
+    Write-Host "[OK] Existing tool paths in config.json preserved."
+}
 
 # 6. Dependency Readiness Checklist
 Write-Host "`n=== MalBox Machine 3 Dependency Check ===" -ForegroundColor Cyan

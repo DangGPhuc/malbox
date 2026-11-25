@@ -59,14 +59,18 @@ Clone the repository onto each VM (before disconnecting Internet for lab isolati
 ### Machine 1 — Kali Linux Client
 ```bash
 cd malbox/machine1-client
-bash install.sh
+bash setup.sh
+# Offline readiness re-check after network isolation:
+bash setup.sh --check-only
 doctor /path/to/sample.exe
 ```
 
 ### Machine 2 — REMnux / Kali Gateway
 ```bash
 cd malbox/machine2-gateway
-bash install.sh
+bash setup.sh
+# Offline readiness re-check after network isolation:
+bash setup.sh --check-only
 source .venv/bin/activate
 python gateway.py
 ```
@@ -75,8 +79,9 @@ python gateway.py
 Run PowerShell in `malbox\machine3-sandbox`:
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install.ps1
-# Follow tools-setup.md and snapshot-setup.md to install Sysmon, Wireshark, Ghidra, FLOSS, capa, etc.
+.\setup.ps1 -CloneGitTools
+# Follow docs\tools-setup.md to install Sysmon, Wireshark, Ghidra, FLOSS, capa, etc., then verify:
+.\setup.ps1 -CheckOnly
 .\.venv\Scripts\Activate.ps1
 python sandbox.py
 ```
@@ -103,6 +108,7 @@ python sandbox.py
 
 ## Documentation
 
+- [Setup & Environment Readiness](docs/setup-and-readiness.md)
 - [Architecture](docs/architecture.md)
 - [Network Setup](docs/network-setup.md)
 - [Tools Setup (Windows 11)](docs/tools-setup.md)

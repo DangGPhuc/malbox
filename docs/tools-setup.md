@@ -86,3 +86,17 @@ Download official releases into `machine3-sandbox\tools\` (or default install lo
   1. Cloning `tools\GhidraMCP\` only provides the repository and bridge script (`bridge_mcp_ghidra.py`).
   2. To actually use `GhidraMCP`, you must manually install/build its Ghidra extension inside Ghidra GUI (`File -> Install Extensions...`), open the binary in Ghidra GUI, and start its local HTTP server (`127.0.0.1:8080`) before launching `bridge_mcp_ghidra.py`.
   3. The automated pipeline (`ghidra_analysis.py`) never starts or runtime-verifies `GhidraMCP`, and reports repo clone / extension / dependency / runtime status separately in `manifest.json`.
+
+---
+
+## 4. Installed vs Version-Detected vs Runtime-Verified vs Feature-Verified
+
+MalBox readiness checks (`setup_report.json`) strictly separate verification depth:
+
+1. **Installed (`installed: true`):** Binary, Python package, or cloned repo exists on disk.
+2. **Version detected (`detected_version`):** Executable or package metadata responded with an explicit version or commit ID.
+3. **Runtime verified (`runtime_verified: true`):** Bounded non-destructive command, service query, or protocol handshake succeeded (`java -version`, `sc query Sysmon64`, `dumpcap -D`, MCP `stdio` `initialize` + `tools/list`).
+4. **Feature verified (`feature_verified: true`):** Tool performed a real functional probe on safe fixture data or local logs (`pefile` parsing synthetic header, `yara.compile` matching harmless `MZ` bytes, `wevtutil` reading `Microsoft-Windows-Sysmon/Operational`).
+5. **Not verified:** Present on disk only (e.g., `WinPmem` Windows 11 driver compatibility or `GhidraMCP` when Ghidra GUI is not running).
+
+See [setup-and-readiness.md](setup-and-readiness.md) for the full schema and mandatory vs optional list.

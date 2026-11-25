@@ -4,12 +4,20 @@ The Client runs on **Machine 1 (Kali Linux)** on Internal Network 1 (`10.10.10.1
 
 **Safety Guarantee:** `doctor.py` never executes, imports, or invokes Wine/shell processes on submitted samples. Samples are only read in binary chunks for SHA-256 hashing and HTTP upload.
 
-## Installation (before isolating network)
+## Installation & Readiness Check (before isolating network)
 
 ```bash
 cd machine1-client
-bash install.sh
+bash setup.sh
 ```
+
+After network isolation, verify offline readiness (writes `setup_report.json` without running `pip`):
+
+```bash
+bash setup.sh --check-only
+```
+
+(`setup.sh` reuses `install.sh` automatically when `.venv`, `requests`, or `doctor` is missing.)
 
 If `~/.local/bin` is not yet in your `PATH`, add it or create a `/usr/local/bin/doctor` symlink:
 

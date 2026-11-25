@@ -9,12 +9,20 @@ The Gateway runs on **Machine 2 (REMnux or Kali Linux)** bridging **Internal Net
 - Deletes temporary incoming sample files (`tmp/incoming_*.bin`) immediately after forwarding.
 - Retains returned evidence archives in `retained_evidence/evidence_<job_id>.zip` by default (`retain_evidence_archives: true`) so an archive can still be recovered manually if Client transfer or ZIP extraction fails.
 
-## Installation (before isolating network)
+## Installation & Readiness Check (before isolating network)
 
 ```bash
 cd machine2-gateway
-bash install.sh
+bash setup.sh
 ```
+
+After network isolation, verify offline readiness (writes `setup_report.json` without running `pip`):
+
+```bash
+bash setup.sh --check-only
+```
+
+(`setup.sh` reuses `install.sh` automatically when `.venv` or `Flask`/`requests` is missing.)
 
 ## Starting the Gateway
 

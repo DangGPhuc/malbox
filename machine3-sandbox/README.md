@@ -9,14 +9,20 @@ Machine 3 runs on an isolated **Windows 11 VM** on Internal Network 2 (`10.10.20
 - `RETURNING_EVIDENCE` — Evidence ZIP packaged and awaiting Gateway transfer confirmation.
 - `RESTORE_REQUIRED` — Analysis finished (persisted via `workspace/.dirty_state`). **Restore the CLEAN VM snapshot before starting another analysis.**
 
-## Installation (before isolating VM & taking CLEAN snapshot)
+## Installation & Readiness Check (before isolating VM & taking CLEAN snapshot)
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install.ps1 -CloneGitTools
+.\setup.ps1 -CloneGitTools
 ```
 
-Then complete the manual Windows tool setup (Sysmon driver install, Wireshark/Npcap, Ghidra JDK, FLOSS/capa release binaries) described in [../docs/tools-setup.md](../docs/tools-setup.md).
+Then complete the manual Windows tool setup (Sysmon driver install, Wireshark/Npcap, Ghidra JDK, FLOSS/capa release binaries) described in [../docs/tools-setup.md](../docs/tools-setup.md), and run an offline readiness check before creating the `CLEAN` snapshot:
+
+```powershell
+.\setup.ps1 -CheckOnly
+```
+
+(`setup.ps1` reuses `install.ps1` automatically when `.venv`, Python packages, or `mcp\config.json` are missing, and generates `setup_report.json`.)
 
 ## Starting the Sandbox Server
 

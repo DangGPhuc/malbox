@@ -47,6 +47,13 @@ class ProcessMonitor:
         self.process_records: dict[int, dict[str, Any]] = {}
         self.psutil_events: list[dict[str, Any]] = []
         self.launch_timestamp: str = ""
+        self.launch_monotonic: float | None = None
+        self.sample_exit_time: str | None = None
+        self.sample_exit_code: int | None = None
+        self.last_live_process_mono: float | None = None
+        self.last_process_activity_time: str | None = None
+        self.process_session_ended_at: str | None = None
+        self.process_session_duration_seconds: float = 0.0
         self.termination_report: dict[str, Any] = {}
         self.protected_pids: set[int] = self._collect_protected_pids()
 
@@ -69,6 +76,9 @@ class ProcessMonitor:
         """Launch the sample strictly under the current non-elevated user context."""
         run_dir.mkdir(parents=True, exist_ok=True)
         self.launch_timestamp = utc_now_iso()
+        self.launch_monotonic = time.monotonic()
+        self.last_live_process_mono = self.launch_monotonic
+        self.last_process_activity_time = self.launch_timestamp
 
         creationflags = 0
         if os.name == "nt":
@@ -106,6 +116,12 @@ class ProcessMonitor:
     def poll_once(self) -> None:
         """Sample live tracked processes and newly spawned descendants."""
         now_iso = utc_now_iso()
+        if self.sample_proc is not None and self.sample_exit_time is None:
+            rc = self.sample_proc.poll()
+            if rc is not None:
+                self.sample_exit_code = rc
+                self.sample_exit_time = now_iso
+
         discovered: set[int] = set(self.tracked_pids)
 
         for pid in list(self.tracked_pids):
@@ -205,6 +221,19 @@ class ProcessMonitor:
             except psutil.Error:
                 continue
 
+        if self.launch_monotonic is not None and self.get_live_tracked_pids():
+            self.last_live_process_mono = time.monotonic()
+            self.last_process_activity_time = utc_now_iso()
+        elif (
+            self.launch_monotonic is not None
+            and self.process_session_ended_at is None
+            and self.tracked_pids
+        ):
+            self.process_session_ended_at = utc_now_iso()
+            self.process_session_duration_seconds = round(
+                max(0.0, time.monotonic() - self.launch_monotonic), 2
+            )
+
     def get_live_tracked_pids(self) -> list[int]:
         """Return currently alive PIDs within the tracked job scope."""
         alive: list[int] = []
@@ -267,6 +296,12 @@ class ProcessMonitor:
             if pid in self.process_records and not self.process_records[pid].get("termination_time"):
                 self.process_records[pid]["termination_time"] = now_iso
 
+        if self.launch_monotonic is not None and (terminated or surviving or self.process_session_ended_at is None):
+            self.process_session_ended_at = now_iso
+            self.process_session_duration_seconds = round(
+                max(0.0, time.monotonic() - self.launch_monotonic), 2
+            )
+
         if surviving:
             self.result.limitations.append(
                 f"{len(surviving)} tracked process(es) survived termination; snapshot restore required."
@@ -278,6 +313,10 @@ class ProcessMonitor:
             "already_exited": sorted(already_exited),
             "terminated_by_sandbox": sorted(set(terminated)),
             "surviving_processes": surviving,
+            "root_sample_exit_time": self.sample_exit_time,
+            "root_sample_exit_code": self.sample_exit_code,
+            "process_session_ended_at": self.process_session_ended_at,
+            "process_session_duration_seconds": self.process_session_duration_seconds,
         }
         return self.termination_report
 
