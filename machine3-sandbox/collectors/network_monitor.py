@@ -14,6 +14,7 @@ from collectors.common import (
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_PARTIAL,
+    STATUS_SKIPPED,
     STATUS_UNAVAILABLE,
     CollectorResult,
     resolve_tool_path,
@@ -168,23 +169,38 @@ class NetworkMonitor:
         if not self.capture_proc:
             return
         try:
-            self.capture_proc.terminate()
-            self.capture_proc.wait(timeout=8.0)
+            if self.capture_proc.poll() is None:
+                self.capture_proc.terminate()
+                self.capture_proc.wait(timeout=8.0)
         except subprocess.TimeoutExpired:
             self.capture_proc.kill()
             self.capture_proc.wait(timeout=3.0)
         except OSError as exc:
             self.result.errors.append(f"Error stopping dumpcap: {exc}")
+        finally:
+            self.capture_proc = None
 
     def finalize(
         self,
         evidence_dir: Path,
         sysmon_events: list[dict[str, Any]],
         tracked_pids: set[int],
+        sysmon_available: bool = False,
+        skipped: bool = False,
+        skip_reason: str = "",
     ) -> CollectorResult:
         """Parse PCAPNG with TShark and correlate with Sysmon EID 3/22 and psutil connections."""
         net_dir = evidence_dir / "dynamic" / "network"
         net_dir.mkdir(parents=True, exist_ok=True)
+
+        if skipped:
+            reason = skip_reason or "Dynamic sample execution did not run."
+            write_json(net_dir / "connections.json", {"collected": False, "connection_count": 0, "connections": [], "not_collected_reason": reason})
+            write_json(net_dir / "dns.json", {"collected": False, "dns_query_count": 0, "queries": [], "not_collected_reason": reason})
+            self.result.artifacts.extend(["dynamic/network/connections.json", "dynamic/network/dns.json"])
+            self.result.limitations.append(reason)
+            self.result.summary = {"collected": False, "has_pcapng": False}
+            return self.result.finish(STATUS_SKIPPED)
 
         connections: list[dict[str, Any]] = list(self.psutil_connections)
         dns_queries: list[dict[str, Any]] = []
@@ -243,20 +259,23 @@ class NetworkMonitor:
 
         write_json(
             net_dir / "connections.json",
-            {"connection_count": len(connections), "connections": connections[:5000]},
+            {"collected": True, "connection_count": len(connections), "connections": connections[:5000]},
         )
         write_json(
             net_dir / "dns.json",
-            {"dns_query_count": len(dns_queries), "queries": dns_queries[:5000]},
+            {"collected": True, "dns_query_count": len(dns_queries), "queries": dns_queries[:5000]},
         )
         self.result.artifacts.extend(["dynamic/network/connections.json", "dynamic/network/dns.json"])
+        has_pcapng = bool(self.pcap_path and self.pcap_path.is_file() and self.pcap_path.stat().st_size > 0)
         self.result.summary = {
+            "collected": True,
             "connection_event_count": len(connections),
             "dns_query_count": len(dns_queries),
-            "has_pcapng": bool(self.pcap_path and self.pcap_path.is_file()),
+            "has_pcapng": has_pcapng,
+            "sysmon_available": sysmon_available,
         }
 
-        if not self.dumpcap_bin and not sysmon_events and not self.psutil_connections:
+        if not has_pcapng and not sysmon_available and not self.psutil_connections:
             return self.result.finish(STATUS_UNAVAILABLE)
         if self.result.limitations or self.result.errors:
             return self.result.finish(STATUS_PARTIAL)

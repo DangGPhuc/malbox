@@ -73,11 +73,39 @@ def resolve_tool_path(
     return None
 
 
+def read_json_utf8(path: Path) -> Any:
+    """Read JSON safely, tolerating UTF-8 BOM from Windows PowerShell 5.1 or editors."""
+    with path.open("r", encoding="utf-8-sig") as fh:
+        return json.load(fh)
+
+
 def write_json(path: Path, data: Any) -> None:
-    """Write JSON data cleanly with UTF-8 encoding."""
+    """Write JSON data cleanly with UTF-8 encoding (without BOM)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, default=str)
+
+
+def compute_file_entropy(path: Path, chunk_size: int = 65536) -> float:
+    """Calculate file Shannon entropy streaming in chunks (O(1) memory)."""
+    counts = [0] * 256
+    total = 0
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+            for byte in chunk:
+                counts[byte] += 1
+    if total == 0:
+        return 0.0
+    entropy = 0.0
+    for count in counts:
+        if count:
+            prob = count / total
+            entropy -= prob * math.log2(prob)
+    return round(entropy, 4)
 
 
 def compute_file_hashes(path: Path, chunk_size: int = 65536) -> dict[str, Any]:

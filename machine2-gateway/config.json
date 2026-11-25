@@ -4,6 +4,8 @@
   "sandbox_host": "10.10.20.30",
   "sandbox_port": 8001,
   "temp_dir": "./tmp",
+  "evidence_archive_dir": "./retained_evidence",
+  "retain_evidence_archives": true,
   "connect_timeout_seconds": 5,
   "request_timeout_seconds": 30,
   "poll_interval_seconds": 3,

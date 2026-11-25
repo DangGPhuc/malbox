@@ -14,6 +14,7 @@ from collectors.common import (
     EXECUTABLE_EXTENSIONS,
     STATUS_COMPLETED,
     STATUS_PARTIAL,
+    STATUS_SKIPPED,
     STATUS_UNAVAILABLE,
     CollectorResult,
     compute_file_hashes,
@@ -46,6 +47,7 @@ class ProcmonSession:
         self.pml_path: Path | None = None
         self.csv_path: Path | None = None
         self.started = False
+        self.exported_ok = False
         self.notes: list[str] = []
 
     def start(self, evidence_dir: Path) -> None:
@@ -100,12 +102,20 @@ class ProcmonSession:
             self.notes.append(f"Failed reading Procmon CSV export: {exc}")
         return filtered_rows
 
+    def terminate_only(self) -> None:
+        """Stop an active Procmon session safely without exporting (used during error cleanup)."""
+        if not self.started or not self.procmon_bin:
+            return
+        run_subprocess_safe([str(self.procmon_bin), "/Terminate"], timeout=20.0)
+        self.started = False
+
     def stop_and_export(self, workspace_dir: Path, tracked_pids: set[int]) -> list[dict[str, str]]:
         """Terminate Procmon capture, convert .pml to .csv, and filter rows for tracked PIDs."""
         if not self.started or not self.procmon_bin:
             return []
 
         term_res = run_subprocess_safe([str(self.procmon_bin), "/Terminate"], timeout=30.0)
+        self.started = False
         if term_res["returncode"] != 0:
             self.notes.append(f"Procmon /Terminate note: {term_res['stderr'].strip() or term_res['error']}")
 
@@ -124,6 +134,7 @@ class ProcmonSession:
             )
             return []
 
+        self.exported_ok = True
         return self.filter_exported_csv(tracked_pids)
 
 
@@ -153,10 +164,31 @@ class FilesystemMonitor:
         procmon_rows: list[dict[str, str]],
         procmon_session: ProcmonSession,
         tracked_pids: set[int],
+        sysmon_available: bool = False,
+        skipped: bool = False,
+        skip_reason: str = "",
     ) -> CollectorResult:
         """Correlate file creations, edits, deletions, and renames without copying dropped EXEs."""
         fs_dir = evidence_dir / "dynamic" / "filesystem"
         fs_dir.mkdir(parents=True, exist_ok=True)
+
+        if skipped:
+            reason = skip_reason or "Dynamic sample execution did not run."
+            write_json(
+                fs_dir / "changes.json",
+                {
+                    "collected": False,
+                    "not_collected_reason": reason,
+                    "change_count": 0,
+                    "dropped_artifact_metadata_count": 0,
+                    "dropped_artifact_metadata": [],
+                    "changes": [],
+                },
+            )
+            self.result.artifacts.append("dynamic/filesystem/changes.json")
+            self.result.limitations.append(reason)
+            self.result.summary = {"collected": False}
+            return self.result.finish(STATUS_SKIPPED)
 
         changes: list[dict[str, Any]] = []
         created_paths: set[str] = set()
@@ -243,6 +275,7 @@ class FilesystemMonitor:
         write_json(
             fs_dir / "changes.json",
             {
+                "collected": sysmon_available or procmon_session.exported_ok or bool(dropped_artifacts),
                 "change_count": len(changes),
                 "dropped_artifact_metadata_count": len(dropped_artifacts),
                 "dropped_artifact_metadata": dropped_artifacts,
@@ -256,12 +289,15 @@ class FilesystemMonitor:
 
         self.result.limitations.extend(procmon_session.notes)
         self.result.summary = {
+            "collected": sysmon_available or procmon_session.exported_ok,
             "filesystem_event_count": len(changes),
             "dropped_artifact_count": len(dropped_artifacts),
+            "sysmon_available": sysmon_available,
+            "procmon_available": procmon_session.exported_ok,
         }
 
-        if not sysmon_events and not procmon_rows:
+        if not sysmon_available and not procmon_session.exported_ok:
             return self.result.finish(STATUS_UNAVAILABLE if not dropped_artifacts else STATUS_PARTIAL)
-        if procmon_session.notes:
+        if not sysmon_available or not procmon_session.exported_ok or procmon_session.notes:
             return self.result.finish(STATUS_PARTIAL)
         return self.result.finish(STATUS_COMPLETED)

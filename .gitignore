@@ -16,8 +16,10 @@ env/
 # Runtime workspaces, temporary files, and sample uploads
 tmp/
 temp/
+retained_evidence/
 workspace/
 **/tmp/
+**/retained_evidence/
 **/workspace/
 *.tmp
 *.log

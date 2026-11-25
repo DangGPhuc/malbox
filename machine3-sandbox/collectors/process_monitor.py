@@ -286,16 +286,20 @@ class ProcessMonitor:
         evidence_dir: Path,
         sysmon_events: list[dict[str, Any]],
         procmon_rows: list[dict[str, str]],
+        sysmon_available: bool = False,
         skipped: bool = False,
+        launch_failed: bool = False,
+        skip_reason: str = "",
     ) -> CollectorResult:
         """Correlate psutil, Sysmon (EID 1 & 5), and Procmon process data into evidence/dynamic/process/."""
         out_dir = evidence_dir / "dynamic" / "process"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if skipped:
-            write_json(out_dir / "processes.json", {"processes": [], "note": "Dynamic execution skipped."})
-            write_json(out_dir / "process_tree.json", {"roots": [], "note": "Dynamic execution skipped."})
-            write_json(out_dir / "process_events.json", {"events": [], "note": "Dynamic execution skipped."})
+            reason = skip_reason or "Dynamic execution skipped by local operator."
+            write_json(out_dir / "processes.json", {"collected": False, "processes": [], "not_collected_reason": reason})
+            write_json(out_dir / "process_tree.json", {"collected": False, "roots": [], "not_collected_reason": reason})
+            write_json(out_dir / "process_events.json", {"collected": False, "events": [], "not_collected_reason": reason})
             self.result.artifacts.extend(
                 [
                     "dynamic/process/processes.json",
@@ -303,8 +307,22 @@ class ProcessMonitor:
                     "dynamic/process/process_events.json",
                 ]
             )
-            self.result.limitations.append("Dynamic sample execution was skipped by operator.")
+            self.result.limitations.append(reason)
             return self.result.finish(STATUS_SKIPPED)
+
+        if launch_failed:
+            reason = "; ".join(self.result.errors) or "Sample process failed to launch."
+            write_json(out_dir / "processes.json", {"collected": False, "launch_failed": True, "processes": [], "error": reason})
+            write_json(out_dir / "process_tree.json", {"collected": False, "launch_failed": True, "roots": [], "error": reason})
+            write_json(out_dir / "process_events.json", {"collected": False, "launch_failed": True, "events": [], "error": reason})
+            self.result.artifacts.extend(
+                [
+                    "dynamic/process/processes.json",
+                    "dynamic/process/process_tree.json",
+                    "dynamic/process/process_events.json",
+                ]
+            )
+            return self.result.finish(STATUS_FAILED)
 
         correlated_events = list(self.psutil_events)
         scoped_pids = set(self.tracked_pids)
@@ -410,16 +428,17 @@ class ProcessMonitor:
         write_json(
             out_dir / "processes.json",
             {
+                "collected": True,
                 "root_sample_pid": self.sample_pid,
                 "tracked_pid_count": len(processes_list),
                 "processes": processes_list,
                 "termination_report": self.termination_report,
             },
         )
-        write_json(out_dir / "process_tree.json", {"roots": tree})
+        write_json(out_dir / "process_tree.json", {"collected": True, "roots": tree})
         write_json(
             out_dir / "process_events.json",
-            {"event_count": len(correlated_events), "events": correlated_events},
+            {"collected": True, "event_count": len(correlated_events), "events": correlated_events},
         )
 
         self.result.artifacts.extend(
@@ -433,11 +452,12 @@ class ProcessMonitor:
             "root_sample_pid": self.sample_pid,
             "observed_process_count": len(processes_list),
             "process_event_count": len(correlated_events),
+            "sysmon_available": sysmon_available,
         }
 
-        if not sysmon_events:
+        if not sysmon_available:
             self.result.limitations.append(
-                "Sysmon process events not available; short-lived processes may rely solely on psutil/Procmon."
+                "Sysmon process events unavailable; short-lived child processes rely on psutil/Procmon."
             )
             return self.result.finish(STATUS_PARTIAL if processes_list else STATUS_FAILED)
         return self.result.finish(STATUS_COMPLETED)

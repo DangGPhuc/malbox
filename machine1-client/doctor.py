@@ -38,10 +38,10 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load Machine 1 client configuration from JSON."""
+    """Load Machine 1 client configuration from JSON (tolerates UTF-8 BOM)."""
     if not config_path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    with config_path.open("r", encoding="utf-8") as fh:
+    with config_path.open("r", encoding="utf-8-sig") as fh:
         return json.load(fh)
 
 
@@ -279,9 +279,10 @@ def download_evidence(
     keep_zip: bool,
     logger: logging.Logger,
 ) -> Path | None:
-    """Stream the evidence ZIP archive from Gateway and save locally."""
-    job_dir = allocate_job_dir(evidence_root, job_id)
-    zip_path = job_dir / f"evidence_{job_id}.zip"
+    """Stream the evidence ZIP archive from Gateway, verify integrity, extract, and acknowledge."""
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    safe_id = "".join(ch for ch in job_id if ch.isalnum() or ch in ("-", "_")) or "job"
+    staging_zip = evidence_root / f".downloading_{safe_id}.zip"
 
     try:
         with requests.get(
@@ -300,31 +301,69 @@ def download_evidence(
             expected_sha256 = resp.headers.get("X-Archive-SHA256", "").strip().lower()
             digest = hashlib.sha256()
 
-            with zip_path.open("wb") as fh:
+            with staging_zip.open("wb") as fh:
                 for chunk in resp.iter_content(chunk_size=chunk_size):
                     if chunk:
                         fh.write(chunk)
                         digest.update(chunk)
 
+        if not staging_zip.is_file() or staging_zip.stat().st_size == 0:
+            raise ValueError("Downloaded evidence archive is empty.")
+
         actual_sha256 = digest.hexdigest().lower()
         if expected_sha256 and actual_sha256 != expected_sha256:
-            logger.error(
-                "[ERROR] Evidence transfer failed: archive checksum mismatch (%s != %s).",
-                actual_sha256,
-                expected_sha256,
+            raise ValueError(
+                f"Archive checksum mismatch ({actual_sha256} != {expected_sha256})."
             )
-            return None
+
+        with zipfile.ZipFile(staging_zip, "r") as zf:
+            corrupt_member = zf.testzip()
+            if corrupt_member is not None:
+                raise zipfile.BadZipFile(f"Corrupt ZIP member: {corrupt_member}")
 
         logger.info("[OK] Evidence received.")
 
+        job_dir = allocate_job_dir(evidence_root, job_id)
+        zip_path = job_dir / f"evidence_{safe_id}.zip"
+        staging_zip.replace(zip_path)
+
         if extract_archive:
-            safe_extract_zip(zip_path, job_dir)
+            try:
+                safe_extract_zip(zip_path, job_dir)
+            except (zipfile.BadZipFile, OSError, ValueError) as ext_exc:
+                logger.error(
+                    "[ERROR] Failed extracting %s (%s). Archive preserved at %s and retained on gateway.",
+                    zip_path,
+                    ext_exc,
+                    zip_path,
+                )
+                return None
             if not keep_zip and zip_path.exists():
                 zip_path.unlink()
 
+        try:
+            requests.post(
+                f"{base_url}/jobs/{job_id}/ack",
+                timeout=(connect_timeout, request_timeout),
+            )
+        except requests.RequestException as ack_exc:
+            logger.warning("[WARN] Could not send receipt ack to gateway: %s", ack_exc)
+
         return job_dir
     except (requests.RequestException, zipfile.BadZipFile, OSError, ValueError) as exc:
-        logger.error("[ERROR] Evidence transfer failed: %s", exc)
+        if staging_zip.exists():
+            try:
+                staging_zip.unlink()
+            except OSError:
+                pass
+        logger.error(
+            "[ERROR] Evidence transfer failed: %s\n"
+            "[HINT] If gateway received the archive, you can recover it via: curl -f -o evidence_%s.zip %s/jobs/%s/evidence",
+            exc,
+            safe_id,
+            base_url,
+            job_id,
+        )
         return None
 
 

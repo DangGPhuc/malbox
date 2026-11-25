@@ -37,12 +37,14 @@ def _read_json_safe(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
     except ValueError:
         return {}
 
 
-def _build_job_loggers(logs_dir: Path, job_id: str) -> tuple[logging.Logger, logging.Logger, logging.Logger, list[logging.Handler]]:
+def _build_job_loggers(
+    logs_dir: Path, job_id: str
+) -> tuple[logging.Logger, logging.Logger, logging.Logger, list[logging.Handler]]:
     logs_dir.mkdir(parents=True, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     handlers: list[logging.Handler] = []
@@ -62,6 +64,17 @@ def _build_job_loggers(logs_dir: Path, job_id: str) -> tuple[logging.Logger, log
     collectors_log = make_logger("collectors", "collectors.log")
     errors_log = make_logger("errors", "errors.log", level=logging.WARNING)
     return analysis_log, collectors_log, errors_log, handlers
+
+
+def _close_job_loggers(job_id: str, log_handlers: list[logging.Handler]) -> None:
+    for h in log_handlers:
+        try:
+            h.flush()
+            h.close()
+        except Exception:
+            pass
+        for lg_name in ("analysis", "collectors", "errors"):
+            logging.getLogger(f"malbox.job.{job_id}.{lg_name}").removeHandler(h)
 
 
 def _build_timeline(evidence_dir: Path, milestones: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -131,10 +144,17 @@ def _build_timeline(evidence_dir: Path, milestones: list[dict[str, Any]]) -> lis
     return timeline
 
 
+def _fmt_metric(value: Any, collector_status: str | None) -> str:
+    if value is None:
+        return f"Not collected (status: {collector_status or 'unavailable'})"
+    return str(value)
+
+
 def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) -> str:
     sample = summary.get("sample", {})
     static = summary.get("static", {})
     dynamic = summary.get("dynamic", {})
+    statuses = summary.get("collector_statuses", {})
     iocs = summary.get("potential_iocs", {})
     limitations = manifest.get("analysis_limitations", [])
 
@@ -151,42 +171,44 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **MD5:** `{sample.get('md5')}`",
         f"- **SHA-1:** `{sample.get('sha1')}`",
         f"- **SHA-256:** `{sample.get('sha256')}`",
-        f"- **Analysis Window (UTC):** `{manifest.get('analysis_start_time')}` -> `{manifest.get('analysis_end_time')}`",
-        f"- **Observation Duration:** {manifest.get('dynamic_observation_duration_seconds')}s",
+        f"- **Job Start / End (UTC):** `{manifest.get('analysis_start_time')}` -> `{manifest.get('analysis_end_time')}`",
+        f"- **Dynamic Execution Status:** `{manifest.get('dynamic_execution_status')}`",
+        f"- **Configured Observation Duration:** {manifest.get('configured_observation_duration_seconds')}s",
+        f"- **Actual Observation Duration:** {manifest.get('actual_observation_duration_seconds')}s",
         f"- **Final Job Status:** `{manifest.get('final_status')}`",
         "",
         "## 2. Static Findings",
-        f"- **PE Architecture:** {static.get('architecture', 'N/A')}",
-        f"- **PE Sections:** {static.get('section_count', 0)}",
-        f"- **Imported DLLs:** {static.get('imported_dll_count', 0)}",
-        f"- **Exported Functions:** {static.get('exported_function_count', 0)}",
-        f"- **Extracted Strings:** {static.get('string_count', 0)} (source: `{static.get('strings_source', 'N/A')}`)",
-        f"- **CAPA Capabilities:** {static.get('capa_capability_count', 0)}",
-        f"- **YARA Matches:** {static.get('yara_match_count', 0)}",
-        f"- **Ghidra Functions:** {static.get('ghidra_function_count', 0)}",
+        f"- **PE Architecture:** {static.get('architecture') or 'N/A'}",
+        f"- **PE Sections:** {_fmt_metric(static.get('section_count'), statuses.get('file_metadata'))}",
+        f"- **Imported DLLs:** {_fmt_metric(static.get('imported_dll_count'), statuses.get('file_metadata'))}",
+        f"- **Exported Functions:** {_fmt_metric(static.get('exported_function_count'), statuses.get('file_metadata'))}",
+        f"- **Extracted Strings:** {_fmt_metric(static.get('string_count'), statuses.get('strings_floss'))} (source: `{static.get('strings_source') or 'N/A'}`)",
+        f"- **CAPA Capabilities:** {_fmt_metric(static.get('capa_capability_count'), statuses.get('capa'))}",
+        f"- **YARA Matches:** {_fmt_metric(static.get('yara_match_count'), statuses.get('yara'))}",
+        f"- **Ghidra Functions:** {_fmt_metric(static.get('ghidra_function_count'), statuses.get('ghidra'))}",
         "",
         "## 3. Observed Process Activity",
-        f"- **Root Sample PID:** {dynamic.get('root_sample_pid')}",
-        f"- **Observed Processes:** {dynamic.get('observed_process_count', 0)}",
-        f"- **Process Events:** {dynamic.get('process_event_count', 0)}",
+        f"- **Root Sample PID:** {dynamic.get('root_sample_pid') if dynamic.get('root_sample_pid') is not None else 'N/A'}",
+        f"- **Observed Processes:** {_fmt_metric(dynamic.get('observed_process_count'), statuses.get('process_monitor'))}",
+        f"- **Process Events:** {_fmt_metric(dynamic.get('process_event_count'), statuses.get('process_monitor'))}",
         "",
         "## 4. Network Activity",
-        f"- **Network Connection Events:** {dynamic.get('connection_event_count', 0)}",
-        f"- **DNS Queries Observed:** {dynamic.get('dns_query_count', 0)}",
+        f"- **Network Connection Events:** {_fmt_metric(dynamic.get('connection_event_count'), statuses.get('network_monitor'))}",
+        f"- **DNS Queries Observed:** {_fmt_metric(dynamic.get('dns_query_count'), statuses.get('network_monitor'))}",
         f"- **PCAPNG Captured:** {dynamic.get('has_pcapng', False)}",
         "",
         "## 5. Filesystem Activity",
-        f"- **Filesystem Events:** {dynamic.get('filesystem_event_count', 0)}",
-        f"- **Dropped/Modified Artifact Metadata Entries:** {dynamic.get('dropped_artifact_count', 0)}",
+        f"- **Filesystem Events:** {_fmt_metric(dynamic.get('filesystem_event_count'), statuses.get('filesystem_monitor'))}",
+        f"- **Dropped/Modified Artifact Metadata Entries:** {_fmt_metric(dynamic.get('dropped_artifact_count'), statuses.get('filesystem_monitor'))}",
         "",
         "## 6. Registry Activity",
-        f"- **Registry Events:** {dynamic.get('registry_event_count', 0)}",
-        f"- **Persistence-Related Registry Hits:** {dynamic.get('persistence_indicator_count', 0)}",
+        f"- **Registry Events:** {_fmt_metric(dynamic.get('registry_event_count'), statuses.get('registry_monitor'))}",
+        f"- **Persistence-Related Registry Hits:** {_fmt_metric(dynamic.get('persistence_indicator_count'), statuses.get('registry_monitor'))}",
         "",
         "## 7. Memory Evidence",
-        f"- **RAM Telemetry Samples:** {dynamic.get('ram_sample_count', 0)}",
-        f"- **Peak System Memory Used (%):** {dynamic.get('peak_system_memory_used_percent', 0)}",
-        f"- **Process Memory Dumps:** {dynamic.get('process_dump_count', 0)}",
+        f"- **RAM Telemetry Samples:** {_fmt_metric(dynamic.get('ram_sample_count'), statuses.get('memory_monitor'))}",
+        f"- **Peak System Memory Used (%):** {_fmt_metric(dynamic.get('peak_system_memory_used_percent'), statuses.get('memory_monitor'))}",
+        f"- **Process Memory Dumps:** {_fmt_metric(dynamic.get('process_dump_count'), statuses.get('memory_monitor'))}",
         f"- **Full Physical Memory Status:** `{dynamic.get('full_memory_status', 'skipped')}`",
         "",
         "## 8. Potential Indicators of Compromise",
@@ -203,6 +225,9 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
     for name, c_data in manifest.get("collector_status", {}).items():
         lines.append(f"- `{name}`: **{c_data.get('status')}**")
 
+    if manifest.get("fatal_error"):
+        lines.extend(["", "### Fatal Error", f"- {manifest.get('fatal_error')}"])
+
     lines.append("")
     if limitations:
         lines.append("### Limitations Recorded")
@@ -213,6 +238,21 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _build_inventory(evidence_dir: Path) -> list[dict[str, Any]]:
+    inventory: list[dict[str, Any]] = []
+    for item in sorted(evidence_dir.rglob("*")):
+        if item.is_file():
+            rel = item.relative_to(evidence_dir).as_posix()
+            try:
+                info = compute_file_hashes(item)
+                inventory.append(
+                    {"path": rel, "size_bytes": info["size_bytes"], "sha256": info["sha256"]}
+                )
+            except OSError:
+                inventory.append({"path": rel, "size_bytes": item.stat().st_size, "sha256": ""})
+    return inventory
 
 
 def _package_evidence_zip(evidence_dir: Path, zip_path: Path, sample_filename: str) -> str:
@@ -228,7 +268,10 @@ def _package_evidence_zip(evidence_dir: Path, zip_path: Path, sample_filename: s
                 continue
             if rel_path.startswith("dynamic/filesystem/dropped_files/"):
                 continue
-            if not rel_path.startswith(("logs/", "static/", "ghidra/")) and file_path.suffix.lower() in EXECUTABLE_EXTENSIONS:
+            if (
+                not rel_path.startswith(("logs/", "static/", "ghidra/"))
+                and file_path.suffix.lower() in EXECUTABLE_EXTENSIONS
+            ):
                 continue
             zf.write(file_path, arcname=rel_path)
 
@@ -239,6 +282,23 @@ def _package_evidence_zip(evidence_dir: Path, zip_path: Path, sample_filename: s
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _metric_if_collected(
+    collector_results: dict[str, CollectorResult],
+    collector_name: str,
+    value: Any,
+    collected_flag: bool | None = None,
+) -> Any:
+    """Return value only when the collector ran; otherwise None to distinguish 0 from uncollected."""
+    res = collector_results.get(collector_name)
+    if res is None:
+        return None
+    if res.status in (STATUS_UNAVAILABLE, STATUS_FAILED, STATUS_SKIPPED):
+        return None
+    if collected_flag is False:
+        return None
+    return value
 
 
 def run_analysis(
@@ -280,10 +340,27 @@ def run_analysis(
 
     terminal_logger.info("[SANDBOX] Preparing analysis workspace...")
     stage_callback("preparing_workspace")
-    analysis_log.info("Starting job %s for sample %s (SHA-256: %s)", job_id, sample_path.name, sample_sha256)
+    analysis_log.info(
+        "Starting job %s for sample %s (SHA-256: %s)", job_id, sample_path.name, sample_sha256
+    )
+
+    configured_duration = int(config.get("observation_duration_seconds", 120))
+    actual_duration_seconds = 0.0
+    obs_start_mono: float | None = None
+    dynamic_execution_status = "not_started"
+    dynamic_started_at = ""
+    dynamic_completed_at = ""
+    evidence_finalized_at = ""
 
     collector_results: dict[str, CollectorResult] = {}
     all_limitations: list[str] = []
+
+    process_mon: ProcessMonitor | None = None
+    network_mon: NetworkMonitor | None = None
+    memory_mon: MemoryMonitor | None = None
+    procmon_session: ProcmonSession | None = None
+    dynamic_terminated = False
+    network_stopped = False
 
     try:
         # 1. Static analysis + Ghidra Headless
@@ -299,13 +376,18 @@ def run_analysis(
             sample_path=sample_path, workspace_dir=workspace_dir, evidence_dir=evidence_dir
         )
         milestones.append(
-            {"timestamp": utc_now_iso(), "category": "pipeline", "event": "static_completed", "detail": job_id}
+            {
+                "timestamp": utc_now_iso(),
+                "category": "pipeline",
+                "event": "static_completed",
+                "detail": job_id,
+            }
         )
 
         # 2. Start dynamic collectors BEFORE sample execution
         terminal_logger.info("[SANDBOX] Starting evidence collectors...")
         stage_callback("starting_collectors")
-        dynamic_start_utc = utc_now_iso()
+        dynamic_window_utc = utc_now_iso()
 
         process_mon = ProcessMonitor(config=config, base_dir=base_dir, logger=collectors_log)
         network_mon = NetworkMonitor(config=config, base_dir=base_dir, logger=collectors_log)
@@ -330,26 +412,31 @@ def run_analysis(
             terminal_logger.info("[SANDBOX] Executing sample for dynamic observation now...")
             approved = True
 
-        duration = int(config.get("observation_duration_seconds", 120))
         poll_step = float(config.get("poll_sample_interval_seconds", 0.5))
         run_dir = workspace_dir / "run"
         execution_skipped = False
+        launch_failed = False
 
         if approved:
             stage_callback("dynamic_observation")
             launched = process_mon.launch_sample(sample_path=sample_path, run_dir=run_dir)
             if launched:
+                dynamic_execution_status = "running"
+                dynamic_started_at = utc_now_iso()
+                obs_start_mono = time.monotonic()
                 terminal_logger.info("[SANDBOX] Dynamic observation started.")
-                terminal_logger.info("[SANDBOX] Observation duration: %d seconds.", duration)
+                terminal_logger.info(
+                    "[SANDBOX] Observation duration: %d seconds.", configured_duration
+                )
                 milestones.append(
                     {
-                        "timestamp": utc_now_iso(),
+                        "timestamp": dynamic_started_at,
                         "category": "pipeline",
                         "event": "dynamic_started",
                         "detail": f"PID={process_mon.sample_pid}",
                     }
                 )
-                end_deadline = time.monotonic() + duration
+                end_deadline = obs_start_mono + configured_duration
                 while time.monotonic() < end_deadline:
                     process_mon.poll_once()
                     network_mon.poll_once(process_mon.tracked_pids)
@@ -359,13 +446,16 @@ def run_analysis(
                         break
                     time.sleep(min(poll_step, remaining))
 
+                actual_duration_seconds = round(time.monotonic() - obs_start_mono, 2)
+                dynamic_completed_at = utc_now_iso()
+                dynamic_execution_status = "completed"
                 terminal_logger.info("[SANDBOX] Observation completed.")
                 milestones.append(
                     {
-                        "timestamp": utc_now_iso(),
+                        "timestamp": dynamic_completed_at,
                         "category": "pipeline",
                         "event": "dynamic_completed",
-                        "detail": f"{duration}s",
+                        "detail": f"actual={actual_duration_seconds}s (configured={configured_duration}s)",
                     }
                 )
 
@@ -375,12 +465,19 @@ def run_analysis(
 
                 # Cleanly terminate only tracked sample processes.
                 process_mon.terminate_tracked_processes()
+                dynamic_terminated = True
                 memory_mon.capture_full_memory_and_volatility(evidence_dir=evidence_dir)
             else:
-                execution_skipped = False
-                errors_log.error("Sample launch failed: %s", "; ".join(process_mon.result.errors))
+                launch_failed = True
+                dynamic_execution_status = "launch_failed"
+                actual_duration_seconds = 0.0
+                err_detail = "; ".join(process_mon.result.errors) or "Sample failed to start."
+                errors_log.error("Sample launch failed: %s", err_detail)
+                all_limitations.append(f"Dynamic observation did not start: {err_detail}")
         else:
             execution_skipped = True
+            dynamic_execution_status = "skipped"
+            actual_duration_seconds = 0.0
             analysis_log.info("Dynamic execution declined by local operator; finalizing static evidence.")
             all_limitations.append("Dynamic sample execution skipped by local sandbox operator.")
 
@@ -389,12 +486,28 @@ def run_analysis(
         terminal_logger.info("[SANDBOX] Finalizing evidence...")
 
         network_mon.stop()
-        procmon_rows = procmon_session.stop_and_export(
-            workspace_dir=workspace_dir, tracked_pids=process_mon.tracked_pids
+        network_stopped = True
+
+        non_executed = execution_skipped or launch_failed
+        skip_reason = (
+            "Dynamic execution declined by local operator."
+            if execution_skipped
+            else ("Dynamic observation did not run because sample launch failed." if launch_failed else "")
         )
 
-        eventlog_res, parsed_channels = eventlog_mon.collect(
-            evidence_dir=evidence_dir, start_time_utc=dynamic_start_utc
+        if non_executed:
+            procmon_session.terminate_only()
+            procmon_rows: list[dict[str, str]] = []
+        else:
+            procmon_rows = procmon_session.stop_and_export(
+                workspace_dir=workspace_dir, tracked_pids=process_mon.tracked_pids
+            )
+
+        eventlog_res, parsed_channels, sysmon_available = eventlog_mon.collect(
+            evidence_dir=evidence_dir,
+            start_time_utc=dynamic_window_utc,
+            skipped=non_executed,
+            skip_reason=skip_reason,
         )
         collector_results["eventlog_monitor"] = eventlog_res
         sysmon_events = parsed_channels.get("sysmon", [])
@@ -404,18 +517,32 @@ def run_analysis(
             evidence_dir=evidence_dir,
             sysmon_events=sysmon_events,
             procmon_rows=procmon_rows,
+            sysmon_available=sysmon_available,
             skipped=execution_skipped,
+            launch_failed=launch_failed,
+            skip_reason=skip_reason,
         )
         # Re-filter exported Procmon CSV if Sysmon EID 1 added short-lived descendant PIDs.
-        if procmon_session.csv_path and procmon_session.csv_path.is_file():
+        if (
+            not non_executed
+            and procmon_session.csv_path
+            and procmon_session.csv_path.is_file()
+        ):
             procmon_rows = procmon_session.filter_exported_csv(process_mon.tracked_pids)
 
         collector_results["network_monitor"] = network_mon.finalize(
             evidence_dir=evidence_dir,
             sysmon_events=sysmon_events,
             tracked_pids=process_mon.tracked_pids,
+            sysmon_available=sysmon_available,
+            skipped=non_executed,
+            skip_reason=skip_reason,
         )
-        collector_results["memory_monitor"] = memory_mon.finalize(evidence_dir=evidence_dir)
+        collector_results["memory_monitor"] = memory_mon.finalize(
+            evidence_dir=evidence_dir,
+            skipped=non_executed,
+            skip_reason=skip_reason,
+        )
         collector_results["filesystem_monitor"] = filesystem_mon.finalize(
             evidence_dir=evidence_dir,
             sample_run_dir=run_dir,
@@ -424,12 +551,19 @@ def run_analysis(
             procmon_rows=procmon_rows,
             procmon_session=procmon_session,
             tracked_pids=process_mon.tracked_pids,
+            sysmon_available=sysmon_available,
+            skipped=non_executed,
+            skip_reason=skip_reason,
         )
         collector_results["registry_monitor"] = registry_mon.finalize(
             evidence_dir=evidence_dir,
             sysmon_events=sysmon_events,
             procmon_rows=procmon_rows,
             tracked_pids=process_mon.tracked_pids,
+            sysmon_available=sysmon_available,
+            procmon_available=procmon_session.exported_ok,
+            skipped=non_executed,
+            skip_reason=skip_reason,
         )
 
         # Log any collector errors/limitations into collectors.log and errors.log.
@@ -445,11 +579,13 @@ def run_analysis(
             for lim in res.limitations:
                 collectors_log.warning("[%s] limitation: %s", name, lim)
 
-        end_time_utc = utc_now_iso()
         statuses = [res.status for res in collector_results.values()]
-        if all(s == STATUS_FAILED for s in statuses):
-            final_status = STATUS_FAILED
-        elif any(s in (STATUS_FAILED, STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_SKIPPED) for s in statuses):
+        if all(s == STATUS_FAILED for s in statuses) or (launch_failed and process_mon.result.status == STATUS_FAILED):
+            final_status = STATUS_PARTIAL if any(s == STATUS_COMPLETED for s in statuses) else STATUS_FAILED
+        elif any(
+            s in (STATUS_FAILED, STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_SKIPPED)
+            for s in statuses
+        ):
             final_status = STATUS_PARTIAL
         else:
             final_status = STATUS_COMPLETED
@@ -483,9 +619,22 @@ def run_analysis(
         )
         yara_rules = [m.get("rule") for m in yara_doc.get("matches", []) if m.get("rule")]
 
+        collector_statuses_short = {k: v["status"] for k, v in collector_status_map.items()}
+        evidence_finalized_at = utc_now_iso()
+
         summary_doc = {
             "job_id": job_id,
             "final_status": final_status,
+            "collector_statuses": collector_statuses_short,
+            "timing": {
+                "analysis_start_time": start_time_utc,
+                "dynamic_started_at": dynamic_started_at or None,
+                "dynamic_completed_at": dynamic_completed_at or None,
+                "evidence_finalized_at": evidence_finalized_at,
+                "configured_observation_duration_seconds": configured_duration,
+                "actual_observation_duration_seconds": actual_duration_seconds,
+                "dynamic_execution_status": dynamic_execution_status,
+            },
             "sample": {
                 "filename": sample_path.name,
                 "size_bytes": hashes_doc.get("size_bytes", sample_path.stat().st_size),
@@ -496,31 +645,111 @@ def run_analysis(
             },
             "static": {
                 "architecture": pe_doc.get("architecture"),
-                "section_count": pe_doc.get("number_of_sections", 0),
-                "imported_dll_count": collector_results["file_metadata"].summary.get("imported_dll_count", 0),
-                "exported_function_count": collector_results["file_metadata"].summary.get("exported_function_count", 0),
+                "section_count": _metric_if_collected(
+                    collector_results, "file_metadata", pe_doc.get("number_of_sections")
+                ),
+                "imported_dll_count": _metric_if_collected(
+                    collector_results,
+                    "file_metadata",
+                    collector_results["file_metadata"].summary.get("imported_dll_count"),
+                ),
+                "exported_function_count": _metric_if_collected(
+                    collector_results,
+                    "file_metadata",
+                    collector_results["file_metadata"].summary.get("exported_function_count"),
+                ),
                 "strings_source": floss_doc.get("source"),
-                "string_count": floss_doc.get("total_extracted_strings", 0),
-                "capa_capability_count": capa_doc.get("capability_count", 0),
-                "yara_match_count": yara_doc.get("match_count", 0),
-                "ghidra_function_count": len(ghidra_doc.get("functions", [])),
+                "string_count": _metric_if_collected(
+                    collector_results, "strings_floss", floss_doc.get("total_extracted_strings")
+                ),
+                "capa_capability_count": _metric_if_collected(
+                    collector_results, "capa", capa_doc.get("capability_count")
+                ),
+                "yara_match_count": _metric_if_collected(
+                    collector_results, "yara", yara_doc.get("match_count")
+                ),
+                "ghidra_function_count": _metric_if_collected(
+                    collector_results,
+                    "ghidra",
+                    len(ghidra_doc.get("functions", [])) if ghidra_doc else None,
+                ),
+                "ghidra_mcp": collector_results["ghidra"].summary.get("ghidra_mcp"),
             },
             "dynamic": {
                 "execution_skipped": execution_skipped,
+                "launch_failed": launch_failed,
+                "dynamic_execution_status": dynamic_execution_status,
                 "root_sample_pid": proc_doc.get("root_sample_pid"),
-                "observed_process_count": proc_doc.get("tracked_pid_count", 0),
-                "process_event_count": collector_results["process_monitor"].summary.get("process_event_count", 0),
-                "connection_event_count": net_doc.get("connection_count", 0),
-                "dns_query_count": dns_doc.get("dns_query_count", 0),
+                "observed_process_count": _metric_if_collected(
+                    collector_results,
+                    "process_monitor",
+                    proc_doc.get("tracked_pid_count"),
+                    proc_doc.get("collected"),
+                ),
+                "process_event_count": _metric_if_collected(
+                    collector_results,
+                    "process_monitor",
+                    collector_results["process_monitor"].summary.get("process_event_count"),
+                    proc_doc.get("collected"),
+                ),
+                "connection_event_count": _metric_if_collected(
+                    collector_results,
+                    "network_monitor",
+                    net_doc.get("connection_count"),
+                    net_doc.get("collected"),
+                ),
+                "dns_query_count": _metric_if_collected(
+                    collector_results,
+                    "network_monitor",
+                    dns_doc.get("dns_query_count"),
+                    dns_doc.get("collected"),
+                ),
                 "has_pcapng": collector_results["network_monitor"].summary.get("has_pcapng", False),
-                "filesystem_event_count": fs_doc.get("change_count", 0),
-                "dropped_artifact_count": fs_doc.get("dropped_artifact_metadata_count", 0),
-                "registry_event_count": reg_doc.get("change_count", 0),
-                "persistence_indicator_count": reg_doc.get("persistence_indicator_count", 0),
-                "ram_sample_count": mem_doc.get("sample_count", 0),
-                "peak_system_memory_used_percent": mem_doc.get("peak_system_memory_used_percent", 0),
-                "process_dump_count": collector_results["memory_monitor"].summary.get("process_dump_count", 0),
-                "full_memory_status": collector_results["memory_monitor"].summary.get("full_memory_status"),
+                "filesystem_event_count": _metric_if_collected(
+                    collector_results,
+                    "filesystem_monitor",
+                    fs_doc.get("change_count"),
+                    fs_doc.get("collected"),
+                ),
+                "dropped_artifact_count": _metric_if_collected(
+                    collector_results,
+                    "filesystem_monitor",
+                    fs_doc.get("dropped_artifact_metadata_count"),
+                    fs_doc.get("collected"),
+                ),
+                "registry_event_count": _metric_if_collected(
+                    collector_results,
+                    "registry_monitor",
+                    reg_doc.get("change_count"),
+                    reg_doc.get("collected"),
+                ),
+                "persistence_indicator_count": _metric_if_collected(
+                    collector_results,
+                    "registry_monitor",
+                    reg_doc.get("persistence_indicator_count"),
+                    reg_doc.get("collected"),
+                ),
+                "ram_sample_count": _metric_if_collected(
+                    collector_results,
+                    "memory_monitor",
+                    mem_doc.get("sample_count"),
+                    mem_doc.get("collected"),
+                ),
+                "peak_system_memory_used_percent": _metric_if_collected(
+                    collector_results,
+                    "memory_monitor",
+                    mem_doc.get("peak_system_memory_used_percent"),
+                    mem_doc.get("collected"),
+                ),
+                "process_dump_count": _metric_if_collected(
+                    collector_results,
+                    "memory_monitor",
+                    collector_results["memory_monitor"].summary.get("process_dump_count"),
+                    mem_doc.get("collected"),
+                ),
+                "full_memory_status": collector_results["memory_monitor"].summary.get(
+                    "full_memory_status", "skipped"
+                ),
             },
             "potential_iocs": {
                 "static_urls": indicators.get("urls", []),
@@ -534,21 +763,35 @@ def run_analysis(
         write_json(evidence_dir / "summary.json", summary_doc)
         write_json(evidence_dir / "logs" / "tool_status.json", collector_status_map)
 
+        end_time_utc = utc_now_iso()
         manifest_skeleton = {
             "job_id": job_id,
             "sample_filename": sample_path.name,
             "sample_sha256": sample_sha256,
             "analysis_start_time": start_time_utc,
             "analysis_end_time": end_time_utc,
-            "dynamic_observation_duration_seconds": 0 if execution_skipped else duration,
+            "dynamic_started_at": dynamic_started_at or None,
+            "dynamic_completed_at": dynamic_completed_at or None,
+            "evidence_finalized_at": evidence_finalized_at,
+            "configured_observation_duration_seconds": configured_duration,
+            "actual_observation_duration_seconds": actual_duration_seconds,
+            "dynamic_observation_duration_seconds": actual_duration_seconds,
+            "dynamic_execution_status": dynamic_execution_status,
+            "restore_required": True,
             "windows_version": platform.platform(),
             "tool_versions": tool_versions,
             "collector_status": {
-                k: {"status": v["status"], "errors": v["errors"], "limitations": v["limitations"]}
+                k: {
+                    "status": v["status"],
+                    "errors": v["errors"],
+                    "limitations": v["limitations"],
+                    "artifacts": v["artifacts"],
+                }
                 for k, v in collector_status_map.items()
             },
             "analysis_limitations": sorted(set(all_limitations)),
             "final_status": final_status,
+            "evidence_file_inventory_note": "Inventory lists all evidence artifacts written prior to manifest.json.",
             "evidence_file_inventory": [],
         }
 
@@ -556,24 +799,9 @@ def run_analysis(
         (evidence_dir / "report.md").write_text(report_md, encoding="utf-8")
 
         analysis_log.info("Analysis finalized with status=%s", final_status)
-        for h in log_handlers:
-            h.flush()
-            h.close()
-            for lg_name in ("analysis", "collectors", "errors"):
-                logging.getLogger(f"malbox.job.{job_id}.{lg_name}").removeHandler(h)
+        _close_job_loggers(job_id, log_handlers)
 
-        inventory: list[dict[str, Any]] = []
-        for item in sorted(evidence_dir.rglob("*")):
-            if item.is_file():
-                rel = item.relative_to(evidence_dir).as_posix()
-                try:
-                    info = compute_file_hashes(item)
-                    inventory.append(
-                        {"path": rel, "size_bytes": info["size_bytes"], "sha256": info["sha256"]}
-                    )
-                except OSError:
-                    inventory.append({"path": rel, "size_bytes": item.stat().st_size, "sha256": ""})
-        manifest_skeleton["evidence_file_inventory"] = inventory
+        manifest_skeleton["evidence_file_inventory"] = _build_inventory(evidence_dir)
         write_json(evidence_dir / "manifest.json", manifest_skeleton)
 
         terminal_logger.info("[SANDBOX] Packaging evidence...")
@@ -590,14 +818,85 @@ def run_analysis(
             "error": None,
         }
     except Exception as exc:
+        if obs_start_mono is not None and actual_duration_seconds == 0.0:
+            actual_duration_seconds = round(time.monotonic() - obs_start_mono, 2)
+        if dynamic_execution_status == "running":
+            dynamic_execution_status = "interrupted"
+
         errors_log.exception("Fatal pipeline error: %s", exc)
-        for h in log_handlers:
+
+        # Clean up any active child processes, dumpcap, and Procmon locks before packaging partial evidence.
+        if process_mon is not None and not dynamic_terminated:
             try:
-                h.flush()
-                h.close()
-            except Exception:
-                pass
-        # Package whatever partial evidence exists so Gateway/Client still receive diagnostic logs.
+                process_mon.terminate_tracked_processes()
+            except Exception as cleanup_exc:
+                errors_log.error("Process cleanup failed: %s", cleanup_exc)
+        if network_mon is not None and not network_stopped:
+            try:
+                network_mon.stop()
+            except Exception as cleanup_exc:
+                errors_log.error("Network capture cleanup failed: %s", cleanup_exc)
+        if procmon_session is not None:
+            try:
+                procmon_session.terminate_only()
+            except Exception as cleanup_exc:
+                errors_log.error("Procmon cleanup failed: %s", cleanup_exc)
+
+        end_time_utc = utc_now_iso()
+        collector_status_map = {k: v.to_dict() for k, v in collector_results.items()}
+        write_json(evidence_dir / "logs" / "tool_status.json", collector_status_map)
+
+        _close_job_loggers(job_id, log_handlers)
+
+        failure_manifest = {
+            "job_id": job_id,
+            "sample_filename": sample_path.name,
+            "sample_sha256": sample_sha256,
+            "analysis_start_time": start_time_utc,
+            "analysis_end_time": end_time_utc,
+            "dynamic_started_at": dynamic_started_at or None,
+            "dynamic_completed_at": dynamic_completed_at or None,
+            "evidence_finalized_at": end_time_utc,
+            "configured_observation_duration_seconds": configured_duration,
+            "actual_observation_duration_seconds": actual_duration_seconds,
+            "dynamic_observation_duration_seconds": actual_duration_seconds,
+            "dynamic_execution_status": dynamic_execution_status,
+            "restore_required": True,
+            "windows_version": platform.platform(),
+            "collector_status": {
+                k: {
+                    "status": v["status"],
+                    "errors": v["errors"],
+                    "limitations": v["limitations"],
+                    "artifacts": v["artifacts"],
+                }
+                for k, v in collector_status_map.items()
+            },
+            "analysis_limitations": sorted(set(all_limitations + [f"Fatal error: {exc}"])),
+            "fatal_error": str(exc),
+            "final_status": STATUS_FAILED,
+            "evidence_file_inventory": _build_inventory(evidence_dir),
+        }
+        write_json(evidence_dir / "manifest.json", failure_manifest)
+
+        if not (evidence_dir / "summary.json").is_file():
+            write_json(
+                evidence_dir / "summary.json",
+                {
+                    "job_id": job_id,
+                    "final_status": STATUS_FAILED,
+                    "fatal_error": str(exc),
+                    "collector_statuses": {k: v["status"] for k, v in collector_status_map.items()},
+                },
+            )
+        if not (evidence_dir / "report.md").is_file():
+            (evidence_dir / "report.md").write_text(
+                f"# MalBox Analysis Report — `{job_id}` (FAILED)\n\n"
+                f"- **Fatal Error:** {exc}\n"
+                "- **Snapshot Status:** Restore the `CLEAN` snapshot before running another analysis.\n",
+                encoding="utf-8",
+            )
+
         zip_path = workspace_dir / f"evidence_{job_id}.zip"
         try:
             archive_sha256 = _package_evidence_zip(

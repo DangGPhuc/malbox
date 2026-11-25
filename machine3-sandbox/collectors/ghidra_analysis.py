@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import shutil
@@ -18,6 +19,60 @@ from collectors.common import (
     resolve_tool_path,
     run_subprocess_safe,
 )
+
+
+def inspect_ghidra_mcp_status(
+    ghidra_mcp_dir: Path | None,
+    headless_bin: Path | None,
+) -> dict[str, Any]:
+    """Check GhidraMCP clone, bridge script, plugin extension, Python deps, and runtime state."""
+    repo_cloned = bool(
+        ghidra_mcp_dir
+        and ghidra_mcp_dir.is_dir()
+        and ((ghidra_mcp_dir / ".git").exists() or (ghidra_mcp_dir / "bridge_mcp_ghidra.py").is_file())
+    )
+    bridge_script = bool(ghidra_mcp_dir and (ghidra_mcp_dir / "bridge_mcp_ghidra.py").is_file())
+    plugin_in_repo = False
+    if ghidra_mcp_dir and ghidra_mcp_dir.is_dir():
+        plugin_in_repo = bool(
+            list(ghidra_mcp_dir.glob("*.zip"))
+            or list(ghidra_mcp_dir.glob("target/*.zip"))
+            or (ghidra_mcp_dir / "src").is_dir()
+        )
+
+    plugin_installed_in_ghidra = False
+    extension_search_paths: list[Path] = []
+    if headless_bin:
+        ghidra_home = headless_bin.parent.parent
+        extension_search_paths.append(ghidra_home / "Ghidra" / "Extensions")
+    user_ghidra_dir = Path.home() / ".ghidra"
+    if user_ghidra_dir.is_dir():
+        for sub in user_ghidra_dir.iterdir():
+            if sub.is_dir() and (sub / "Extensions").is_dir():
+                extension_search_paths.append(sub / "Extensions")
+
+    for ext_dir in extension_search_paths:
+        if ext_dir.is_dir() and any("ghidramcp" in p.name.lower() for p in ext_dir.iterdir()):
+            plugin_installed_in_ghidra = True
+            break
+
+    deps_installed = (
+        importlib.util.find_spec("mcp") is not None
+        and importlib.util.find_spec("requests") is not None
+    )
+
+    return {
+        "repo_cloned": repo_cloned,
+        "bridge_script_present": bridge_script,
+        "plugin_source_or_zip_in_repo": plugin_in_repo,
+        "plugin_installed_in_ghidra_extensions": plugin_installed_in_ghidra,
+        "bridge_python_deps_available": deps_installed,
+        "runtime_verified": False,
+        "note": (
+            "GhidraMCP requires manual Ghidra GUI plugin installation and an active Ghidra GUI HTTP server; "
+            "offline headless pipeline never starts or runtime-verifies GhidraMCP."
+        ),
+    }
 
 
 class GhidraAnalyzer:
@@ -42,6 +97,28 @@ class GhidraAnalyzer:
             self.base_dir,
             ["analyzeHeadless.bat", "analyzeHeadless"],
         )
+        ghidra_mcp_dir = resolve_path(self.tools_cfg.get("ghidra_mcp_dir"), self.base_dir)
+        mcp_status = inspect_ghidra_mcp_status(ghidra_mcp_dir=ghidra_mcp_dir, headless_bin=headless_bin)
+        res.summary["ghidra_mcp"] = mcp_status
+
+        if mcp_status["repo_cloned"]:
+            res.tool_versions["ghidra_mcp"] = (
+                "repo cloned (plugin_installed=%s, deps=%s, runtime_verified=False)"
+                % (
+                    mcp_status["plugin_installed_in_ghidra_extensions"],
+                    mcp_status["bridge_python_deps_available"],
+                )
+            )
+            if not mcp_status["plugin_installed_in_ghidra_extensions"]:
+                res.limitations.append(
+                    "GhidraMCP repository is cloned, but Ghidra GUI plugin extension was not detected and runtime was not verified."
+                )
+        else:
+            res.tool_versions["ghidra_mcp"] = "not cloned"
+            res.limitations.append(
+                "GhidraMCP not cloned; headless analysis runs independently offline."
+            )
+
         if not headless_bin:
             res.limitations.append("Ghidra analyzeHeadless binary not found.")
             return res.finish(STATUS_UNAVAILABLE)
@@ -52,14 +129,6 @@ class GhidraAnalyzer:
             return res.finish(STATUS_UNAVAILABLE)
 
         res.tool_versions["ghidra_headless"] = str(headless_bin)
-        ghidra_mcp_dir = resolve_path(self.tools_cfg.get("ghidra_mcp_dir"), self.base_dir)
-        if ghidra_mcp_dir and ghidra_mcp_dir.exists():
-            res.tool_versions["ghidra_mcp"] = f"installed at {ghidra_mcp_dir}"
-        else:
-            res.limitations.append(
-                "GhidraMCP folder not detected; headless analysis runs independently offline."
-            )
-
         project_dir = workspace_dir / "ghidra_project"
         project_dir.mkdir(parents=True, exist_ok=True)
         project_name = f"malbox_{workspace_dir.name}"
@@ -103,13 +172,23 @@ class GhidraAnalyzer:
         if functions_json.is_file():
             res.artifacts.append("ghidra/functions.json")
             try:
-                parsed = json.loads(functions_json.read_text(encoding="utf-8"))
-                res.summary = {
-                    "function_count": len(parsed.get("functions", [])),
-                    "import_count": len(parsed.get("imports", [])),
-                    "export_count": len(parsed.get("exports", [])),
-                    "string_count": len(parsed.get("strings", [])),
-                }
+                parsed = json.loads(functions_json.read_text(encoding="utf-8-sig"))
+                res.summary.update(
+                    {
+                        "function_count": len(parsed.get("functions", [])),
+                        "import_count": len(parsed.get("imports", [])),
+                        "export_count": len(parsed.get("exports", [])),
+                        "string_count": len(parsed.get("strings", [])),
+                        "export_caps": {
+                            "max_imports": 2000,
+                            "max_exports": 500,
+                            "max_strings": 3000,
+                            "max_disassembled_functions": 80,
+                            "max_instructions_per_function": 200,
+                            "max_decompiled_functions": 40,
+                        },
+                    }
+                )
             except ValueError:
                 pass
 
@@ -117,7 +196,7 @@ class GhidraAnalyzer:
             res.artifacts.append("ghidra/disassembly.txt")
 
         decompiled_files = sorted(decompiled_dir.glob("*.c"))
-        for c_file in decompiled_files[:25]:
+        for c_file in decompiled_files[:40]:
             res.artifacts.append(f"ghidra/decompiled/{c_file.name}")
 
         if cmd_res["timed_out"]:

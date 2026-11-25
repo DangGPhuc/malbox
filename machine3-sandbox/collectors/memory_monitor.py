@@ -12,6 +12,7 @@ import psutil
 from collectors.common import (
     STATUS_COMPLETED,
     STATUS_PARTIAL,
+    STATUS_SKIPPED,
     CollectorResult,
     resolve_path,
     resolve_tool_path,
@@ -209,10 +210,27 @@ class MemoryMonitor:
                     f"Volatility plugin {plugin} failed or lacked offline symbols: {v_res['stderr'].strip()}"
                 )
 
-    def finalize(self, evidence_dir: Path) -> CollectorResult:
+    def finalize(self, evidence_dir: Path, skipped: bool = False, skip_reason: str = "") -> CollectorResult:
         """Write dynamic/memory/memory_usage.json cleanly distinguishing telemetry vs dumps."""
         mem_dir = evidence_dir / "dynamic" / "memory"
         mem_dir.mkdir(parents=True, exist_ok=True)
+
+        if skipped:
+            reason = skip_reason or "Dynamic sample execution did not run."
+            doc = {
+                "collected": False,
+                "not_collected_reason": reason,
+                "telemetry_type": "ram_usage_sampling",
+                "sample_count": 0,
+                "process_memory_dumps": [],
+                "full_physical_memory_dump": {"status": "skipped", "reason": reason},
+                "volatility_outputs": [],
+            }
+            write_json(mem_dir / "memory_usage.json", doc)
+            self.result.artifacts.append("dynamic/memory/memory_usage.json")
+            self.result.limitations.append(reason)
+            self.result.summary = {"collected": False, "process_dump_count": 0, "full_memory_status": "skipped"}
+            return self.result.finish(STATUS_SKIPPED)
 
         peak_system_pct = max((s["system_used_percent"] for s in self.ram_samples), default=0.0)
         peak_proc_rss: dict[int, int] = {}
@@ -222,6 +240,7 @@ class MemoryMonitor:
                 peak_proc_rss[pid] = max(peak_proc_rss.get(pid, 0), int(proc["rss_bytes"]))
 
         doc = {
+            "collected": True,
             "telemetry_type": "ram_usage_sampling",
             "note": "RAM usage telemetry is distinct from process memory dumps and full physical RAM dumps.",
             "sample_count": len(self.ram_samples),
@@ -235,6 +254,7 @@ class MemoryMonitor:
         write_json(mem_dir / "memory_usage.json", doc)
         self.result.artifacts.append("dynamic/memory/memory_usage.json")
         self.result.summary = {
+            "collected": True,
             "ram_sample_count": len(self.ram_samples),
             "process_dump_count": sum(1 for d in self.process_dumps if d.get("status") == "completed"),
             "full_memory_status": self.full_memory_info.get("status"),

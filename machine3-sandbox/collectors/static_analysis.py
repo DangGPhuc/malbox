@@ -15,12 +15,12 @@ from collectors.common import (
     STATUS_PARTIAL,
     STATUS_UNAVAILABLE,
     CollectorResult,
+    compute_file_entropy,
     compute_file_hashes,
     get_tool_version,
     resolve_path,
     resolve_tool_path,
     run_subprocess_safe,
-    shannon_entropy,
     timestamp_from_epoch,
     write_json,
 )
@@ -170,7 +170,7 @@ class StaticAnalyzer:
         try:
             hashes = compute_file_hashes(sample_path)
             hashes["file_type"] = detect_file_type(sample_path)
-            hashes["entropy"] = shannon_entropy(sample_path.read_bytes())
+            hashes["entropy"] = compute_file_entropy(sample_path)
             write_json(static_dir / "hashes.json", hashes)
             res.artifacts.append("static/hashes.json")
             res.summary.update({"sha256": hashes["sha256"], "file_type": hashes["file_type"]})

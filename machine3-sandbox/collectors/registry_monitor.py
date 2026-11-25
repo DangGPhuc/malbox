@@ -10,6 +10,7 @@ from typing import Any
 from collectors.common import (
     STATUS_COMPLETED,
     STATUS_PARTIAL,
+    STATUS_SKIPPED,
     STATUS_UNAVAILABLE,
     CollectorResult,
     write_json,
@@ -63,10 +64,32 @@ class RegistryMonitor:
         sysmon_events: list[dict[str, Any]],
         procmon_rows: list[dict[str, str]],
         tracked_pids: set[int],
+        sysmon_available: bool = False,
+        procmon_available: bool = False,
+        skipped: bool = False,
+        skip_reason: str = "",
     ) -> CollectorResult:
         """Correlate registry operations for tracked PIDs into dynamic/registry/changes.json."""
         reg_dir = evidence_dir / "dynamic" / "registry"
         reg_dir.mkdir(parents=True, exist_ok=True)
+
+        if skipped:
+            reason = skip_reason or "Dynamic sample execution did not run."
+            write_json(
+                reg_dir / "changes.json",
+                {
+                    "collected": False,
+                    "not_collected_reason": reason,
+                    "change_count": 0,
+                    "persistence_indicator_count": 0,
+                    "persistence_indicators": [],
+                    "changes": [],
+                },
+            )
+            self.result.artifacts.append("dynamic/registry/changes.json")
+            self.result.limitations.append(reason)
+            self.result.summary = {"collected": False}
+            return self.result.finish(STATUS_SKIPPED)
 
         changes: list[dict[str, Any]] = []
         persistence_hits: list[dict[str, Any]] = []
@@ -119,6 +142,7 @@ class RegistryMonitor:
         write_json(
             reg_dir / "changes.json",
             {
+                "collected": sysmon_available or procmon_available,
                 "change_count": len(changes),
                 "persistence_indicator_count": len(persistence_hits),
                 "persistence_indicators": persistence_hits[:500],
@@ -127,15 +151,22 @@ class RegistryMonitor:
         )
         self.result.artifacts.append("dynamic/registry/changes.json")
         self.result.summary = {
+            "collected": sysmon_available or procmon_available,
             "registry_event_count": len(changes),
             "persistence_indicator_count": len(persistence_hits),
+            "sysmon_available": sysmon_available,
+            "procmon_available": procmon_available,
         }
 
-        if not sysmon_events and not procmon_rows:
+        if not sysmon_available and not procmon_available:
             self.result.limitations.append(
-                "Neither Sysmon nor Procmon registry events were available."
+                "Neither Sysmon nor Procmon registry telemetry was available."
             )
             return self.result.finish(STATUS_UNAVAILABLE)
-        if not sysmon_events or not procmon_rows:
+        if not sysmon_available or not procmon_available:
+            if not sysmon_available:
+                self.result.limitations.append("Sysmon registry events unavailable.")
+            if not procmon_available:
+                self.result.limitations.append("Procmon registry export unavailable.")
             return self.result.finish(STATUS_PARTIAL)
         return self.result.finish(STATUS_COMPLETED)

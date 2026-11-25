@@ -36,3 +36,12 @@
 
 ## 8. MalBox MCP Import Conflict (`No module named 'mcp.server.fastmcp'`)
 - Always launch `machine3-sandbox/mcp/server.py` using the virtual environment Python (`machine3-sandbox\.venv\Scripts\python.exe`). `server.py` automatically strips the local `mcp/` directory from `sys.path` before importing the official `mcp` Python SDK.
+
+## 9. Client Fails During Evidence Download or ZIP Extraction
+- Gateway keeps returned archives under `machine2-gateway/retained_evidence/evidence_<job_id>.zip` (when `retain_evidence_archives` is `true` in `machine2-gateway/config.json`).
+- You can re-fetch the archive manually from Machine 1 using:
+  `curl -f -o evidence_<job_id>.zip http://10.10.10.20:8000/jobs/<job_id>/evidence`
+
+## 10. `JSONDecodeError: Unexpected UTF-8 BOM` on Windows
+- `install.ps1` writes UTF-8 files without BOM on both Windows PowerShell 5.1 and PowerShell 7+.
+- `doctor.py`, `gateway.py`, `sandbox.py`, `analyzer.py`, and `mcp/tools.py` all read JSON with `utf-8-sig`, so manual edits saved with BOM in Windows editors are tolerated safely.

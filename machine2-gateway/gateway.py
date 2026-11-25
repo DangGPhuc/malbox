@@ -41,10 +41,10 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load Machine 2 Gateway configuration from JSON."""
+    """Load Machine 2 Gateway configuration from JSON (UTF-8 with/without BOM)."""
     if not config_path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    with config_path.open("r", encoding="utf-8") as fh:
+    with config_path.open("r", encoding="utf-8-sig") as fh:
         return json.load(fh)
 
 
@@ -63,6 +63,14 @@ def sanitize_filename(name: str) -> str:
     return cleaned or "sample.bin"
 
 
+def sanitize_job_id(job_id: str) -> str:
+    """Validate and constrain job_id to safe filename characters."""
+    cleaned = "".join(ch for ch in (job_id or "") if ch.isalnum() or ch in ("-", "_"))
+    if not cleaned or cleaned != job_id:
+        raise ValueError(f"Invalid job_id: {job_id!r}")
+    return cleaned
+
+
 def safe_unlink(path: Path | None) -> None:
     """Remove a temporary file if it exists without raising."""
     if path is None:
@@ -77,12 +85,23 @@ def safe_unlink(path: Path | None) -> None:
 class GatewayState:
     """Thread-safe single-job state holder for the Gateway relay."""
 
-    def __init__(self, config: dict[str, Any], temp_dir: Path, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        temp_dir: Path,
+        archive_dir: Path,
+        logger: logging.Logger,
+    ) -> None:
         self.config = config
         self.temp_dir = temp_dir
+        self.archive_dir = archive_dir
         self.logger = logger
         self.lock = threading.Lock()
         self.active_job: dict[str, Any] | None = None
+
+    @property
+    def retain_evidence_archives(self) -> bool:
+        return bool(self.config.get("retain_evidence_archives", True))
 
     @property
     def sandbox_base_url(self) -> str:
@@ -118,9 +137,11 @@ class GatewayState:
 def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger) -> Flask:
     """Create the Flask Gateway application."""
     temp_dir = resolve_dir(str(config.get("temp_dir", "./tmp")), config_dir)
+    archive_dir = resolve_dir(str(config.get("evidence_archive_dir", "./retained_evidence")), config_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir.mkdir(parents=True, exist_ok=True)
 
-    state = GatewayState(config=config, temp_dir=temp_dir, logger=logger)
+    state = GatewayState(config=config, temp_dir=temp_dir, archive_dir=archive_dir, logger=logger)
     app = Flask(__name__)
 
     def query_sandbox_status() -> tuple[int, dict[str, Any]]:
@@ -187,7 +208,8 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     state.active_job["job_status"] = job_info.get("job_status", "")
 
             if job_info.get("evidence_ready"):
-                zip_path = state.temp_dir / f"evidence_{job_id}.zip"
+                zip_path = state.archive_dir / f"evidence_{job_id}.zip"
+                tmp_download_path = state.temp_dir / f".dl_evidence_{job_id}.zip"
                 try:
                     with requests.get(
                         f"{state.sandbox_base_url}/jobs/{job_id}/evidence",
@@ -198,7 +220,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             raise RuntimeError(f"HTTP {dl.status_code}: {dl.text.strip()}")
                         expected_sha256 = dl.headers.get("X-Archive-SHA256", "").strip().lower()
                         digest = hashlib.sha256()
-                        with zip_path.open("wb") as fh:
+                        with tmp_download_path.open("wb") as fh:
                             for chunk in dl.iter_content(chunk_size=state.chunk_size):
                                 if chunk:
                                     fh.write(chunk)
@@ -210,6 +232,8 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             f"Evidence checksum mismatch ({actual_sha256} != {expected_sha256})"
                         )
 
+                    tmp_download_path.replace(zip_path)
+
                     # Acknowledge transfer so Sandbox moves to RESTORE_REQUIRED.
                     try:
                         requests.post(
@@ -219,7 +243,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     except requests.RequestException as ack_exc:
                         logger.warning("[WARN] Failed to ack evidence receipt to sandbox: %s", ack_exc)
 
-                    logger.info("[OK] Evidence received from sandbox.")
+                    logger.info("[OK] Evidence received from sandbox (retained at %s).", zip_path.name)
                     with state.lock:
                         if state.active_job and state.active_job.get("job_id") == job_id:
                             state.active_job["status"] = "EVIDENCE_READY"
@@ -228,7 +252,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             state.active_job["archive_sha256"] = actual_sha256
                     return
                 except (requests.RequestException, OSError, RuntimeError, ValueError) as exc:
-                    safe_unlink(zip_path)
+                    safe_unlink(tmp_download_path)
                     logger.error("[ERROR] Evidence transfer from sandbox failed: %s", exc)
                     with state.lock:
                         if state.active_job and state.active_job.get("job_id") == job_id:
@@ -303,7 +327,8 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                         ),
                         409,
                     )
-                safe_unlink(state.active_job.get("zip_path"))
+                if not state.retain_evidence_archives:
+                    safe_unlink(state.active_job.get("zip_path"))
                 state.active_job = None
 
         filename = sanitize_filename(request.headers.get("X-Sample-Filename", "sample.bin"))
@@ -493,28 +518,50 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
 
     @app.get("/jobs/<job_id>/evidence")
     def get_job_evidence(job_id: str) -> Response | tuple[Response, int]:
+        try:
+            safe_id = sanitize_job_id(job_id)
+        except ValueError as exc:
+            return jsonify({"error_code": "INVALID_JOB_ID", "error": str(exc)}), 400
+
+        zip_path: Path | None = None
+        archive_sha256 = ""
         with state.lock:
             job = state.active_job
-            if not job or job.get("job_id") != job_id:
-                return jsonify({"error_code": "JOB_NOT_FOUND", "error": "Unknown job ID."}), 404
-            zip_path = job.get("zip_path")
-            archive_sha256 = job.get("archive_sha256", "")
-            if not job.get("evidence_ready") or not zip_path or not Path(zip_path).is_file():
-                return (
-                    jsonify(
-                        {
-                            "error_code": "EVIDENCE_NOT_READY",
-                            "error": "Evidence archive is not ready yet.",
-                        }
-                    ),
-                    409,
-                )
+            if job and job.get("job_id") == safe_id:
+                if not job.get("evidence_ready"):
+                    return (
+                        jsonify(
+                            {
+                                "error_code": "EVIDENCE_NOT_READY",
+                                "error": "Evidence archive is not ready yet.",
+                            }
+                        ),
+                        409,
+                    )
+                zip_path = Path(job["zip_path"]) if job.get("zip_path") else None
+                archive_sha256 = str(job.get("archive_sha256") or "")
 
-        zip_file = Path(zip_path)
+        if zip_path is None:
+            candidate = state.archive_dir / f"evidence_{safe_id}.zip"
+            if candidate.is_file():
+                zip_path = candidate
+                digest = hashlib.sha256()
+                with candidate.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(state.chunk_size)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                archive_sha256 = digest.hexdigest()
+
+        if zip_path is None or not zip_path.is_file():
+            return jsonify({"error_code": "JOB_NOT_FOUND", "error": "Evidence archive not found for job ID."}), 404
+
+        zip_file = zip_path
         file_size = zip_file.stat().st_size
         logger.info("[GATEWAY] Returning evidence to client...")
 
-        def stream_and_cleanup():
+        def stream_evidence():
             completed = False
             try:
                 with zip_file.open("rb") as fh:
@@ -526,21 +573,47 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                 completed = True
             finally:
                 if completed:
-                    safe_unlink(zip_file)
-                    with state.lock:
-                        if state.active_job and state.active_job.get("job_id") == job_id:
-                            state.active_job = None
-                    logger.info("[OK] Transfer completed.")
-                    logger.info("[GATEWAY] Waiting for client...")
+                    logger.info("[OK] Transfer completed (archive retained at %s).", zip_file)
                 else:
-                    logger.error("[ERROR] Evidence transfer to client interrupted.")
+                    logger.error(
+                        "[ERROR] Evidence transfer to client interrupted; archive retained at %s for recovery.",
+                        zip_file,
+                    )
 
         headers = {
             "Content-Length": str(file_size),
-            "Content-Disposition": f'attachment; filename="evidence_{job_id}.zip"',
+            "Content-Disposition": f'attachment; filename="evidence_{safe_id}.zip"',
             "X-Archive-SHA256": archive_sha256,
         }
-        return Response(stream_and_cleanup(), status=200, mimetype="application/zip", headers=headers)
+        return Response(stream_evidence(), status=200, mimetype="application/zip", headers=headers)
+
+    @app.post("/jobs/<job_id>/ack")
+    def ack_client_receipt(job_id: str) -> tuple[Response, int]:
+        try:
+            safe_id = sanitize_job_id(job_id)
+        except ValueError as exc:
+            return jsonify({"error_code": "INVALID_JOB_ID", "error": str(exc)}), 400
+
+        retained_path = state.archive_dir / f"evidence_{safe_id}.zip"
+        with state.lock:
+            job = state.active_job
+            if job and job.get("job_id") == safe_id:
+                zip_ref = Path(job["zip_path"]) if job.get("zip_path") else retained_path
+                if not state.retain_evidence_archives:
+                    safe_unlink(zip_ref)
+                state.active_job = None
+            elif not retained_path.is_file():
+                return jsonify({"error_code": "JOB_NOT_FOUND", "error": "Unknown job ID."}), 404
+
+        logger.info("[OK] Client verified evidence receipt for job %s.", safe_id)
+        logger.info("[GATEWAY] Waiting for client...")
+        return jsonify(
+            {
+                "status": "acknowledged",
+                "job_id": safe_id,
+                "retained_on_gateway": state.retain_evidence_archives,
+            }
+        ), 200
 
     return app
 

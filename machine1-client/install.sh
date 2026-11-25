@@ -11,9 +11,13 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-python3 -m venv "${VENV_DIR}"
+if ! python3 -m venv "${VENV_DIR}"; then
+    echo "[ERROR] Failed creating virtual environment. On Debian/Kali, install: sudo apt install python3-venv"
+    exit 1
+fi
 "${VENV_DIR}/bin/pip" install --upgrade pip
 "${VENV_DIR}/bin/pip" install -r "${SCRIPT_DIR}/requirements.txt"
+"${VENV_DIR}/bin/python" -c "import requests"
 
 chmod +x "${SCRIPT_DIR}/doctor.py"
 mkdir -p "${SCRIPT_DIR}/evidence"

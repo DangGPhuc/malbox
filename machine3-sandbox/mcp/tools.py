@@ -10,7 +10,7 @@ from typing import Any
 def _load_config(config_path: Path) -> dict[str, Any]:
     if not config_path.is_file():
         return {"evidence_dir": "./evidence", "workspace_dir": "./workspace"}
-    with config_path.open("r", encoding="utf-8") as fh:
+    with config_path.open("r", encoding="utf-8-sig") as fh:
         return json.load(fh)
 
 
@@ -44,7 +44,7 @@ class EvidenceStore:
         if not path.is_file():
             return {"available": False, "missing_file": path.name}
         try:
-            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
         except ValueError as exc:
             return {"available": False, "error": f"Invalid JSON in {path.name}: {exc}"}
 
@@ -83,7 +83,7 @@ class EvidenceStore:
         strings_path = static_dir / "strings.txt"
         strings_preview: list[str] = []
         if strings_path.is_file():
-            strings_preview = strings_path.read_text(encoding="utf-8", errors="replace").splitlines()[:150]
+            strings_preview = strings_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:150]
         return {
             "job_id": job_id,
             "hashes": self._read_json(static_dir / "hashes.json"),
@@ -192,7 +192,7 @@ class EvidenceStore:
             for fname in decompiled_files:
                 if function_name and function_name.lower() not in fname.lower():
                     continue
-                snippets[fname] = (decompiled_dir / fname).read_text(encoding="utf-8", errors="replace")[:8000]
+                snippets[fname] = (decompiled_dir / fname).read_text(encoding="utf-8-sig", errors="replace")[:8000]
                 if len(snippets) >= 5:
                     break
             result["decompiled_snippets"] = snippets
@@ -226,7 +226,7 @@ class EvidenceStore:
     def get_evidence_summary(self, job_id: str) -> dict[str, Any]:
         job_dir = self._job_dir(job_id)
         report_path = job_dir / "report.md"
-        report_md = report_path.read_text(encoding="utf-8", errors="replace") if report_path.is_file() else ""
+        report_md = report_path.read_text(encoding="utf-8-sig", errors="replace") if report_path.is_file() else ""
         return {
             "job_id": job_id,
             "summary": self._read_json(job_dir / "summary.json"),

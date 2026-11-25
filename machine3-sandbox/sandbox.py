@@ -50,10 +50,10 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load Machine 3 Sandbox configuration."""
+    """Load Machine 3 Sandbox configuration (supports UTF-8 with or without BOM)."""
     if not config_path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    with config_path.open("r", encoding="utf-8") as fh:
+    with config_path.open("r", encoding="utf-8-sig") as fh:
         return json.load(fh)
 
 
@@ -169,6 +169,11 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
             controller.state = STATE_RETURNING_EVIDENCE if evidence_ready else STATE_RESTORE_REQUIRED
 
         if evidence_ready:
+            if result.get("job_status") == "failed":
+                logger.warning(
+                    "[WARN] Analysis failed (%s); partial evidence packaged for transfer.",
+                    result.get("error"),
+                )
             logger.info("[SANDBOX] Returning evidence to gateway...")
         else:
             logger.error("[ERROR] Evidence packaging failed: %s", result.get("error"))
@@ -237,18 +242,15 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
         filename = sanitize_filename(request.headers.get("X-Sample-Filename", "sample.bin"))
         expected_sha256 = request.headers.get("X-Sample-SHA256", "").strip().lower()
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        job_id = f"{stamp}_{expected_sha256[:12]}" if expected_sha256 else f"job_{stamp}"
-
-        job_workspace = controller.workspace_root / job_id
-        sample_dir = job_workspace / "sample"
-        job_evidence = controller.evidence_root / job_id
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        sample_path = sample_dir / filename
+        staging_dir = controller.workspace_root / f"staging_{stamp}"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_sample = staging_dir / filename
+        job_workspace: Path | None = None
 
         try:
             total_bytes = 0
             digest = hashlib.sha256()
-            with sample_path.open("wb") as fh:
+            with staging_sample.open("wb") as fh:
                 while True:
                     chunk = request.stream.read(chunk_size)
                     if not chunk:
@@ -258,14 +260,14 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     fh.write(chunk)
 
             if total_bytes == 0:
-                shutil.rmtree(job_workspace, ignore_errors=True)
+                shutil.rmtree(staging_dir, ignore_errors=True)
                 with controller.lock:
                     controller.state = STATE_READY
                 return jsonify({"error_code": "EMPTY_SAMPLE", "error": "Empty sample received."}), 400
 
             actual_sha256 = digest.hexdigest().lower()
             if expected_sha256 and actual_sha256 != expected_sha256:
-                shutil.rmtree(job_workspace, ignore_errors=True)
+                shutil.rmtree(staging_dir, ignore_errors=True)
                 with controller.lock:
                     controller.state = STATE_READY
                 return (
@@ -278,10 +280,14 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     400,
                 )
 
-            if not expected_sha256:
-                new_job_id = f"{stamp}_{actual_sha256[:12]}"
-                job_id = new_job_id
-                job_evidence = controller.evidence_root / job_id
+            job_id = f"{stamp}_{actual_sha256[:12]}"
+            job_workspace = controller.workspace_root / job_id
+            sample_dir = job_workspace / "sample"
+            job_evidence = controller.evidence_root / job_id
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            sample_path = sample_dir / filename
+            shutil.move(str(staging_sample), str(sample_path))
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
             controller.mark_dirty(job_id=job_id, sha256=actual_sha256)
             logger.info("[OK] Sample received: %s (Job ID: %s).", filename, job_id)
@@ -309,7 +315,9 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
 
             return jsonify({"job_id": job_id, "state": STATE_ANALYZING}), 202
         except OSError as exc:
-            shutil.rmtree(job_workspace, ignore_errors=True)
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            if job_workspace is not None:
+                shutil.rmtree(job_workspace, ignore_errors=True)
             with controller.lock:
                 controller.state = STATE_READY
             logger.error("[ERROR] Failed saving incoming sample: %s", exc)

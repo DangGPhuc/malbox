@@ -12,6 +12,7 @@ from collectors.common import (
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_PARTIAL,
+    STATUS_SKIPPED,
     STATUS_UNAVAILABLE,
     CollectorResult,
     run_subprocess_safe,
@@ -112,16 +113,32 @@ class EventLogMonitor:
         self,
         evidence_dir: Path,
         start_time_utc: str,
-    ) -> tuple[CollectorResult, dict[str, list[dict[str, Any]]]]:
+        skipped: bool = False,
+        skip_reason: str = "",
+    ) -> tuple[CollectorResult, dict[str, list[dict[str, Any]]], bool]:
         """Export EVTX channels without clearing original Windows logs."""
         res = CollectorResult(name="eventlog_monitor")
         eventlogs_dir = evidence_dir / "dynamic" / "eventlogs"
         eventlogs_dir.mkdir(parents=True, exist_ok=True)
         parsed_by_channel: dict[str, list[dict[str, Any]]] = {}
 
+        if skipped:
+            write_json(
+                eventlogs_dir / "events_summary.json",
+                {
+                    "window_start_utc": start_time_utc,
+                    "collected": False,
+                    "not_collected_reason": skip_reason or "Dynamic sample execution did not run.",
+                    "channels": {},
+                },
+            )
+            res.artifacts.append("dynamic/eventlogs/events_summary.json")
+            res.limitations.append(skip_reason or "Dynamic sample execution did not run.")
+            return res.finish(STATUS_SKIPPED), parsed_by_channel, False
+
         if not sys.platform.startswith("win"):
             res.limitations.append("Windows Event Log collection requires Windows host (wevtutil.exe).")
-            return res.finish(STATUS_UNAVAILABLE), parsed_by_channel
+            return res.finish(STATUS_UNAVAILABLE), parsed_by_channel, False
 
         exported_count = 0
         channel_statuses: dict[str, Any] = {}
@@ -163,8 +180,13 @@ class EventLogMonitor:
                     "error": "Empty or missing exported EVTX.",
                 }
 
+        sysmon_meta = channel_statuses.get("sysmon", {})
+        sysmon_available = bool(sysmon_meta.get("exported")) and sysmon_meta.get("parse_note") is None
+
         summary_doc = {
             "window_start_utc": start_time_utc,
+            "collected": exported_count > 0,
+            "sysmon_available": sysmon_available,
             "channels": channel_statuses,
             "sysmon_events_preview": parsed_by_channel.get("sysmon", [])[:300],
             "powershell_events_preview": parsed_by_channel.get("powershell", [])[:150],
@@ -176,11 +198,12 @@ class EventLogMonitor:
         res.artifacts.append("dynamic/eventlogs/events_summary.json")
         res.summary = {
             "exported_channels": exported_count,
+            "sysmon_available": sysmon_available,
             "sysmon_event_count": len(parsed_by_channel.get("sysmon", [])),
         }
 
         if exported_count == 0:
-            return res.finish(STATUS_FAILED), parsed_by_channel
+            return res.finish(STATUS_FAILED), parsed_by_channel, sysmon_available
         if exported_count < len(EVENT_CHANNELS):
-            return res.finish(STATUS_PARTIAL), parsed_by_channel
-        return res.finish(STATUS_COMPLETED), parsed_by_channel
+            return res.finish(STATUS_PARTIAL), parsed_by_channel, sysmon_available
+        return res.finish(STATUS_COMPLETED), parsed_by_channel, sysmon_available

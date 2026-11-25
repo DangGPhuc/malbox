@@ -32,9 +32,9 @@ MalBox splits malware analysis across three isolated virtual machines communicat
    - Starts dynamic collectors (`Procmon`, `dumpcap`, `psutil` baseline)
    - Awaits local console approval (`require_local_approval: true`)
    - Launches sample under standard user context for `observation_duration_seconds` (default `120`s)
-   - Captures process memory dumps (`ProcDump`), safely terminates tracked sample PIDs, collects optional WinPmem/Volatility 3, exports Windows Event Logs (`wevtutil`), correlates Sysmon/Procmon/TShark data, builds `timeline.json`, `summary.json`, `report.md`, `manifest.json`, and streams files into `evidence_<job_id>.zip` (excluding original sample and dropped executables).
-6. Gateway downloads the ZIP archive (`GET /jobs/<id>/evidence`), calls `POST /jobs/<id>/ack` (moving Sandbox to `RESTORE_REQUIRED`), and streams the exact ZIP unchanged to Client.
-7. Client saves and safely extracts `evidence/<job_id>/`.
+   - Captures process memory dumps (`ProcDump` on live tracked PIDs), safely terminates tracked sample PIDs, collects optional WinPmem/Volatility 3, exports Windows Event Logs (`wevtutil`), correlates Sysmon/Procmon/TShark data, builds `timeline.json`, `summary.json`, `report.md`, `manifest.json`, and streams files into `evidence_<job_id>.zip` (excluding original sample and dropped executables).
+6. Gateway downloads the ZIP archive (`GET /jobs/<id>/evidence`), retains a backup copy under `retained_evidence/` (`retain_evidence_archives: true`), calls `POST /jobs/<id>/ack` on Sandbox (moving Sandbox to `RESTORE_REQUIRED`), and streams the exact ZIP unchanged to Client.
+7. Client downloads, verifies SHA-256 and ZIP integrity, safely extracts `evidence/<job_id>/`, and sends `POST /jobs/<id>/ack` to Gateway. If Client transfer or extraction fails, the archive remains recoverable on Gateway (`retained_evidence/` or `GET /jobs/<id>/evidence`).
 
 ## 4. MalBox MCP Integration
 

@@ -25,7 +25,7 @@ Then complete the manual Windows tool setup (Sysmon driver install, Wireshark/Np
 python sandbox.py
 ```
 
-By default, `require_local_approval` is `true` in `config.json`, meaning the local operator confirms dynamic execution on the Sandbox console (`y` + Enter) before the sample runs for `observation_duration_seconds` (default `120` seconds).
+By default, `require_local_approval` is `true` in `config.json`, meaning the local operator confirms dynamic execution on the Sandbox console (`y` + Enter) before the sample runs for `observation_duration_seconds` (default `120` seconds). `manifest.json` and `summary.json` explicitly record both configured and actual observation duration, execution status (`completed`, `skipped`, `launch_failed`, `interrupted`), and distinguish `0` observed events from uncollected (`unavailable` / `failed` / `skipped`) collectors.
 
 ## Local MalBox MCP Server
 
@@ -34,3 +34,5 @@ After an analysis produces `evidence/<job_id>/`, you can inspect artifacts local
 ```powershell
 .\.venv\Scripts\python.exe mcp\server.py
 ```
+
+Note: `GhidraMCP` is an optional interactive GUI extension and is separate from automated headless Ghidra export. See [../docs/tools-setup.md](../docs/tools-setup.md) for extension setup and collector/Windows privilege limitations.
