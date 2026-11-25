@@ -1,0 +1,12 @@
+{
+  "gateway_host": "10.10.10.20",
+  "gateway_port": 8000,
+  "evidence_dir": "./evidence",
+  "connect_timeout_seconds": 5,
+  "request_timeout_seconds": 30,
+  "poll_interval_seconds": 3,
+  "analysis_timeout_seconds": 1800,
+  "chunk_size_bytes": 65536,
+  "extract_archive": true,
+  "keep_zip": false
+}

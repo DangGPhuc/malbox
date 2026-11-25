@@ -1,0 +1,70 @@
+# Python bytecode & packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Runtime workspaces, temporary files, and sample uploads
+tmp/
+temp/
+workspace/
+**/tmp/
+**/workspace/
+*.tmp
+*.log
+logs/
+**/logs/
+.dirty_state
+
+# Evidence outputs, forensic artifacts, memory dumps, and packet captures
+evidence/
+**/evidence/
+*.zip
+*.7z
+*.tar.gz
+*.pcap
+*.pcapng
+*.dmp
+*.mdmp
+*.raw
+*.mem
+*.vmem
+*.pml
+*.evtx
+
+# Malware / sample binaries (never commit samples)
+samples/
+**/samples/
+*.exe
+*.dll
+*.sys
+*.bin
+*.scr
+*.cpl
+*.msi
+*.bat.sample
+*.ps1.sample
+
+# Downloaded or cloned third-party tools and generated Ghidra projects
+machine3-sandbox/tools/*
+!machine3-sandbox/tools/README.md
+machine3-sandbox/mcp/config.json
+*.rep/
+*.gpr
+*.lock
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

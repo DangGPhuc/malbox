@@ -1,0 +1,7 @@
+Flask>=3.0.0
+requests>=2.31.0
+psutil>=5.9.8
+pefile>=2023.2.7
+yara-python>=4.5.0
+python-evtx>=0.7.4
+mcp>=1.0.0
