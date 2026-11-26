@@ -34,7 +34,7 @@ NON_BINARY_FORMAT_FAMILIES = {
 }
 
 _LOG_FAILURE_RE = re.compile(
-    r"(?:unable to compile|script does not exist|reported errors|exception occurred|ghidra\.app\.script\.ghidrascriptexception)",
+    r"(?:unable to compile|script does not exist|reported errors|exception occurred|error: cannot find symbol|report script error|ghidra\.app\.script\.ghidrascript(?:load)?exception)",
     re.IGNORECASE,
 )
 

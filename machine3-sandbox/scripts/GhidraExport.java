@@ -24,7 +24,6 @@ import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
-import ghidra.program.util.DefinedDataIterator;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -254,12 +253,15 @@ public class GhidraExport extends GhidraScript {
 
         List<Map<String, Object>> strings = new ArrayList<>();
         int totalStringCount = 0;
-        DataIterator dataIter = DefinedDataIterator.definedStrings(currentProgram);
+        DataIterator dataIter = currentProgram.getListing().getDefinedData(true);
         while (dataIter.hasNext()) {
             if (monitor.isCancelled()) {
                 break;
             }
             Data data = dataIter.next();
+            if (!data.hasStringValue()) {
+                continue;
+            }
             totalStringCount++;
             if (strings.size() < MAX_STRINGS) {
                 String val = null;
