@@ -254,6 +254,7 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "capa_rules": "./tools/capa-rules",
         "yara": "./tools/yara/yara64.exe",
         "yara_rules_dir": "./scripts/yara_rules",
+        "die": "./tools/die/diec.exe",
         "ghidra_headless": "./tools/ghidra/support/analyzeHeadless.bat",
         "ghidra_script_dir": "./scripts",
         "ghidra_export_script": "GhidraExport.java",
@@ -275,6 +276,8 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "observation_duration_seconds": 120,
         "require_local_approval": True,
         "ghidra_timeout_seconds": 300,
+        "die_timeout_seconds": 60,
+        "enable_attack_mapping": True,
         "min_free_disk_mb": 2048,
         "procdump_enabled": True,
         "winpmem_enabled": False,
@@ -314,6 +317,8 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     obs_dur = _validate_number(parsed, "observation_duration_seconds", errors, min_val=1.0, required=True)
     req_app = _validate_bool(parsed, "require_local_approval", errors, required=True)
     gh_timeout = _validate_number(parsed, "ghidra_timeout_seconds", errors, min_val=1.0, required=True)
+    die_timeout = _validate_number(parsed, "die_timeout_seconds", errors, min_val=1.0, required=False)
+    attack_en = _validate_bool(parsed, "enable_attack_mapping", errors, required=False)
     min_disk = _validate_int(parsed, "min_free_disk_mb", errors, min_val=1, required=True)
 
     _validate_number(parsed, "poll_sample_interval_seconds", errors, min_val=0.05, required=False)
@@ -361,6 +366,10 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         safe_cfg["require_local_approval"] = req_app
     if gh_timeout is not None:
         safe_cfg["ghidra_timeout_seconds"] = gh_timeout
+    if die_timeout is not None:
+        safe_cfg["die_timeout_seconds"] = die_timeout
+    if attack_en is not None:
+        safe_cfg["enable_attack_mapping"] = attack_en
     if min_disk is not None:
         safe_cfg["min_free_disk_mb"] = min_disk
     if pd_en is not None:
@@ -1342,6 +1351,52 @@ def main(argv: list[str] | None = None) -> int:
                 configured_path=str(tools_cfg.get("yara")),
                 diagnostic_message="Optional YARA CLI not installed (static/yara.json remains available via yara-python).",
                 unavailable_evidence_if_missing="CLI fallback only; static/yara.json remains available via yara-python.",
+            )
+        )
+
+    # Optional Detect It Easy (diec)
+    die_cli = resolve_tool(tools_cfg.get("die"), ["diec.exe", "diec"])
+    if die_cli:
+        dc = run_bounded([str(die_cli), "--version"], timeout=10.0)
+        dc_ver = dc["stdout"].splitlines()[0] if dc["stdout"] else None
+        checks.append(
+            make_check(
+                name="detect_it_easy_optional",
+                category="static",
+                required=False,
+                status=STATUS_PASS if dc["returncode"] == 0 else STATUS_FAIL,
+                detected_version=dc_ver,
+                configured_path=str(tools_cfg.get("die")),
+                resolved_path=str(die_cli),
+                installed=True,
+                runtime_verified=dc["returncode"] == 0,
+                diagnostic_message=(
+                    f"Optional Detect It Easy CLI {dc_ver}"
+                    if dc["returncode"] == 0
+                    else f"Detect It Easy probe failed: {dc['stderr']}"
+                ),
+                unavailable_evidence_if_missing=(
+                    "Optional DIE compiler/packer signatures (static/die.json) unavailable; "
+                    "PE metadata and file signatures remain active."
+                ),
+            )
+        )
+    else:
+        checks.append(
+            make_check(
+                name="detect_it_easy_optional",
+                category="static",
+                required=False,
+                status=STATUS_OPTIONAL,
+                configured_path=str(tools_cfg.get("die")),
+                diagnostic_message=(
+                    "Optional Detect It Easy CLI (diec) not installed "
+                    "(static/hashes.json and static/pe_info.json remain active)."
+                ),
+                unavailable_evidence_if_missing=(
+                    "Optional DIE compiler/packer signatures (static/die.json) unavailable; "
+                    "PE metadata and file signatures remain active."
+                ),
             )
         )
 

@@ -23,6 +23,7 @@ from collectors.common import (
     utc_now_iso,
     write_json,
 )
+from collectors.attack_mapping import build_attack_mapping
 from collectors.eventlog_monitor import EventLogMonitor
 from collectors.filesystem_monitor import FilesystemMonitor, ProcmonSession
 from collectors.ghidra_analysis import GhidraAnalyzer
@@ -152,10 +153,12 @@ def _fmt_metric(value: Any, collector_status: str | None) -> str:
 
 def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) -> str:
     sample = summary.get("sample", {})
+    file_ident = sample.get("file_identification", {}) or {}
     static = summary.get("static", {})
     dynamic = summary.get("dynamic", {})
     statuses = summary.get("collector_statuses", {})
     iocs = summary.get("potential_iocs", {})
+    attack_summary = summary.get("attack_mapping", {}) or {}
     limitations = manifest.get("analysis_limitations", [])
 
     lines = [
@@ -167,7 +170,10 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         "## 1. Sample Information",
         f"- **Filename:** `{sample.get('filename')}`",
         f"- **Size (bytes):** {sample.get('size_bytes')}",
-        f"- **File Type:** {sample.get('file_type')}",
+        f"- **File Type (magic/header):** {sample.get('file_type')}",
+        f"- **Declared Extension / Format Family:** `{file_ident.get('declared_extension') or 'none'}` / `{file_ident.get('format_family') or 'unknown'}`",
+        f"- **Format Extension Mismatch:** `{bool(file_ident.get('format_mismatch', False))}`"
+        + (f" ({file_ident.get('format_mismatch_reason')})" if file_ident.get("format_mismatch_reason") else ""),
         f"- **MD5:** `{sample.get('md5')}`",
         f"- **SHA-1:** `{sample.get('sha1')}`",
         f"- **SHA-256:** `{sample.get('sha256')}`",
@@ -189,6 +195,7 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **Extracted Strings:** {_fmt_metric(static.get('string_count'), statuses.get('strings_floss'))} (source: `{static.get('strings_source') or 'N/A'}`)",
         f"- **CAPA Capabilities:** {_fmt_metric(static.get('capa_capability_count'), statuses.get('capa'))}",
         f"- **YARA Matches:** {_fmt_metric(static.get('yara_match_count'), statuses.get('yara'))}",
+        f"- **Detect It Easy (optional):** {_fmt_metric(static.get('die_detections'), statuses.get('detect_it_easy'))}",
         f"- **Ghidra Functions:** {_fmt_metric(static.get('ghidra_function_count'), statuses.get('ghidra'))}",
         "",
         "## 3. Observed Process Activity",
@@ -243,6 +250,25 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
     else:
         lines.append("- No collector limitations reported.")
 
+    lines.extend(["", "## 10. Evidence-Backed MITRE ATT&CK Mapping"])
+    if not attack_summary.get("enabled", True):
+        lines.append("- ATT&CK mapping disabled by configuration (`enable_attack_mapping=false`).")
+    else:
+        top_techs = attack_summary.get("top_techniques") or []
+        lines.append(
+            f"- **Mapped Techniques:** {attack_summary.get('technique_count', 0)} "
+            f"(counts: {attack_summary.get('counts_by_observation_type') or {}})"
+        )
+        if top_techs:
+            for m in top_techs[:15]:
+                srcs = ", ".join(m.get("evidence_sources") or [])
+                lines.append(
+                    f"- `{m.get('technique_id')}` {m.get('technique_name')} "
+                    f"[{m.get('observation_type')}, confidence={m.get('confidence')}, sources={srcs}]"
+                )
+        else:
+            lines.append("- No ATT&CK technique indicators or correlated behaviors mapped.")
+
     lines.append("")
     return "\n".join(lines)
 
@@ -252,6 +278,7 @@ COLLECTOR_CLASSIFICATION: dict[str, str] = {
     "strings_floss": "mandatory_static_with_fallback",
     "capa": "mandatory_static",
     "yara": "mandatory_static",
+    "detect_it_easy": "optional_static",
     "ghidra": "conditional_static",
     "process_monitor": "mandatory_dynamic",
     "network_monitor": "mandatory_dynamic",
@@ -679,7 +706,25 @@ def run_analysis(
         if not bool(config.get("procdump_enabled", True)):
             disabled_optional_features.append("procdump_enabled=false")
 
-        statuses = [res.status for res in collector_results.values()]
+        optional_collectors_unavailable = [
+            cname
+            for cname, c_res in collector_results.items()
+            if COLLECTOR_CLASSIFICATION.get(cname) == "optional_static" and c_res.status == STATUS_UNAVAILABLE
+        ]
+        if optional_collectors_unavailable:
+            disabled_optional_features.extend(
+                f"{cname}=unavailable" for cname in optional_collectors_unavailable
+            )
+        enable_attack_mapping = bool(config.get("enable_attack_mapping", True))
+        if not enable_attack_mapping:
+            disabled_optional_features.append("enable_attack_mapping=false")
+
+        required_statuses = [
+            res.status
+            for cname, res in collector_results.items()
+            if not (COLLECTOR_CLASSIFICATION.get(cname) == "optional_static" and res.status == STATUS_UNAVAILABLE)
+        ]
+        statuses = required_statuses or [res.status for res in collector_results.values()]
         if all(s in (STATUS_FAILED, STATUS_UNAVAILABLE) for s in statuses) or (
             launch_failed and process_mon.result.status == STATUS_FAILED and not status_buckets[STATUS_COMPLETED]
         ):
@@ -697,13 +742,41 @@ def run_analysis(
         floss_doc = _read_json_safe(evidence_dir / "static" / "floss.json")
         capa_doc = _read_json_safe(evidence_dir / "static" / "capa.json")
         yara_doc = _read_json_safe(evidence_dir / "static" / "yara.json")
+        die_doc = _read_json_safe(evidence_dir / "static" / "die.json")
         ghidra_doc = _read_json_safe(evidence_dir / "ghidra" / "functions.json")
         proc_doc = _read_json_safe(evidence_dir / "dynamic" / "process" / "processes.json")
+        proc_events_doc = _read_json_safe(evidence_dir / "dynamic" / "process" / "process_events.json")
         net_doc = _read_json_safe(evidence_dir / "dynamic" / "network" / "connections.json")
         dns_doc = _read_json_safe(evidence_dir / "dynamic" / "network" / "dns.json")
         mem_doc = _read_json_safe(evidence_dir / "dynamic" / "memory" / "memory_usage.json")
         fs_doc = _read_json_safe(evidence_dir / "dynamic" / "filesystem" / "changes.json")
         reg_doc = _read_json_safe(evidence_dir / "dynamic" / "registry" / "changes.json")
+
+        if enable_attack_mapping:
+            attack_doc = build_attack_mapping(
+                pe_doc=pe_doc,
+                floss_doc=floss_doc,
+                capa_doc=capa_doc,
+                yara_doc=yara_doc,
+                die_doc=die_doc,
+                proc_doc=proc_doc,
+                proc_events_doc=proc_events_doc,
+                net_doc=net_doc,
+                dns_doc=dns_doc,
+                fs_doc=fs_doc,
+                reg_doc=reg_doc,
+                sysmon_events=sysmon_events,
+            )
+            write_json(evidence_dir / "attack_mapping.json", attack_doc)
+        else:
+            attack_doc = {
+                "schema_version": "1.0",
+                "disabled_by_config": True,
+                "technique_count": 0,
+                "counts_by_observation_type": {},
+                "mappings": [],
+                "limitations": ["ATT&CK mapping disabled by config (enable_attack_mapping=false)."],
+            }
 
         indicators = floss_doc.get("indicators", {})
         net_conns = net_doc.get("connections", [])
@@ -767,6 +840,7 @@ def run_analysis(
                 "sha1": hashes_doc.get("sha1"),
                 "sha256": sample_sha256,
                 "file_type": hashes_doc.get("file_type"),
+                "file_identification": hashes_doc.get("file_identification", {}),
             },
             "static": {
                 "architecture": pe_doc.get("architecture"),
@@ -793,6 +867,10 @@ def run_analysis(
                 "yara_match_count": _metric_if_collected(
                     collector_results, "yara", yara_doc.get("match_count")
                 ),
+                "die_detections": _metric_if_collected(
+                    collector_results, "detect_it_easy", die_doc.get("detection_count")
+                ),
+                "optional_collectors_unavailable": optional_collectors_unavailable,
                 "ghidra_function_count": _metric_if_collected(
                     collector_results,
                     "ghidra",
@@ -892,6 +970,23 @@ def run_analysis(
                 "dynamic_unattributed_destinations": dynamic_unattr_dests,
                 "dynamic_dns_queries": dynamic_dns,
                 "yara_rules": yara_rules,
+            },
+            "attack_mapping": {
+                "enabled": enable_attack_mapping,
+                "technique_count": attack_doc.get("technique_count", 0),
+                "counts_by_observation_type": attack_doc.get("counts_by_observation_type", {}),
+                "artifact": "attack_mapping.json" if enable_attack_mapping else None,
+                "top_techniques": [
+                    {
+                        "technique_id": m.get("technique_id"),
+                        "technique_name": m.get("technique_name"),
+                        "tactic": m.get("tactic"),
+                        "observation_type": m.get("observation_type"),
+                        "confidence": m.get("confidence"),
+                        "evidence_sources": m.get("evidence_sources", []),
+                    }
+                    for m in (attack_doc.get("mappings") or [])[:15]
+                ],
             },
         }
         write_json(evidence_dir / "summary.json", summary_doc)

@@ -93,6 +93,7 @@ class EvidenceStore:
             "floss": self._read_json(static_dir / "floss.json"),
             "capa": self._read_json(static_dir / "capa.json"),
             "yara": self._read_json(static_dir / "yara.json"),
+            "die": self._read_json(static_dir / "die.json"),
             "strings_preview": strings_preview,
         }
 
@@ -236,5 +237,6 @@ class EvidenceStore:
         return {
             "job_id": job_id,
             "summary": self._read_json(job_dir / "summary.json"),
+            "attack_mapping": self._read_json(job_dir / "attack_mapping.json"),
             "report_markdown": report_md,
         }

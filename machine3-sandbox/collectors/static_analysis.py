@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import logging
 import re
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -95,21 +97,174 @@ SUSPICIOUS_API_KEYWORDS = {
 }
 
 
+_TEXT_SCRIPT_EXTENSIONS = {
+    ".ps1", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".hta",
+    ".py", ".sh", ".txt", ".json", ".xml", ".html", ".htm", ".csv", ".ini", ".log",
+}
+_PE_EXTENSIONS = {".exe", ".dll", ".sys", ".scr", ".cpl", ".ocx", ".drv", ".efi"}
+_OOXML_EXTENSIONS = {".docx", ".xlsx", ".pptx", ".docm", ".xlsm", ".pptm"}
+_OLE2_EXTENSIONS = {".doc", ".xls", ".ppt", ".msi"}
+
+
+def _inspect_zip_family(sample_path: Path) -> tuple[str, str]:
+    """Safely classify ZIP-based containers (OOXML Office vs Java JAR/APK vs generic ZIP)."""
+    try:
+        with zipfile.ZipFile(sample_path, "r") as zf:
+            names = set(zf.namelist()[:200])
+        if "[Content_Types].xml" in names:
+            if any(n.startswith("word/") for n in names):
+                return "ooxml", "OOXML Word document (ZIP-based)"
+            if any(n.startswith("xl/") for n in names):
+                return "ooxml", "OOXML Excel workbook (ZIP-based)"
+            if any(n.startswith("ppt/") for n in names):
+                return "ooxml", "OOXML PowerPoint presentation (ZIP-based)"
+            return "ooxml", "OOXML Open Packaging document (ZIP-based)"
+        if "META-INF/MANIFEST.MF" in names:
+            return "jar", "Java JAR / package archive"
+        return "zip", "ZIP archive"
+    except (zipfile.BadZipFile, OSError):
+        return "zip", "ZIP archive (malformed or truncated central directory)"
+
+
+def _looks_like_text_or_script(header: bytes, declared_ext: str) -> tuple[bool, str]:
+    """Identify printable UTF-8/UTF-16 text or script headers safely without execution."""
+    if not header:
+        return False, "Empty file"
+    if header.startswith(b"\xef\xbb\xbf") or header.startswith(b"\xff\xfe") or header.startswith(b"\xfe\xff"):
+        return True, f"Unicode BOM text/script ({declared_ext or 'no ext'})"
+    if header.startswith(b"#!"):
+        return True, "Shebang script"
+    sample = header[:512]
+    nuls = sample.count(b"\x00")
+    if nuls == 0:
+        printable = sum(1 for b in sample if 32 <= b <= 126 or b in (9, 10, 13))
+        if printable / max(1, len(sample)) >= 0.85:
+            low = sample.lower()
+            if b"<script" in low or b"<html" in low or b"<?xml" in low:
+                return True, f"Markup / script document ({declared_ext or 'text'})"
+            if b"@echo" in low or declared_ext in (".bat", ".cmd"):
+                return True, "Windows batch script"
+            if declared_ext == ".ps1" or b"param(" in low or b"invoke-" in low:
+                return True, "PowerShell script / text"
+            return True, f"Plain text / script ({declared_ext or 'no ext'})"
+    elif nuls > len(sample) // 4 and len(sample) >= 4:
+        # Check UTF-16LE ASCII text pattern (common for PowerShell/.reg exports)
+        even_printable = sum(1 for i in range(0, len(sample) - 1, 2) if (32 <= sample[i] <= 126 or sample[i] in (9, 10, 13)) and sample[i + 1] == 0)
+        if even_printable / max(1, len(sample) // 2) >= 0.8:
+            return True, f"UTF-16LE text / script ({declared_ext or 'no ext'})"
+    return False, ""
+
+
+def identify_file_format(sample_path: Path) -> dict[str, Any]:
+    """Perform safe offline file-format identification, extension mismatch checks, and capability reporting."""
+    declared_ext = sample_path.suffix.lower()
+    with sample_path.open("rb") as fh:
+        header = fh.read(4096)
+
+    format_family = "unknown"
+    detected_type = "Unknown / Binary"
+
+    if header.startswith(b"MZ"):
+        pe_off = int.from_bytes(header[60:64], "little") if len(header) >= 64 else 0
+        if 0 < pe_off <= len(header) - 4 and header[pe_off : pe_off + 4] == b"PE\x00\x00":
+            format_family = "pe_coff"
+            detected_type = "PE/COFF (MZ executable or DLL)"
+        else:
+            format_family = "dos_mz_or_pe"
+            detected_type = "MZ / DOS or malformed PE header"
+    elif header.startswith(b"\x7fELF"):
+        format_family = "elf"
+        detected_type = "ELF binary"
+    elif header[:4] in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe"):
+        format_family = "macho_or_class"
+        detected_type = "Mach-O / Java Class binary"
+    elif header.startswith(b"PK\x03\x04") or header.startswith(b"PK\x05\x06"):
+        format_family, detected_type = _inspect_zip_family(sample_path)
+    elif header.startswith(b"%PDF-"):
+        format_family = "pdf"
+        detected_type = "PDF document"
+    elif header.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        format_family = "ole2"
+        detected_type = "OLE2 / Compound File"
+    elif header.startswith(b"L\x00\x00\x00\x01\x14\x02\x00"):
+        format_family = "lnk"
+        detected_type = "Windows Shell Link (LNK)"
+    elif header.lstrip().startswith(b"{\\rtf"):
+        format_family = "rtf"
+        detected_type = "Rich Text Format (RTF)"
+    else:
+        is_text, text_label = _looks_like_text_or_script(header, declared_ext)
+        if is_text:
+            format_family = "script_or_text"
+            detected_type = text_label
+
+    mismatch = False
+    mismatch_reason: str | None = None
+    if declared_ext in _PE_EXTENSIONS and format_family not in ("pe_coff", "dos_mz_or_pe"):
+        mismatch = True
+        mismatch_reason = f"Declared PE extension '{declared_ext}' disagrees with detected format '{detected_type}'."
+    elif declared_ext in _TEXT_SCRIPT_EXTENSIONS and format_family not in ("script_or_text", "unknown"):
+        mismatch = True
+        mismatch_reason = f"Declared text/script extension '{declared_ext}' disagrees with binary header '{detected_type}'."
+    elif declared_ext == ".pdf" and format_family != "pdf":
+        mismatch = True
+        mismatch_reason = f"Declared '.pdf' extension disagrees with detected format '{detected_type}'."
+    elif declared_ext in _OOXML_EXTENSIONS and format_family != "ooxml":
+        mismatch = True
+        mismatch_reason = f"Declared OOXML extension '{declared_ext}' disagrees with detected format '{detected_type}'."
+    elif declared_ext in _OLE2_EXTENSIONS and format_family not in ("ole2", "rtf"):
+        mismatch = True
+        mismatch_reason = f"Declared Office/OLE2 extension '{declared_ext}' disagrees with detected format '{detected_type}'."
+    elif declared_ext == ".zip" and format_family != "zip":
+        mismatch = True
+        mismatch_reason = f"Declared '.zip' extension disagrees with detected format '{detected_type}'."
+    elif declared_ext == ".lnk" and format_family != "lnk":
+        mismatch = True
+        mismatch_reason = f"Declared '.lnk' extension disagrees with detected format '{detected_type}'."
+
+    if format_family in ("pe_coff", "dos_mz_or_pe"):
+        supported_caps = [
+            "hashes_and_entropy",
+            "pe_headers_imports_exports",
+            "strings_floss",
+            "capa",
+            "yara",
+            "detect_it_easy_optional",
+            "ghidra_headless",
+        ]
+        format_lims: list[str] = []
+    else:
+        supported_caps = [
+            "hashes_and_entropy",
+            "file_signature_identification",
+            "strings_floss_or_python_fallback",
+            "yara",
+            "detect_it_easy_optional",
+        ]
+        format_lims = [
+            f"Sample format '{detected_type}' is not a PE executable; PE header/import/export inspection does not apply.",
+        ]
+        if format_family in ("zip", "ooxml", "jar"):
+            format_lims.append("Nested archive member unpacking and VBA/Office macro extraction are not performed recursively.")
+        elif format_family in ("pdf", "ole2", "lnk", "rtf"):
+            format_lims.append("Deep document stream, JavaScript object, or LNK target-argument decoding requires specialized offline parsers.")
+        elif format_family == "script_or_text":
+            format_lims.append("Script deobfuscation and AST inspection depend on strings/YARA only; capa and Ghidra PE decompilation are limited or skipped.")
+
+    return {
+        "declared_extension": declared_ext or None,
+        "format_family": format_family,
+        "detected_type": detected_type,
+        "format_mismatch": mismatch,
+        "format_mismatch_reason": mismatch_reason,
+        "supported_static_capabilities": supported_caps,
+        "unsupported_format_limitations": format_lims,
+    }
+
+
 def detect_file_type(sample_path: Path) -> str:
     """Inspect magic bytes to identify basic file type without executing the sample."""
-    with sample_path.open("rb") as fh:
-        header = fh.read(64)
-    if header.startswith(b"MZ"):
-        return "PE/COFF (MZ executable or DLL)"
-    if header.startswith(b"\x7fELF"):
-        return "ELF binary"
-    if header.startswith(b"PK\x03\x04"):
-        return "ZIP archive"
-    if header.startswith(b"%PDF"):
-        return "PDF document"
-    if header.startswith(b"\xd0\xcf\x11\xe0"):
-        return "OLE2 / Compound File"
-    return "Unknown / Binary"
+    return str(identify_file_format(sample_path)["detected_type"])
 
 
 def _strip_trailing_punct(token: str) -> str:
@@ -412,17 +567,29 @@ class StaticAnalyzer:
         results["strings_floss"] = self._analyze_strings_floss(sample_path, static_dir)
         results["capa"] = self._analyze_capa(sample_path, static_dir)
         results["yara"] = self._analyze_yara(sample_path, static_dir)
+        results["detect_it_easy"] = self._analyze_die(sample_path, static_dir)
         return results
 
     def _analyze_metadata_and_pe(self, sample_path: Path, static_dir: Path) -> CollectorResult:
         res = CollectorResult(name="file_metadata")
         try:
             hashes = compute_file_hashes(sample_path)
-            hashes["file_type"] = detect_file_type(sample_path)
+            ident = identify_file_format(sample_path)
+            hashes["file_type"] = ident["detected_type"]
+            hashes["file_identification"] = ident
             hashes["entropy"] = compute_file_entropy(sample_path)
             write_json(static_dir / "hashes.json", hashes)
             res.artifacts.append("static/hashes.json")
-            res.summary.update({"sha256": hashes["sha256"], "file_type": hashes["file_type"]})
+            res.summary.update(
+                {
+                    "sha256": hashes["sha256"],
+                    "file_type": ident["detected_type"],
+                    "format_family": ident["format_family"],
+                    "format_mismatch": ident["format_mismatch"],
+                }
+            )
+            if ident.get("format_mismatch") and ident.get("format_mismatch_reason"):
+                res.limitations.append(str(ident["format_mismatch_reason"]))
         except OSError as exc:
             res.errors.append(f"Hash/metadata error: {exc}")
             return res.finish(STATUS_FAILED)
@@ -440,10 +607,17 @@ class StaticAnalyzer:
         except pefile.PEFormatError as exc:
             write_json(
                 static_dir / "pe_info.json",
-                {"is_pe": False, "note": f"Not a valid PE file: {exc}"},
+                {
+                    "is_pe": False,
+                    "file_identification": ident,
+                    "note": f"Not a valid PE file ({ident['detected_type']}): {exc}",
+                },
             )
             res.artifacts.append("static/pe_info.json")
-            res.limitations.append("Sample is not a valid PE binary; PE metadata omitted.")
+            res.limitations.append(
+                f"Sample is not a valid PE binary ({ident['detected_type']}); PE headers, imports, and exports do not apply."
+            )
+            res.limitations.extend(ident.get("unsupported_format_limitations", []))
             return res.finish(STATUS_COMPLETED)
         except Exception as exc:
             res.errors.append(f"Unexpected PE parse failure: {exc}")
@@ -694,6 +868,33 @@ class StaticAnalyzer:
         res.summary = {"capability_count": len(capabilities)}
         return res.finish(STATUS_COMPLETED)
 
+    @staticmethod
+    def _build_yara_rule_metadata(rule_files: list[Path], base_dir: Path) -> list[dict[str, Any]]:
+        """Collect deterministic SHA-256 and provenance metadata for local YARA rule files."""
+        meta_list: list[dict[str, Any]] = []
+        for rf in rule_files:
+            try:
+                raw = rf.read_bytes()
+                sha256 = hashlib.sha256(raw).hexdigest()
+                size_bytes = len(raw)
+            except OSError:
+                sha256 = None
+                size_bytes = 0
+            try:
+                rel_path = rf.resolve().relative_to(base_dir.resolve()).as_posix()
+            except ValueError:
+                rel_path = rf.name
+            meta_list.append(
+                {
+                    "filename": rf.name,
+                    "relative_path": rel_path,
+                    "sha256": sha256,
+                    "size_bytes": size_bytes,
+                    "provenance": "local_sandbox_yara_rules_dir",
+                }
+            )
+        return meta_list
+
     def _analyze_yara(self, sample_path: Path, static_dir: Path) -> CollectorResult:
         res = CollectorResult(name="yara")
         rules_dir = resolve_path(self.tools_cfg.get("yara_rules_dir"), self.base_dir)
@@ -706,30 +907,66 @@ class StaticAnalyzer:
             res.limitations.append(f"No .yar/.yara files present in {rules_dir}.")
             return res.finish(STATUS_UNAVAILABLE)
 
+        rule_meta = self._build_yara_rule_metadata(rule_files, self.base_dir)
+        rule_provenance = {
+            "rules_directory": str(rules_dir),
+            "source": "local_rules_directory_only",
+            "note": "Only offline local YARA rule files are compiled; no external rule feeds are fetched automatically.",
+        }
+
         # Prefer yara-python when installed.
         try:
             import yara  # type: ignore
 
-            res.tool_versions["yara-python"] = getattr(yara, "__version__", "installed")
+            yara_ver = getattr(yara, "__version__", "installed")
+            res.tool_versions["yara-python"] = yara_ver
             filepaths: dict[str, str] = {}
+            loaded_rule_names: list[str] = []
             compile_errors: list[str] = []
+            failed_rule_files: list[dict[str, str]] = []
             for idx, rule_file in enumerate(rule_files):
                 try:
                     yara.compile(filepath=str(rule_file))
                     filepaths[f"rule_{idx}_{rule_file.stem}"] = str(rule_file)
+                    loaded_rule_names.append(rule_file.name)
                 except yara.Error as exc:
-                    compile_errors.append(f"{rule_file.name}: {exc}")
+                    err_text = f"{rule_file.name}: {exc}"
+                    compile_errors.append(err_text)
+                    failed_rule_files.append({"filename": rule_file.name, "error": str(exc)})
 
             if not filepaths:
+                payload = {
+                    "engine": "yara-python",
+                    "engine_version": yara_ver,
+                    "rule_provenance": rule_provenance,
+                    "discovered_rule_files": [p.name for p in rule_files],
+                    "rules_loaded": [],
+                    "rule_file_metadata": rule_meta,
+                    "failed_rule_files": failed_rule_files,
+                    "compile_errors": compile_errors,
+                    "match_count": 0,
+                    "truncated_matches": False,
+                    "truncated_strings": False,
+                    "matches": [],
+                }
+                write_json(static_dir / "yara.json", payload)
+                res.artifacts.append("static/yara.json")
                 res.errors.extend(compile_errors)
                 return res.finish(STATUS_FAILED)
 
             compiled = yara.compile(filepaths=filepaths)
             matches = compiled.match(str(sample_path))
+            max_matches = 100
+            max_strings_per_match = 25
+            truncated_matches = len(matches) > max_matches
+            truncated_strings = False
             formatted_matches = []
-            for match in matches:
+            for match in matches[:max_matches]:
+                raw_strings = getattr(match, "strings", [])
+                if len(raw_strings) > max_strings_per_match:
+                    truncated_strings = True
                 string_hits = []
-                for s_match in getattr(match, "strings", [])[:25]:
+                for s_match in raw_strings[:max_strings_per_match]:
                     ident = getattr(s_match, "identifier", str(s_match))
                     instances = []
                     for inst in getattr(s_match, "instances", [])[:5]:
@@ -753,14 +990,26 @@ class StaticAnalyzer:
 
             payload = {
                 "engine": "yara-python",
-                "rules_loaded": [p.name for p in rule_files],
+                "engine_version": yara_ver,
+                "rule_provenance": rule_provenance,
+                "discovered_rule_files": [p.name for p in rule_files],
+                "rules_loaded": loaded_rule_names,
+                "rule_file_metadata": rule_meta,
+                "failed_rule_files": failed_rule_files,
                 "compile_errors": compile_errors,
-                "match_count": len(formatted_matches),
+                "match_count": len(matches),
+                "returned_match_count": len(formatted_matches),
+                "truncated_matches": truncated_matches,
+                "truncated_strings": truncated_strings,
                 "matches": formatted_matches,
             }
             write_json(static_dir / "yara.json", payload)
             res.artifacts.append("static/yara.json")
-            res.summary = {"match_count": len(formatted_matches), "rules_loaded": len(filepaths)}
+            res.summary = {
+                "match_count": len(matches),
+                "rules_loaded": len(loaded_rule_names),
+                "failed_rule_file_count": len(failed_rule_files),
+            }
             if compile_errors:
                 res.errors.extend(compile_errors)
                 return res.finish(STATUS_PARTIAL)
@@ -778,30 +1027,153 @@ class StaticAnalyzer:
             res.limitations.append("Neither yara-python nor YARA CLI executable is installed.")
             return res.finish(STATUS_UNAVAILABLE)
 
-        res.tool_versions["yara_cli"] = get_tool_version(yara_bin)
+        yara_cli_ver = get_tool_version(yara_bin)
+        res.tool_versions["yara_cli"] = yara_cli_ver
         matches_cli = []
         errors_cli = []
+        loaded_cli: list[str] = []
+        failed_cli: list[dict[str, str]] = []
         for rule_file in rule_files:
             cmd_res = run_subprocess_safe([str(yara_bin), "-s", str(rule_file), str(sample_path)], timeout=30.0)
             if cmd_res["returncode"] == 0:
+                loaded_cli.append(rule_file.name)
                 for line in cmd_res["stdout"].splitlines():
                     if line and not line.startswith("0x"):
                         rule_name = line.split(" ", 1)[0]
                         matches_cli.append({"rule": rule_name, "source_file": rule_file.name})
             else:
-                errors_cli.append(f"{rule_file.name}: {cmd_res['stderr'].strip()}")
+                err_str = (cmd_res["stderr"] or cmd_res["error"] or f"exit {cmd_res['returncode']}").strip()
+                errors_cli.append(f"{rule_file.name}: {err_str}")
+                failed_cli.append({"filename": rule_file.name, "error": err_str})
 
         payload = {
             "engine": "yara_cli",
-            "rules_loaded": [p.name for p in rule_files],
+            "engine_version": yara_cli_ver,
+            "rule_provenance": rule_provenance,
+            "discovered_rule_files": [p.name for p in rule_files],
+            "rules_loaded": loaded_cli,
+            "rule_file_metadata": rule_meta,
+            "failed_rule_files": failed_cli,
             "compile_errors": errors_cli,
             "match_count": len(matches_cli),
-            "matches": matches_cli,
+            "truncated_matches": len(matches_cli) > 100,
+            "truncated_strings": False,
+            "matches": matches_cli[:100],
         }
         write_json(static_dir / "yara.json", payload)
         res.artifacts.append("static/yara.json")
-        res.summary = {"match_count": len(matches_cli), "rules_loaded": len(rule_files)}
+        res.summary = {
+            "match_count": len(matches_cli),
+            "rules_loaded": len(loaded_cli),
+            "failed_rule_file_count": len(failed_cli),
+        }
+        if not loaded_cli and errors_cli:
+            res.errors.extend(errors_cli)
+            return res.finish(STATUS_FAILED)
         if errors_cli:
             res.errors.extend(errors_cli)
+            return res.finish(STATUS_PARTIAL)
+        return res.finish(STATUS_COMPLETED)
+
+    def _analyze_die(self, sample_path: Path, static_dir: Path) -> CollectorResult:
+        """Run optional Detect It Easy (diec) signature scan for compiler/packer indicators."""
+        res = CollectorResult(name="detect_it_easy")
+        die_bin = resolve_tool_path(
+            self.tools_cfg.get("die"),
+            self.base_dir,
+            ["diec.exe", "diec"],
+        )
+        if not die_bin:
+            res.limitations.append(
+                "Optional Detect It Easy CLI (diec) not configured or not installed."
+            )
+            return res.finish(STATUS_UNAVAILABLE)
+
+        res.tool_versions["detect_it_easy"] = get_tool_version(die_bin, "--version")
+        timeout_sec = float(self.config.get("die_timeout_seconds", 60.0))
+        cmd_res = run_subprocess_safe([str(die_bin), "-j", str(sample_path)], timeout=timeout_sec)
+
+        parsed_json: Any = None
+        stdout_text = (cmd_res.get("stdout") or "").strip()
+        if stdout_text:
+            try:
+                parsed_json = json.loads(stdout_text)
+            except ValueError:
+                parsed_json = None
+
+        if parsed_json is None:
+            err_msg = (cmd_res.get("stderr") or cmd_res.get("error") or f"diec exited with code {cmd_res.get('returncode')}").strip()
+            res.errors.append(f"DIE execution/parse error: {err_msg}")
+            write_json(
+                static_dir / "die.json",
+                {
+                    "tool": "detect_it_easy",
+                    "tool_version": res.tool_versions["detect_it_easy"],
+                    "collected": False,
+                    "detection_count": 0,
+                    "detections": [],
+                    "error": err_msg,
+                },
+            )
+            res.artifacts.append("static/die.json")
+            return res.finish(STATUS_FAILED)
+
+        detect_blocks: list[Any]
+        if isinstance(parsed_json, dict):
+            raw_blocks = parsed_json.get("detects")
+            detect_blocks = raw_blocks if isinstance(raw_blocks, list) else []
+        elif isinstance(parsed_json, list):
+            detect_blocks = parsed_json
+        else:
+            detect_blocks = []
+
+        detections: list[dict[str, Any]] = []
+        file_types: list[str] = []
+        for blk in detect_blocks:
+            if not isinstance(blk, dict):
+                continue
+            ft = str(blk.get("filetype") or "").strip()
+            if ft and ft not in file_types:
+                file_types.append(ft)
+            values = blk.get("values")
+            if isinstance(values, list):
+                for val in values:
+                    if not isinstance(val, dict):
+                        continue
+                    detections.append(
+                        {
+                            "filetype": ft or None,
+                            "type": val.get("type"),
+                            "name": val.get("name"),
+                            "version": val.get("version"),
+                            "info": val.get("info"),
+                            "string": val.get("string"),
+                        }
+                    )
+
+        max_detections = 50
+        payload = {
+            "tool": "detect_it_easy",
+            "tool_version": res.tool_versions["detect_it_easy"],
+            "collected": True,
+            "filetypes": file_types,
+            "detection_count": len(detections),
+            "truncated": len(detections) > max_detections,
+            "detections": detections[:max_detections],
+            "indicator_note": (
+                "Detect It Easy signatures provide heuristic compiler, packer, and linker indicators only; "
+                "high-entropy or packer hits require analyst verification."
+            ),
+        }
+        write_json(static_dir / "die.json", payload)
+        res.artifacts.append("static/die.json")
+        res.summary = {
+            "detection_count": len(detections),
+            "filetypes": file_types,
+        }
+        if cmd_res.get("returncode", 0) != 0:
+            res.limitations.append(
+                f"diec returned exit code {cmd_res.get('returncode')} alongside JSON output."
+            )
             return res.finish(STATUS_PARTIAL)
         return res.finish(STATUS_COMPLETED)
