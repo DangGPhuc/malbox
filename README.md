@@ -78,7 +78,6 @@ python gateway.py
 ### Machine 3 — Windows 11 Sandbox (before taking CLEAN snapshot)
 Run PowerShell in `malbox\machine3-sandbox`:
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
 .\setup.ps1 -CloneGitTools
 # Follow docs\tools-setup.md to install Sysmon, Wireshark, Ghidra, FLOSS, capa, etc., then verify:
 .\setup.ps1 -CheckOnly

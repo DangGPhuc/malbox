@@ -12,7 +12,6 @@ Machine 3 runs on an isolated **Windows 11 VM** on Internal Network 2 (`10.10.20
 ## Installation & Readiness Check (before isolating VM & taking CLEAN snapshot)
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
 .\setup.ps1 -CloneGitTools
 ```
 

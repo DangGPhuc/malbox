@@ -13,9 +13,9 @@ Install and verify all tools **while Machine 3 has temporary Internet access**, 
 3. Run the setup helper in Windows PowerShell 5.1 or PowerShell 7+:
    ```powershell
    cd C:\malbox\machine3-sandbox
-   Set-ExecutionPolicy -Scope Process Bypass
    .\install.ps1 -CloneGitTools
    ```
+   *(If local PowerShell execution policy restricts unsigned local scripts on the lab guest, verify policy requirements for local scripts cleanly rather than disabling OS security protections.)*
    `-CloneGitTools` clones `capa-rules`, `volatility3`, and `GhidraMCP` into `tools\`, then creates `tools\volatility3\symbols\` afterward so `git clone` never fails on a non-empty folder. `install.ps1` verifies Python/pip/git exit codes and writes JSON configs in UTF-8 without BOM.
 
 ---
