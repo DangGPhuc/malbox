@@ -140,6 +140,120 @@ def safe_unlink(path: Path | None) -> None:
         pass
 
 
+def _is_valid_sha256_hex(val: Any) -> bool:
+    return isinstance(val, str) and len(val) == 64 and all(ch in "0123456789abcdefABCDEF" for ch in val)
+
+
+def _is_valid_manifest_relpath(raw_path: Any) -> bool:
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or "\x00" in raw_path
+        or "\\" in raw_path
+        or raw_path.startswith("/")
+        or raw_path.endswith("/")
+    ):
+        return False
+    parts = raw_path.split("/")
+    if any(part in ("", ".", "..") or ":" in part for part in parts):
+        return False
+    return raw_path != "manifest.json"
+
+
+def verify_evidence_zip_manifest(
+    zf: zipfile.ZipFile,
+    max_single_file_bytes: int,
+    max_total_bytes: int,
+) -> None:
+    """Validate manifest.json presence, schema, bidirectional paths, sizes, and SHA-256 digests."""
+    try:
+        m_info = zf.getinfo("manifest.json")
+    except KeyError as exc:
+        raise ValueError("Evidence archive lacks manifest.json.") from exc
+    if m_info.is_dir():
+        raise ValueError("Evidence archive manifest.json cannot be a directory.")
+
+    manifest_cap = min(max_single_file_bytes, 32 * 1024 * 1024)
+    if m_info.file_size < 0 or m_info.file_size > manifest_cap:
+        raise ValueError("Archive manifest.json exceeds bounded inspection size.")
+
+    raw = bytearray()
+    with zf.open(m_info, "r") as src:
+        while True:
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > manifest_cap:
+                raise ValueError("Decompressed manifest.json exceeds bounded inspection size.")
+    if len(raw) != m_info.file_size:
+        raise ValueError("Archive manifest.json decompressed length mismatch.")
+
+    try:
+        manifest = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(f"Malformed manifest.json in evidence archive: {exc}") from exc
+
+    if not isinstance(manifest, dict):
+        raise ValueError("Malformed manifest.json: root is not a JSON object.")
+    inventory = manifest.get("evidence_file_inventory")
+    if not isinstance(inventory, list) or len(inventory) == 0:
+        raise ValueError("Missing, invalid, or empty manifest evidence_file_inventory.")
+
+    declared_map: dict[str, tuple[int, str]] = {}
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid non-object entry in manifest evidence_file_inventory.")
+        rel = entry.get("path")
+        if not _is_valid_manifest_relpath(rel):
+            raise ValueError(f"Invalid manifest inventory path: {rel!r}")
+        if rel in declared_map:
+            raise ValueError(f"Duplicate manifest inventory entry: {rel}")
+        expected_size = entry.get("size_bytes")
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+            raise ValueError(f"Invalid size_bytes in manifest for {rel}: {expected_size!r}")
+        expected_sha = entry.get("sha256")
+        if not _is_valid_sha256_hex(expected_sha):
+            raise ValueError(f"Missing or invalid sha256 digest in manifest for {rel}")
+        declared_map[rel] = (expected_size, expected_sha.lower())
+
+    zip_members = {info.filename: info for info in zf.infolist() if not info.is_dir()}
+    actual_paths = {name for name in zip_members if name != "manifest.json"}
+    missing = sorted(set(declared_map) - actual_paths)
+    undeclared = sorted(actual_paths - set(declared_map))
+    if missing:
+        raise ValueError(f"Manifest entry missing from archive ({missing[0]}).")
+    if undeclared:
+        raise ValueError(f"Undeclared file in archive ({undeclared[0]}).")
+
+    total_streamed = len(raw)
+    if total_streamed > max_total_bytes:
+        raise ValueError("Total streamed archive verification bytes exceeded limit.")
+
+    for rel, (expected_size, expected_sha) in declared_map.items():
+        member = zip_members[rel]
+        if member.file_size != expected_size:
+            raise ValueError(f"Manifest size mismatch for archive member '{rel}'.")
+        entry_digest = hashlib.sha256()
+        entry_bytes = 0
+        with zf.open(member, "r") as src:
+            while True:
+                chunk = src.read(65536)
+                if not chunk:
+                    break
+                entry_bytes += len(chunk)
+                total_streamed += len(chunk)
+                if entry_bytes > max_single_file_bytes:
+                    raise ValueError(f"Decompressed archive entry '{rel}' exceeds single-file cap.")
+                if total_streamed > max_total_bytes:
+                    raise ValueError("Total decompressed archive verification size exceeded safety limit.")
+                entry_digest.update(chunk)
+        if entry_bytes != expected_size:
+            raise ValueError(f"Streamed size mismatch for archive member '{rel}'.")
+        if entry_digest.hexdigest().lower() != expected_sha:
+            raise ValueError(f"Manifest SHA-256 mismatch for archive member '{rel}'.")
+
+
 def validate_evidence_zip(
     zf: zipfile.ZipFile,
     max_entries: int,
@@ -406,7 +520,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             f"Evidence checksum mismatch ({actual_sha256} != {expected_sha256})"
                         )
 
-                    # Validate ZIP metadata limits and safety BEFORE CRC checks or retention.
+                    # Validate ZIP metadata limits and safety BEFORE CRC checks, manifest check, or retention.
                     with zipfile.ZipFile(tmp_download_path, "r") as zf:
                         validate_evidence_zip(
                             zf,
@@ -417,6 +531,11 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                         bad_member = zf.testzip()
                         if bad_member is not None:
                             raise zipfile.BadZipFile(f"Corrupt ZIP entry from sandbox: {bad_member}")
+                        verify_evidence_zip_manifest(
+                            zf,
+                            max_single_file_bytes=state.max_single_file_bytes,
+                            max_total_bytes=state.max_extracted_bytes,
+                        )
 
                     tmp_download_path.replace(zip_path)
 
@@ -501,6 +620,8 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     OSError,
                     RuntimeError,
                     ValueError,
+                    UnicodeError,
+                    EOFError,
                     zipfile.BadZipFile,
                     NotImplementedError,
                     zlib.error,
@@ -509,7 +630,10 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     logger.error("[ERROR] Evidence transfer from sandbox failed: %s", exc)
                     err_cat = (
                         "evidence_unavailable"
-                        if isinstance(exc, (FileNotFoundError, zipfile.BadZipFile, ValueError, NotImplementedError, zlib.error))
+                        if isinstance(
+                            exc,
+                            (FileNotFoundError, zipfile.BadZipFile, ValueError, UnicodeError, EOFError, NotImplementedError, zlib.error),
+                        )
                         else "unexpected_http_response"
                     )
                     _fail_job(f"Evidence transfer failed: {exc}", err_cat)

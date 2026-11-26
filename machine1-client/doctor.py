@@ -429,7 +429,28 @@ def safe_extract_zip(
                 raise
 
 
+def _is_valid_sha256_hex(val: Any) -> bool:
+    return isinstance(val, str) and len(val) == 64 and all(ch in "0123456789abcdefABCDEF" for ch in val)
+
+
+def _is_valid_manifest_relpath(raw_path: Any) -> bool:
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or "\x00" in raw_path
+        or "\\" in raw_path
+        or raw_path.startswith("/")
+        or raw_path.endswith("/")
+    ):
+        return False
+    parts = raw_path.split("/")
+    if any(part in ("", ".", "..") or ":" in part for part in parts):
+        return False
+    return raw_path != "manifest.json"
+
+
 def _verify_manifest_inventory_structure(manifest: Any, logger: logging.Logger) -> list[dict[str, Any]] | None:
+    """Validate manifest root schema, non-empty inventory, uniqueness, paths, sizes, and digests."""
     if not isinstance(manifest, dict):
         logger.error("[ERROR] Malformed manifest.json: root is not a JSON object.")
         return None
@@ -437,38 +458,100 @@ def _verify_manifest_inventory_structure(manifest: Any, logger: logging.Logger) 
     if not isinstance(inventory, list):
         logger.error("[ERROR] Missing or invalid manifest evidence_file_inventory.")
         return None
+    if len(inventory) == 0:
+        logger.error("[ERROR] Invalid manifest.json: evidence_file_inventory is empty.")
+        return None
+
+    seen_paths: set[str] = set()
+    errors: list[str] = []
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            errors.append("non-object inventory entry")
+            continue
+        rel = entry.get("path")
+        if not _is_valid_manifest_relpath(rel):
+            errors.append(f"invalid inventory path: {rel!r}")
+            continue
+        if rel in seen_paths:
+            errors.append(f"duplicate inventory entry: {rel}")
+            continue
+        seen_paths.add(rel)
+        expected_size = entry.get("size_bytes")
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+            errors.append(f"invalid size_bytes for {rel}: {expected_size!r}")
+        expected_sha = entry.get("sha256")
+        if not _is_valid_sha256_hex(expected_sha):
+            errors.append(f"missing or invalid sha256 digest in manifest: {rel}")
+
+    if errors:
+        logger.warning(
+            "[WARN] Manifest inventory validation failed (%d): %s",
+            len(errors),
+            "; ".join(errors[:5]),
+        )
+        return None
     return inventory
+
+
+def _report_bidirectional_mismatches(
+    declared_paths: set[str],
+    actual_paths: set[str],
+    mismatches: list[str],
+    location_label: str,
+) -> None:
+    """Compare declared manifest paths against actual packaged/extracted files in both directions."""
+    for rel in sorted(declared_paths - actual_paths):
+        mismatches.append(f"missing {location_label}: {rel}")
+    for rel in sorted(actual_paths - declared_paths):
+        mismatches.append(f"undeclared {location_label}: {rel}")
 
 
 def verify_zip_manifest_metadata(
     zf: zipfile.ZipFile,
     max_single_file_bytes: int,
     logger: logging.Logger,
+    max_total_bytes: int | None = None,
+    max_entries: int | None = None,
 ) -> bool:
-    """Validate manifest.json inside an unextracted ZIP archive without trusting unextracted paths."""
+    """Validate manifest.json and stream-verify all ZIP members without extracting to disk."""
+    effective_entries = max_entries if max_entries is not None else 5000
+    effective_total = (
+        max_total_bytes if max_total_bytes is not None else max(max_single_file_bytes, 1024 * 1024 * 1024)
+    )
     try:
+        validate_evidence_zip(zf, effective_entries, max_single_file_bytes, effective_total)
         m_info = zf.getinfo("manifest.json")
+        if m_info.is_dir():
+            raise ValueError("Archive manifest.json cannot be a directory.")
     except KeyError:
         logger.error("[ERROR] Evidence ZIP archive lacks manifest.json.")
         return False
-    manifest_cap = min(max_single_file_bytes, 32 * 1024 * 1024)
-    if m_info.file_size > manifest_cap:
-        logger.error("[ERROR] Archive manifest.json exceeds bounded metadata inspection size.")
+    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError, zlib.error, RuntimeError) as exc:
+        logger.error("[ERROR] Invalid evidence ZIP archive structure: %s", exc)
         return False
+
+    manifest_cap = min(max_single_file_bytes, 32 * 1024 * 1024)
+    if m_info.file_size < 0 or m_info.file_size > manifest_cap:
+        logger.error("[ERROR] Archive manifest.json exceeds bounded inspection size.")
+        return False
+
     raw = bytearray()
-    with zf.open(m_info, "r") as src:
-        while True:
-            chunk = src.read(65536)
-            if not chunk:
-                break
-            raw.extend(chunk)
-            if len(raw) > manifest_cap:
-                logger.error("[ERROR] Decompressed manifest.json exceeds bounded inspection size.")
-                return False
     try:
+        with zf.open(m_info, "r") as src:
+            while True:
+                chunk = src.read(65536)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if len(raw) > manifest_cap:
+                    logger.error("[ERROR] Decompressed manifest.json exceeds bounded inspection size.")
+                    return False
+        if len(raw) != m_info.file_size:
+            logger.error("[ERROR] manifest.json decompressed length does not match ZIP header.")
+            return False
         manifest = json.loads(raw.decode("utf-8-sig"))
-    except (UnicodeError, ValueError) as exc:
-        logger.error("[ERROR] Malformed manifest.json inside evidence ZIP: %s", exc)
+    except (zipfile.BadZipFile, OSError, UnicodeError, ValueError, NotImplementedError, zlib.error, EOFError, RuntimeError) as exc:
+        logger.error("[ERROR] Malformed or unreadable manifest.json inside evidence ZIP: %s", exc)
         return False
 
     inventory = _verify_manifest_inventory_structure(manifest, logger)
@@ -476,25 +559,57 @@ def verify_zip_manifest_metadata(
         return False
 
     zip_members = {info.filename: info for info in zf.infolist() if not info.is_dir()}
+    actual_paths = {name for name in zip_members if name != "manifest.json"}
+    declared_map = {entry["path"]: entry for entry in inventory}
+
     mismatches: list[str] = []
+    _report_bidirectional_mismatches(set(declared_map), actual_paths, mismatches, "in zip")
+    if mismatches:
+        logger.warning(
+            "[WARN] Unextracted ZIP manifest consistency errors (%d): %s",
+            len(mismatches),
+            "; ".join(mismatches[:5]),
+        )
+        return False
+
+    total_streamed = len(raw)
+    if total_streamed > effective_total:
+        logger.error("[ERROR] Evidence ZIP exceeded total bounded verification size.")
+        return False
+
     for entry in inventory:
-        if not isinstance(entry, dict):
-            mismatches.append("invalid manifest inventory entry")
-            continue
-        rel = str(entry.get("path") or "")
-        if not rel or rel == "manifest.json":
-            mismatches.append(f"invalid manifest inventory path: {rel!r}")
-            continue
-        member = zip_members.get(rel)
-        if member is None:
-            mismatches.append(f"missing in zip: {rel}")
-            continue
-        expected_size = entry.get("size_bytes")
-        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size != member.file_size:
+        rel = entry["path"]
+        member = zip_members[rel]
+        expected_size = entry["size_bytes"]
+        expected_sha = str(entry["sha256"]).lower()
+        if member.file_size != expected_size:
             mismatches.append(f"size mismatch in zip: {rel}")
-        expected_sha = str(entry.get("sha256") or "").lower()
-        if len(expected_sha) != 64:
-            mismatches.append(f"missing or invalid sha256 digest in manifest: {rel}")
+            continue
+        entry_digest = hashlib.sha256()
+        entry_streamed = 0
+        try:
+            with zf.open(member, "r") as src:
+                while True:
+                    chunk = src.read(65536)
+                    if not chunk:
+                        break
+                    entry_streamed += len(chunk)
+                    total_streamed += len(chunk)
+                    if entry_streamed > max_single_file_bytes:
+                        logger.error("[ERROR] Decompressed ZIP entry %s exceeded max single-file bound.", rel)
+                        return False
+                    if total_streamed > effective_total:
+                        logger.error("[ERROR] Total streamed ZIP bytes exceeded max extracted expansion limit.")
+                        return False
+                    entry_digest.update(chunk)
+        except (zipfile.BadZipFile, OSError, NotImplementedError, zlib.error, EOFError, RuntimeError) as exc:
+            mismatches.append(f"read failed in zip ({exc}): {rel}")
+            continue
+
+        if entry_streamed != expected_size:
+            mismatches.append(f"streamed size mismatch in zip: {rel}")
+        elif entry_digest.hexdigest().lower() != expected_sha:
+            mismatches.append(f"sha256 mismatch in zip: {rel}")
 
     if mismatches:
         logger.warning(
@@ -506,17 +621,36 @@ def verify_zip_manifest_metadata(
     return True
 
 
-def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
-    """Verify manifest.json structure and cross-check inventory entries against extracted files."""
+def _is_client_local_artifact(rel_path: str, job_dir_name: str, retained_zip_name: str | None, allow_gateway_netdiag: bool) -> bool:
+    if rel_path == "manifest.json":
+        return True
+    if "/" in rel_path:
+        return False
+    if retained_zip_name is not None and rel_path == retained_zip_name:
+        return True
+    if retained_zip_name is None:
+        base_id = job_dir_name.rsplit("_", 1)[0] if "_" in job_dir_name and job_dir_name.rsplit("_", 1)[1].isdigit() else job_dir_name
+        if rel_path in (f"evidence_{job_dir_name}.zip", f"evidence_{base_id}.zip"):
+            return True
+    if allow_gateway_netdiag and rel_path == "gateway_network_diagnostics.json":
+        return True
+    return False
+
+
+def verify_extracted_manifest(
+    job_dir: Path,
+    logger: logging.Logger,
+    retained_zip_name: str | None = None,
+    allow_gateway_netdiag: bool = True,
+) -> bool:
+    """Verify manifest.json structure and bidirectionally cross-check extracted files."""
     manifest_path = job_dir / "manifest.json"
-    if not manifest_path.is_file():
+    if not manifest_path.is_file() or manifest_path.is_symlink():
         logger.warning("[WARN] Extracted evidence lacks manifest.json for inventory cross-check.")
         return False
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        if not isinstance(manifest, dict):
-            raise ValueError("manifest.json root is not a JSON object")
-    except (OSError, ValueError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         logger.error("[ERROR] Malformed manifest.json in evidence archive: %s", exc)
         return False
 
@@ -524,31 +658,47 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
     if inventory is None:
         return False
 
+    job_dir_resolved = job_dir.resolve()
+    actual_files: dict[str, Path] = {}
     mismatches: list[str] = []
+    for item in sorted(job_dir.rglob("*")):
+        if item.is_symlink():
+            try:
+                rel_sym = item.relative_to(job_dir).as_posix()
+            except ValueError:
+                rel_sym = str(item)
+            mismatches.append(f"symlink present in extracted directory: {rel_sym}")
+            continue
+        if not item.is_file():
+            continue
+        rel = item.relative_to(job_dir).as_posix()
+        if _is_client_local_artifact(rel, job_dir.name, retained_zip_name, allow_gateway_netdiag):
+            continue
+        actual_files[rel] = item
+
+    declared_map = {entry["path"]: entry for entry in inventory}
+    _report_bidirectional_mismatches(set(declared_map), set(actual_files), mismatches, "on disk")
+
     for entry in inventory:
-        if not isinstance(entry, dict):
-            mismatches.append("invalid manifest inventory entry")
+        rel = entry["path"]
+        target = actual_files.get(rel)
+        if target is None:
             continue
-        rel = str(entry.get("path") or "")
-        if not rel or rel == "manifest.json":
-            mismatches.append(f"invalid manifest inventory path: {rel!r}")
-            continue
-        target = (job_dir / rel).resolve()
-        if job_dir.resolve() not in target.parents:
+        resolved = target.resolve()
+        if job_dir_resolved not in resolved.parents:
             mismatches.append(f"unsafe manifest path: {rel}")
             continue
-        if not target.is_file():
-            mismatches.append(f"missing: {rel}")
+        expected_size = entry["size_bytes"]
+        expected_sha = str(entry["sha256"]).lower()
+        try:
+            actual_size = target.stat().st_size
+            actual_sha = compute_sha256(target, 65536).lower()
+        except OSError as exc:
+            mismatches.append(f"unreadable file ({exc}): {rel}")
             continue
-        expected_size = entry.get("size_bytes")
-        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size != target.stat().st_size:
+        if actual_size != expected_size:
             mismatches.append(f"size mismatch: {rel}")
-        expected_sha = str(entry.get("sha256") or "").lower()
-        if len(expected_sha) != 64:
-            mismatches.append(f"missing or invalid sha256 digest in manifest: {rel}")
-            continue
-        actual_sha = compute_sha256(target, 65536).lower()
-        if actual_sha != expected_sha:
+        elif actual_sha != expected_sha:
             mismatches.append(f"sha256 mismatch: {rel}")
 
     if mismatches:
@@ -699,7 +849,12 @@ def download_evidence(
                     ext_exc,
                 )
                 return None
-            if not verify_extracted_manifest(job_dir, logger):
+            if not verify_extracted_manifest(
+                job_dir,
+                logger,
+                retained_zip_name=zip_path.name,
+                allow_gateway_netdiag=False,
+            ):
                 _cleanup_partial_extraction(job_dir, zip_path)
                 logger.error(
                     "[ERROR] Archive downloaded to %s, but manifest verification failed; extracted files cleaned, archive preserved, and receipt not acknowledged.",
@@ -710,7 +865,13 @@ def download_evidence(
                 zip_path.unlink()
         else:
             with zipfile.ZipFile(zip_path, "r") as zf:
-                if not verify_zip_manifest_metadata(zf, max_single_file_bytes, logger):
+                if not verify_zip_manifest_metadata(
+                    zf,
+                    max_single_file_bytes,
+                    logger,
+                    max_total_bytes=max_extracted_bytes,
+                    max_entries=max_entries,
+                ):
                     logger.error(
                         "[ERROR] Archive downloaded to %s, but ZIP manifest check failed; archive preserved and receipt not acknowledged.",
                         zip_path,

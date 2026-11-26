@@ -93,6 +93,64 @@ def inspect_ghidra_mcp_status(
     }
 
 
+def _parse_nonneg_int(val: Any) -> int | None:
+    if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+        return None
+    return val
+
+
+def _assess_ghidra_consistency(
+    total_func_count: int,
+    exported_func_count: int,
+    func_list_len: int,
+    non_ext_count: int,
+    decomp_candidates: int,
+    decomp_ok: bool,
+    decomp_failed: int,
+    declared_decomp_count: int | None,
+    declared_disasm_count: int | None,
+    disassembly_txt: Path,
+    decompiled_file_count: int,
+) -> tuple[str | None, str | None]:
+    """Validate Ghidra export metadata counts against generated artifacts.
+
+    Returns (failure_reason, assessment_override) where failure_reason marks fatal
+    contradictions ('failed_export') and assessment_override handles partial/missing
+    artifacts ('partial_export').
+    """
+    if exported_func_count > total_func_count or exported_func_count != func_list_len:
+        return (
+            f"Contradictory Ghidra function export counts (exported={exported_func_count}, total={total_func_count}, list_len={func_list_len}).",
+            "failed_export",
+        )
+    if non_ext_count > total_func_count or decomp_candidates > non_ext_count:
+        return (
+            f"Contradictory Ghidra function classification counts (total={total_func_count}, non_external={non_ext_count}, decompilable={decomp_candidates}).",
+            "failed_export",
+        )
+    if total_func_count > 0 and func_list_len == 0:
+        return (
+            f"Contradictory Ghidra export: total_function_count={total_func_count} but functions list is empty.",
+            "failed_export",
+        )
+    if declared_disasm_count is not None and declared_disasm_count > non_ext_count:
+        return (
+            f"Contradictory Ghidra disassembly count ({declared_disasm_count} > non_external={non_ext_count}).",
+            "failed_export",
+        )
+    if declared_decomp_count is not None and declared_decomp_count > decomp_candidates:
+        return (
+            f"Contradictory Ghidra decompiled count ({declared_decomp_count} > decompilable={decomp_candidates}).",
+            "failed_export",
+        )
+    if decomp_candidates == 0 and (decompiled_file_count > 0 or (declared_decomp_count or 0) > 0 or decomp_failed > 0):
+        return (
+            "Contradictory Ghidra metadata: decompilable_candidate_count=0 alongside decompiled output or failure counts.",
+            "failed_export",
+        )
+    return None, None
+
+
 class GhidraAnalyzer:
     """Runs NSA Ghidra Headless Analyzer and exports structured artifacts."""
 
@@ -237,21 +295,45 @@ class GhidraAnalyzer:
 
         if functions_valid:
             func_list = parsed.get("functions", [])
-            total_func_count = int(parsed.get("total_function_count", len(func_list)))
-            non_ext_count = int(
+            total_func_count = _parse_nonneg_int(parsed.get("total_function_count", len(func_list)))
+            exported_func_count = _parse_nonneg_int(parsed.get("exported_function_count", len(func_list)))
+            non_ext_count = _parse_nonneg_int(
                 parsed.get(
                     "non_external_function_count",
                     sum(1 for f in func_list if isinstance(f, dict) and not f.get("is_external")),
                 )
             )
-            decomp_candidates = parsed.get("decompilable_candidate_count")
-            if decomp_candidates is None:
-                decomp_candidates = sum(
+            decomp_candidates_raw = parsed.get("decompilable_candidate_count")
+            if decomp_candidates_raw is None:
+                decomp_candidates_raw = sum(
                     1 for f in func_list if isinstance(f, dict) and not f.get("is_external") and not f.get("is_thunk")
                 )
-            decomp_candidates = int(decomp_candidates)
+            decomp_candidates = _parse_nonneg_int(decomp_candidates_raw)
+            decomp_failed = _parse_nonneg_int(parsed.get("decompile_failed_count", 0))
+            declared_decomp_count = (
+                _parse_nonneg_int(parsed["decompiled_function_count"])
+                if "decompiled_function_count" in parsed
+                else None
+            )
+            declared_disasm_count = (
+                _parse_nonneg_int(parsed["disassembled_function_count"])
+                if "disassembled_function_count" in parsed
+                else None
+            )
+            if (
+                total_func_count is None
+                or exported_func_count is None
+                or non_ext_count is None
+                or decomp_candidates is None
+                or decomp_failed is None
+                or ("decompiled_function_count" in parsed and declared_decomp_count is None)
+                or ("disassembled_function_count" in parsed and declared_disasm_count is None)
+            ):
+                res.errors.append("Invalid or negative count metadata in ghidra/functions.json.")
+                res.summary["export_assessment"] = "failed_export"
+                return res.finish(STATUS_FAILED)
+
             decomp_ok = bool(parsed.get("decompiler_initialized", True))
-            decomp_failed = int(parsed.get("decompile_failed_count", 0))
             trunc_flags = {
                 "functions_truncated": bool(parsed.get("functions_truncated", False)),
                 "imports_truncated": bool(parsed.get("imports_truncated", False)),
@@ -267,7 +349,7 @@ class GhidraAnalyzer:
                 {
                     "export_script": parsed.get("export_script", post_script_name),
                     "function_count": total_func_count,
-                    "exported_function_count": parsed.get("exported_function_count", len(func_list)),
+                    "exported_function_count": exported_func_count,
                     "non_external_function_count": non_ext_count,
                     "decompilable_candidate_count": decomp_candidates,
                     "decompiled_function_count": len(decompiled_files),
@@ -295,11 +377,15 @@ class GhidraAnalyzer:
                 }
             )
         else:
+            func_list = []
             total_func_count = 0
+            exported_func_count = 0
             non_ext_count = 0
             decomp_candidates = 0
             decomp_ok = False
             decomp_failed = 0
+            declared_decomp_count = None
+            declared_disasm_count = None
             any_truncated = False
             truncated_categories = []
 
@@ -327,13 +413,51 @@ class GhidraAnalyzer:
             res.summary["export_assessment"] = "failed_export"
             return res.finish(STATUS_FAILED)
 
-        if non_ext_count > 0 and not disassembly_txt.is_file():
+        contradiction_msg, contradiction_status = _assess_ghidra_consistency(
+            total_func_count=total_func_count,
+            exported_func_count=exported_func_count,
+            func_list_len=len(func_list),
+            non_ext_count=non_ext_count,
+            decomp_candidates=decomp_candidates,
+            decomp_ok=decomp_ok,
+            decomp_failed=decomp_failed,
+            declared_decomp_count=declared_decomp_count,
+            declared_disasm_count=declared_disasm_count,
+            disassembly_txt=disassembly_txt,
+            decompiled_file_count=len(decompiled_files),
+        )
+        if contradiction_msg:
+            res.errors.append(contradiction_msg)
+            res.summary["export_assessment"] = contradiction_status or "failed_export"
+            return res.finish(STATUS_FAILED)
+
+        if non_ext_count > 0 and (
+            not disassembly_txt.is_file()
+            or disassembly_txt.stat().st_size == 0
+            or (declared_disasm_count is not None and declared_disasm_count == 0)
+        ):
             res.limitations.append("Ghidra produced functions.json without expected disassembly.txt output.")
             res.summary["export_assessment"] = "partial_export"
             return res.finish(STATUS_PARTIAL)
 
-        if decomp_candidates > 0 and (not decomp_ok or (len(decompiled_files) == 0 and decomp_failed > 0)):
-            res.limitations.append("Ghidra decompiler failed to produce C output for decompilable functions.")
+        if declared_decomp_count is not None and declared_decomp_count != len(decompiled_files):
+            res.limitations.append(
+                f"Contradictory Ghidra decompilation output: metadata declared {declared_decomp_count} decompiled function(s), but {len(decompiled_files)} .c artifact(s) exist on disk."
+            )
+            res.summary["export_assessment"] = "partial_export"
+            return res.finish(STATUS_PARTIAL)
+
+        if decomp_candidates > 0 and len(decompiled_files) == 0:
+            if not decomp_ok:
+                reason = "Ghidra decompiler failed to initialize for decompilable functions."
+            elif decomp_failed > 0:
+                reason = f"Ghidra decompiler failed on all {decomp_failed} attempted candidate(s); 0 C artifacts generated."
+            else:
+                reason = (
+                    f"Ghidra metadata reported {decomp_candidates} eligible decompilable function(s) "
+                    "and 0 recorded decompilation failures, yet no .c artifacts were generated."
+                )
+            res.limitations.append(reason)
             res.summary["export_assessment"] = "partial_export"
             return res.finish(STATUS_PARTIAL)
 

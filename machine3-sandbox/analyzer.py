@@ -377,31 +377,111 @@ def _reconcile_collector_artifacts(
     return reconciled
 
 
+def _stream_file_to_zip(zf: zipfile.ZipFile, file_path: Path, arcname: str) -> tuple[int, str]:
+    """Stream one non-symlink file into a ZIP archive while counting bytes and SHA-256."""
+    if file_path.is_symlink() or not file_path.is_file():
+        raise ValueError(f"Evidence file missing or unsupported file type for packaging: {arcname}")
+    zinfo = zipfile.ZipInfo.from_file(file_path, arcname=arcname)
+    zinfo.compress_type = zipfile.ZIP_DEFLATED
+    zinfo.flag_bits &= ~0x1
+    digest = hashlib.sha256()
+    written = 0
+    with file_path.open("rb") as src, zf.open(zinfo, "w", force_zip64=True) as dst:
+        while True:
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            written += len(chunk)
+            digest.update(chunk)
+            dst.write(chunk)
+    return written, digest.hexdigest().lower()
+
+
 def _package_evidence_zip(
     evidence_dir: Path,
     zip_path: Path,
     sample_filename: str,
     include_raw_pml: bool = False,
     max_raw_pml_bytes: int = 200 * 1024 * 1024,
+    inventory: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Stream eligible evidence files into a ZIP archive strictly matching _should_archive_file."""
-    digest = hashlib.sha256()
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for file_path in sorted(evidence_dir.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel_path = file_path.relative_to(evidence_dir).as_posix()
-            allowed, _ = _should_archive_file(
-                rel_path=rel_path,
-                file_path=file_path,
-                sample_filename=sample_filename,
-                include_raw_pml=include_raw_pml,
-                max_raw_pml_bytes=max_raw_pml_bytes,
-            )
-            if not allowed:
-                continue
-            zf.write(file_path, arcname=rel_path)
+    """Package evidence files strictly from the finalized manifest inventory plus manifest.json."""
+    manifest_path = evidence_dir / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise FileNotFoundError(f"Finalized manifest.json unavailable for packaging: {manifest_path}")
 
+    if inventory is None:
+        manifest_doc = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(manifest_doc, dict) or not isinstance(manifest_doc.get("evidence_file_inventory"), list):
+            raise ValueError("manifest.json lacks valid evidence_file_inventory for ZIP packaging.")
+        inventory_entries = manifest_doc["evidence_file_inventory"]
+    else:
+        inventory_entries = inventory
+
+    ev_root = evidence_dir.resolve()
+    tmp_zip = zip_path.with_name(f".{zip_path.name}.tmp")
+    seen_rel: set[str] = set()
+
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            for entry in inventory_entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("Invalid non-object entry in evidence_file_inventory.")
+                rel_path = entry.get("path")
+                if (
+                    not isinstance(rel_path, str)
+                    or not rel_path
+                    or "\x00" in rel_path
+                    or "\\" in rel_path
+                    or rel_path.startswith("/")
+                    or rel_path.endswith("/")
+                    or rel_path == "manifest.json"
+                    or any(part in ("", ".", "..") or ":" in part for part in rel_path.split("/"))
+                ):
+                    raise ValueError(f"Invalid inventory path for ZIP packaging: {rel_path!r}")
+                if rel_path in seen_rel:
+                    raise ValueError(f"Duplicate inventory path during packaging: {rel_path}")
+                seen_rel.add(rel_path)
+
+                expected_size = entry.get("size_bytes")
+                expected_sha = entry.get("sha256")
+                if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+                    raise ValueError(f"Invalid expected size_bytes for {rel_path}: {expected_size!r}")
+                if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+                    raise ValueError(f"Invalid expected sha256 for {rel_path}")
+
+                file_path = evidence_dir / rel_path
+                if file_path.is_symlink():
+                    raise ValueError(f"Symlink disallowed in evidence directory: {rel_path}")
+                resolved_file = file_path.resolve()
+                if ev_root not in resolved_file.parents or not file_path.is_file():
+                    raise FileNotFoundError(f"Evidence file missing during packaging: {rel_path}")
+
+                allowed, reason = _should_archive_file(
+                    rel_path=rel_path,
+                    file_path=file_path,
+                    sample_filename=sample_filename,
+                    include_raw_pml=include_raw_pml,
+                    max_raw_pml_bytes=max_raw_pml_bytes,
+                )
+                if not allowed:
+                    raise ValueError(f"Disallowed artifact in packaging inventory ({reason}): {rel_path}")
+
+                written_bytes, actual_sha = _stream_file_to_zip(zf, file_path, rel_path)
+                if written_bytes != expected_size or actual_sha != expected_sha.lower():
+                    raise ValueError(
+                        f"Evidence file changed between inventory generation and ZIP packaging: {rel_path}"
+                    )
+
+            _stream_file_to_zip(zf, manifest_path, "manifest.json")
+
+        tmp_zip.replace(zip_path)
+    except Exception:
+        tmp_zip.unlink(missing_ok=True)
+        zip_path.unlink(missing_ok=True)
+        raise
+
+    digest = hashlib.sha256()
     with zip_path.open("rb") as fh:
         while True:
             chunk = fh.read(65536)
@@ -1151,6 +1231,7 @@ def run_analysis(
             sample_filename=sample_path.name,
             include_raw_pml=include_raw_pml,
             max_raw_pml_bytes=max_raw_pml_bytes,
+            inventory=inv,
         )
 
         return {
@@ -1197,6 +1278,13 @@ def run_analysis(
 
         _close_job_loggers(job_id, log_handlers)
 
+        zip_path = workspace_dir / f"evidence_{job_id}.zip"
+        zip_path.unlink(missing_ok=True)
+        zip_path.with_name(f".{zip_path.name}.tmp").unlink(missing_ok=True)
+
+        inv_fail: list[dict[str, Any]] = []
+        failure_artifacts_ok = False
+        failure_gen_error = ""
         try:
             include_raw_pml = bool(config.get("include_raw_pml", False))
             max_raw_pml_bytes = max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024
@@ -1307,10 +1395,19 @@ def run_analysis(
             failure_manifest["evidence_file_inventory"] = inv_fail
             failure_manifest["excluded_or_omitted_files"] = omitted_fail
             write_json(evidence_dir / "manifest.json", failure_manifest)
-        except OSError as io_exc:
+            failure_artifacts_ok = True
+        except (OSError, ValueError, TypeError, RuntimeError) as io_exc:
+            failure_gen_error = str(io_exc)
             terminal_logger.error("[ERROR] Could not write failure artifacts to %s: %s", evidence_dir, io_exc)
 
-        zip_path = workspace_dir / f"evidence_{job_id}.zip"
+        if not failure_artifacts_ok:
+            return {
+                "job_status": STATUS_FAILED,
+                "zip_path": None,
+                "archive_sha256": "",
+                "error": f"{exc} (failure manifest generation failed: {failure_gen_error})",
+            }
+
         try:
             if not evidence_dir.exists():
                 raise FileNotFoundError(f"Evidence directory unavailable: {evidence_dir}")
@@ -1320,6 +1417,7 @@ def run_analysis(
                 sample_filename=sample_path.name,
                 include_raw_pml=bool(config.get("include_raw_pml", False)),
                 max_raw_pml_bytes=max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024,
+                inventory=inv_fail,
             )
             return {
                 "job_status": STATUS_FAILED,
@@ -1328,6 +1426,7 @@ def run_analysis(
                 "error": str(exc),
             }
         except Exception as pkg_exc:
+            zip_path.unlink(missing_ok=True)
             return {
                 "job_status": STATUS_FAILED,
                 "zip_path": None,
