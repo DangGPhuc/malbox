@@ -261,6 +261,40 @@ def allocate_job_dir(evidence_root: Path, job_id: str) -> Path:
         suffix += 1
 
 
+def validate_evidence_zip(
+    zf: zipfile.ZipFile,
+    max_entries: int,
+    max_single_file_bytes: int,
+    max_total_bytes: int,
+) -> None:
+    """Reject unsafe archive metadata before CRC checks or extraction."""
+    infos = zf.infolist()
+    if len(infos) > max_entries:
+        raise ValueError("Archive entry count exceeds safety limit.")
+    seen: set[str] = set()
+    total_bytes = 0
+    for member in infos:
+        name = member.filename
+        parts = name.rstrip("/").split("/")
+        if (not name or "\\" in name or name.startswith("/")
+                or any(part in ("", ".", "..") or ":" in part for part in parts)):
+            raise ValueError(f"Unsafe archive entry path detected: {name}")
+        normalized = "/".join(parts)
+        if normalized in seen:
+            raise ValueError(f"Duplicate archive entry: {name}")
+        seen.add(normalized)
+        mode = (member.external_attr >> 16) & 0o170000
+        if mode not in (0, 0o040000, 0o100000):
+            raise ValueError(f"Unsupported archive member type: {name}")
+        if member.flag_bits & 1:
+            raise ValueError(f"Encrypted evidence member is unsupported: {name}")
+        if member.file_size > max_single_file_bytes:
+            raise ValueError(f"Archive entry {name} exceeds max single file size limit.")
+        total_bytes += member.file_size
+        if total_bytes > max_total_bytes:
+            raise ValueError("Total declared archive size exceeds safety expansion limit.")
+
+
 def safe_extract_zip(
     zip_path: Path,
     dest_dir: Path,
@@ -273,8 +307,7 @@ def safe_extract_zip(
     total_extracted = 0
     with zipfile.ZipFile(zip_path, "r") as zf:
         infos = zf.infolist()
-        if len(infos) > max_entries:
-            raise ValueError(f"Archive entry count ({len(infos)}) exceeds safety limit ({max_entries}).")
+        validate_evidence_zip(zf, max_entries, max_single_file_bytes, max_total_bytes)
 
         for member in infos:
             raw_name = member.filename
@@ -301,7 +334,7 @@ def safe_extract_zip(
 
             member_path.parent.mkdir(parents=True, exist_ok=True)
             entry_bytes = 0
-            with zf.open(member, "r") as src, member_path.open("wb") as dst:
+            with zf.open(member, "r") as src, member_path.open("xb") as dst:
                 while True:
                     chunk = src.read(65536)
                     if not chunk:
@@ -320,7 +353,7 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
     manifest_path = job_dir / "manifest.json"
     if not manifest_path.is_file():
         logger.warning("[WARN] Extracted evidence lacks manifest.json for inventory cross-check.")
-        return True
+        return False
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         if not isinstance(manifest, dict):
@@ -331,14 +364,17 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
 
     inventory = manifest.get("evidence_file_inventory")
     if not isinstance(inventory, list):
-        return True
+        logger.error("[ERROR] Missing or invalid manifest evidence_file_inventory.")
+        return False
 
     mismatches: list[str] = []
     for entry in inventory:
         if not isinstance(entry, dict):
+            mismatches.append("invalid manifest inventory entry")
             continue
         rel = str(entry.get("path") or "")
         if not rel:
+            mismatches.append("missing manifest inventory path")
             continue
         target = (job_dir / rel).resolve()
         if job_dir.resolve() not in target.parents:
@@ -347,6 +383,9 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
         if not target.is_file():
             mismatches.append(f"missing: {rel}")
             continue
+        expected_size = entry.get("size_bytes")
+        if expected_size is not None and expected_size != target.stat().st_size:
+            mismatches.append(f"size mismatch: {rel}")
         expected_sha = str(entry.get("sha256") or "").lower()
         if expected_sha:
             actual_sha = compute_sha256(target, 65536).lower()
@@ -458,6 +497,7 @@ def download_evidence(
             )
 
         with zipfile.ZipFile(staging_zip, "r") as zf:
+            validate_evidence_zip(zf, max_entries, 256 * 1024 * 1024, max_extracted_bytes)
             corrupt_member = zf.testzip()
             if corrupt_member is not None:
                 raise zipfile.BadZipFile(f"Corrupt ZIP member: {corrupt_member}")
@@ -484,7 +524,9 @@ def download_evidence(
                     zip_path,
                 )
                 return None
-            verify_extracted_manifest(job_dir, logger)
+            if not verify_extracted_manifest(job_dir, logger):
+                logger.error("[ERROR] Manifest verification failed; archive preserved at %s and receipt not acknowledged.", zip_path)
+                return None
             if not keep_zip and zip_path.exists():
                 zip_path.unlink()
 
@@ -513,7 +555,7 @@ def download_evidence(
             logger.warning("[WARN] Could not send receipt ack to gateway: %s", ack_exc)
 
         return job_dir
-    except (requests.RequestException, zipfile.BadZipFile, OSError, ValueError) as exc:
+    except (requests.RequestException, zipfile.BadZipFile, OSError, ValueError, RuntimeError, NotImplementedError) as exc:
         if staging_zip.exists():
             try:
                 staging_zip.unlink()
