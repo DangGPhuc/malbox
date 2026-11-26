@@ -69,6 +69,7 @@ All three setup wrappers (`setup.sh`, `setup.ps1`) and readiness checkers (`read
 | Component | Mandatory? | Evidence / Feature Unavailable When Missing, Disabled, or Unverified | Fallback Still Collected |
 | --- | --- | --- | --- |
 | `yara_cli_optional` (`yara64.exe`) | Optional | External YARA CLI fallback only | `static/yara.json` via `yara-python` |
+| `detect_it_easy_optional` (`diec.exe`) | Optional | Compiler, linker, and packer signature indicators (`static/die.json`) | `static/hashes.json` (`file_identification`), `static/pe_info.json`, YARA, and FLOSS continue normally |
 | `procmon_optional` (`Procmon64.exe`) | Optional | `raw/procmon.pml` raw Sysinternals capture and Procmon-sourced rows in `dynamic/filesystem/changes.json` and `dynamic/registry/changes.json` (also skipped when `sandbox.py` runs unprivileged without kernel driver rights) | Sysmon EID `11`, `12`, `13`, `14`, `23` filesystem and registry events |
 | `procdump_optional` (`procdump64.exe`) | Optional | Full user-mode process minidumps (`dynamic/memory/dumps/proc_<pid>.dmp`); processes that exit early or are protected also cannot be dumped | `psutil` system/process RAM usage telemetry (`dynamic/memory/memory_usage.json`) |
 | `winpmem_optional` (`winpmem.exe`) | Optional (`false` by default) | Full physical RAM image (`dynamic/memory/dumps/physical_memory.raw`); Windows 11 kernel driver compatibility is never verified by executable presence alone | `psutil` telemetry + optional ProcDump process dumps |

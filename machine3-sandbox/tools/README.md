@@ -8,6 +8,7 @@ Expected layout (adjustable in `machine3-sandbox/config.json`):
 - `tools/capa/capa.exe` — Official release binary from https://github.com/mandiant/capa/releases
 - `tools/capa-rules/` — Git clone of https://github.com/mandiant/capa-rules
 - `tools/yara/yara64.exe` — Optional CLI fallback from https://github.com/VirusTotal/yara/releases (`yara-python` is already installed in `.venv`)
+- `tools/die/diec.exe` — Optional Detect It Easy CLI + `db/` signatures from https://github.com/horsicq/DIE-engine/releases
 - `tools/ghidra/` — Official release archive from https://github.com/NationalSecurityAgency/ghidra/releases (contains `support/analyzeHeadless.bat`)
 - `tools/GhidraMCP/` — Git clone / release from https://github.com/LaurieWired/GhidraMCP
 - `tools/sysinternals/` — `Sysmon64.exe`, `Procmon64.exe`, `procdump64.exe` from Microsoft Sysinternals

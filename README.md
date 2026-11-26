@@ -90,9 +90,9 @@ python sandbox.py
 
 ## Integrated Tools
 
-- **Static:** Python `hashlib`, `pefile`, Mandiant `FLOSS`, Mandiant `capa` + `capa-rules`, `YARA` (`yara-python` / `yara64`), NSA `Ghidra` Headless Analyzer.
-- **Dynamic:** `Sysmon`, Sysinternals `Procmon`, `psutil`, Wireshark (`dumpcap` / `tshark`), `ProcDump`, optional `WinPmem` & `Volatility 3`, Windows `wevtutil` Event Logs.
-- **Local Evidence Querying:** `MalBox MCP` (`mcp` official Python SDK over local `stdio`), plus optional `GhidraMCP`.
+- **Static:** Python `hashlib` + file signature/mismatch checks, `pefile`, Mandiant `FLOSS`, Mandiant `capa` + `capa-rules`, `YARA` (`yara-python` / `yara64`), optional `Detect It Easy` (`diec`), NSA `Ghidra` Headless Analyzer (`GhidraExport.java`).
+- **Dynamic:** `Sysmon`, Sysinternals `Procmon`, `psutil`, Wireshark (`dumpcap` / `tshark`), `ProcDump`, optional `WinPmem` & `Volatility 3`, Windows `wevtutil` Event Logs, optional canary fixtures & Gateway `INetSim` diagnostics.
+- **Correlation & Querying:** Evidence-backed MITRE ATT&CK mapper (`attack_mapping.json`), `MalBox MCP` (`mcp` official Python SDK over local `stdio`), plus optional `GhidraMCP`.
 
 ---
 
@@ -113,4 +113,8 @@ python sandbox.py
 - [Network Setup](docs/network-setup.md)
 - [Tools Setup (Windows 11)](docs/tools-setup.md)
 - [Snapshot Setup & Workflow](docs/snapshot-setup.md)
+- [Analysis Coverage & Capabilities](docs/analysis-coverage.md)
+- [Scope & Explicit Limitations](docs/scope-and-limitations.md)
+- [v2.0 Changelog](docs/v2-changelog.md)
+- [v2.0 Acceptance Checklist](docs/v2-acceptance-checklist.md)
 - [Troubleshooting](docs/troubleshooting.md)

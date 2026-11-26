@@ -75,7 +75,11 @@ Download official releases into `machine3-sandbox\tools\` (or default install lo
 ### H. Optional Memory Tools (`WinPmem` & `Volatility 3`)
 - **WinPmem:** https://github.com/Velocidex/WinPmem/releases -> `tools\winpmem\winpmem.exe`.
 - **Volatility 3:** Cloned into `tools\volatility3\`. Pre-cache offline Windows ISF symbol tables into `tools\volatility3\symbols\` while online.
-- **Limitations:** `"winpmem_enabled"` is `false` by default in `config.json`. Full physical RAM acquisition requires Administrator privilege, compatible Windows 11 kernel driver support (without disabling Secure Boot/driver signing), and free disk space larger than guest RAM size. Volatility 3 plugins run offline against full physical RAM images (`physical_memory.raw`), **not** against ProcDump user-mode `.dmp` files.
+- **Limitations:** `"winpmem_enabled"` is `false` by default in `config.json`. Full physical RAM acquisition requires Administrator privilege, compatible Windows 11/10 kernel driver support (without disabling Secure Boot/driver signing), and free disk space larger than guest RAM size. Volatility 3 plugins run offline against full physical RAM images (`physical_memory.raw`), **not** against ProcDump user-mode `.dmp` files.
+
+### I. Optional Detect It Easy (`diec.exe`)
+- Download official Detect It Easy Windows release (`die_win64_portable_*.zip`) and extract `diec.exe` + `db/` into `tools\die\`.
+- **Verification & Optionality:** Checked by `readiness.py` (`detect_it_easy_optional`) using `diec.exe --version`. During analysis, `static_analysis.py` runs `diec.exe -j <sample>` to write `static/die.json` (compiler/linker/packer indicators). If `diec.exe` is not installed, MalBox records `detect_it_easy` as `unavailable` (`optional_static`) without degrading mandatory job status.
 
 ---
 
