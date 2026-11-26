@@ -220,6 +220,7 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     _validate_int(parsed, "max_archive_entries", errors, min_val=10, required=False)
     _validate_bool(parsed, "extract_archive", errors, required=False)
     _validate_bool(parsed, "keep_zip", errors, required=False)
+    _validate_bool(parsed, "fetch_gateway_network_diagnostics", errors, required=False)
 
     safe_cfg = dict(defaults)
     if gw_host:

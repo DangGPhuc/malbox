@@ -224,8 +224,17 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
     _validate_number(parsed, "max_sample_size_mb", errors, min_val=1.0, required=False)
     _validate_int(parsed, "max_evidence_archive_mb", errors, min_val=1, required=False)
+    _validate_bool(parsed, "inetsim_diagnostics_enabled", errors, required=False)
+    _validate_str(parsed, "inetsim_binary", errors) if "inetsim_binary" in parsed else None
+    _validate_str(parsed, "inetsim_conf_path", errors) if "inetsim_conf_path" in parsed else None
+    _validate_str(parsed, "inetsim_log_dir", errors) if "inetsim_log_dir" in parsed else None
+    _validate_int(parsed, "max_inetsim_log_mb", errors, min_val=1, required=False)
+    _validate_int(parsed, "max_inetsim_events", errors, min_val=10, required=False)
 
     safe_cfg = dict(defaults)
+    for opt_k in ("inetsim_diagnostics_enabled", "inetsim_binary", "inetsim_conf_path", "inetsim_log_dir", "max_inetsim_log_mb", "max_inetsim_events"):
+        if opt_k in parsed:
+            safe_cfg[opt_k] = parsed[opt_k]
     if lhost:
         safe_cfg["listen_host"] = lhost
     if lport is not None:
@@ -586,6 +595,55 @@ def main(argv: list[str] | None = None) -> int:
                     else "Kernel IP forwarding is enabled (1); Machine 2 must not route traffic directly between Net 1 and Net 2."
                 ),
                 recommended_action="" if fwd_off else "Manually disable IP forwarding: sudo sysctl -w net.ipv4.ip_forward=0",
+            )
+        )
+
+    # 10b. Optional read-only INetSim diagnostic inspection (never starts/modifies INetSim)
+    try:
+        from inetsim_diagnostics import inspect_inetsim_environment  # noqa: E402
+
+        inet_info = inspect_inetsim_environment(cfg)
+    except Exception as exc:
+        inet_info = {"installed": False, "service_state": "error", "error": str(exc), "config": {}, "logs": {}}
+
+    inet_diag_enabled = bool(cfg.get("inetsim_diagnostics_enabled", False))
+    if inet_info.get("installed"):
+        inet_svc = str(inet_info.get("service_state", "unknown"))
+        log_files_cnt = len(inet_info.get("logs", {}).get("files", []))
+        checks.append(
+            make_check(
+                name="inetsim_optional",
+                category="network_sim",
+                required=False,
+                status=STATUS_PASS if (inet_svc == "active" or not inet_diag_enabled) else STATUS_PENDING,
+                detected_version=f"{inet_info.get('version') or 'installed'}, svc={inet_svc}, logs={log_files_cnt}",
+                resolved_path=inet_info.get("binary_path"),
+                installed=True,
+                runtime_verified=bool(inet_info.get("version")),
+                diagnostic_message=(
+                    f"Operator-managed INetSim detected (service={inet_svc}, conf_readable={inet_info.get('config', {}).get('readable')}, "
+                    f"log_dir_readable={inet_info.get('logs', {}).get('readable')}; isolated simulator diagnostics only)."
+                ),
+                recommended_action=(
+                    ""
+                    if inet_svc == "active" or not inet_diag_enabled
+                    else "INetSim installed but inactive; start manually on Machine 2 only when running authorized isolated simulator tests."
+                ),
+            )
+        )
+    else:
+        checks.append(
+            make_check(
+                name="inetsim_optional",
+                category="network_sim",
+                required=False,
+                status=STATUS_OPTIONAL,
+                configured_path=str(cfg.get("inetsim_binary", "/usr/bin/inetsim")),
+                installed=False,
+                runtime_verified=False,
+                diagnostic_message=(
+                    f"Optional INetSim not installed (inetsim_diagnostics_enabled={inet_diag_enabled}; core Gateway HTTP relay works independently)."
+                ),
             )
         )
 

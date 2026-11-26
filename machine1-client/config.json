@@ -11,5 +11,6 @@
   "keep_zip": false,
   "max_evidence_archive_mb": 512,
   "max_extracted_size_mb": 1024,
-  "max_archive_entries": 5000
+  "max_archive_entries": 5000,
+  "fetch_gateway_network_diagnostics": false
 }

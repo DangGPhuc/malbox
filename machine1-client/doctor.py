@@ -363,6 +363,30 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
     return True
 
 
+def fetch_optional_gateway_netdiag(
+    base_url: str,
+    job_id: str,
+    job_dir: Path,
+    connect_timeout: float,
+    request_timeout: float,
+    logger: logging.Logger,
+) -> None:
+    """Optionally save separate Machine 2 isolated network diagnostic artifact without altering ZIP."""
+    try:
+        resp = requests.get(
+            f"{base_url}/jobs/{job_id}/network-diagnostics",
+            timeout=(connect_timeout, request_timeout),
+        )
+        if resp.status_code == 200:
+            doc = resp.json()
+            if isinstance(doc, dict):
+                out_path = job_dir / "gateway_network_diagnostics.json"
+                out_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+                logger.debug("[CLIENT] Saved separate Machine 2 network diagnostics to %s", out_path.name)
+    except (requests.RequestException, OSError, ValueError) as exc:
+        logger.debug("[CLIENT] Optional gateway network-diagnostics fetch skipped (%s)", exc)
+
+
 def download_evidence(
     base_url: str,
     job_id: str,
@@ -376,6 +400,7 @@ def download_evidence(
     max_archive_bytes: int = 512 * 1024 * 1024,
     max_entries: int = 5000,
     max_extracted_bytes: int = 1024 * 1024 * 1024,
+    fetch_gateway_netdiag: bool = False,
 ) -> Path | None:
     """Stream the evidence ZIP archive from Gateway, verify integrity, extract, and acknowledge."""
     evidence_root.mkdir(parents=True, exist_ok=True)
@@ -462,6 +487,16 @@ def download_evidence(
             verify_extracted_manifest(job_dir, logger)
             if not keep_zip and zip_path.exists():
                 zip_path.unlink()
+
+        if fetch_gateway_netdiag:
+            fetch_optional_gateway_netdiag(
+                base_url=base_url,
+                job_id=job_id,
+                job_dir=job_dir,
+                connect_timeout=connect_timeout,
+                request_timeout=request_timeout,
+                logger=logger,
+            )
 
         try:
             ack_resp = requests.post(
@@ -557,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
     max_archive_bytes = max(1, int(config.get("max_evidence_archive_mb", 512))) * 1024 * 1024
     max_entries = max(10, int(config.get("max_archive_entries", 5000)))
     max_extracted_bytes = max(1, int(config.get("max_extracted_size_mb", 1024))) * 1024 * 1024
+    fetch_gateway_netdiag = bool(config.get("fetch_gateway_network_diagnostics", False))
     evidence_root = resolve_evidence_dir(str(config.get("evidence_dir", "./evidence")), config_path.parent)
 
     if not check_gateway(base_url, connect_timeout, logger):
@@ -599,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         max_archive_bytes=max_archive_bytes,
         max_entries=max_entries,
         max_extracted_bytes=max_extracted_bytes,
+        fetch_gateway_netdiag=fetch_gateway_netdiag,
     )
     if not saved_dir:
         return 1

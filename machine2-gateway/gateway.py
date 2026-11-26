@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,10 @@ import requests
 from flask import Flask, Response, jsonify, request
 
 BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from inetsim_diagnostics import collect_session_inetsim_evidence  # noqa: E402
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 
 
@@ -304,6 +309,26 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
 
                     tmp_download_path.replace(zip_path)
 
+                    # Optionally save Machine 2 isolated network-simulation diagnostics as a SEPARATE artifact
+                    # without modifying evidence_<job_id>.zip or breaking X-Archive-SHA256 integrity.
+                    if bool(state.config.get("inetsim_diagnostics_enabled", False)):
+                        with state.lock:
+                            started_utc = (
+                                state.active_job.get("started_at_utc")
+                                if state.active_job and state.active_job.get("job_id") == job_id
+                                else None
+                            )
+                        sess_start = started_utc or datetime.now(timezone.utc)
+                        sess_end = datetime.now(timezone.utc)
+                        netdiag_doc = collect_session_inetsim_evidence(
+                            job_id=job_id,
+                            session_start_utc=sess_start,
+                            session_end_utc=sess_end,
+                            config=state.config,
+                        )
+                        netdiag_path = state.archive_dir / f"gateway_netdiag_{job_id}.json"
+                        netdiag_path.write_text(json.dumps(netdiag_doc, indent=2), encoding="utf-8")
+
                     # Acknowledge transfer so Sandbox moves to RESTORE_REQUIRED.
                     sandbox_ack_ok = False
                     try:
@@ -533,6 +558,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     "job_id": job_id,
                     "filename": filename,
                     "sha256": actual_sha256,
+                    "started_at_utc": datetime.now(timezone.utc),
                     "status": "ANALYZING",
                     "job_status": "running",
                     "stage": "submitted",
@@ -659,6 +685,32 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
             "X-Archive-SHA256": archive_sha256,
         }
         return Response(stream_evidence(), status=200, mimetype="application/zip", headers=headers)
+
+    @app.get("/jobs/<job_id>/network-diagnostics")
+    def get_network_diagnostics(job_id: str) -> tuple[Response, int]:
+        """Return separate Machine 2 isolated network diagnostic JSON without modifying Sandbox ZIP."""
+        try:
+            safe_id = sanitize_job_id(job_id)
+        except ValueError as exc:
+            return jsonify({"error_code": "INVALID_JOB_ID", "error": str(exc)}), 400
+
+        netdiag_path = state.archive_dir / f"gateway_netdiag_{safe_id}.json"
+        if not netdiag_path.is_file():
+            return (
+                jsonify(
+                    {
+                        "error_code": "DIAGNOSTICS_UNAVAILABLE",
+                        "error": "No Machine 2 INetSim diagnostics artifact recorded for this job.",
+                        "inetsim_diagnostics_enabled": bool(state.config.get("inetsim_diagnostics_enabled", False)),
+                    }
+                ),
+                404,
+            )
+        try:
+            doc = json.loads(netdiag_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            return jsonify({"error_code": "DIAGNOSTICS_READ_ERROR", "error": str(exc)}), 500
+        return jsonify(doc), 200
 
     @app.post("/jobs/<job_id>/ack")
     def ack_client_receipt(job_id: str) -> tuple[Response, int]:
