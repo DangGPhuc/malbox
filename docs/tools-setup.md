@@ -40,11 +40,12 @@ Download official releases into `machine3-sandbox\tools\` (or default install lo
 - Add custom `.yar` rules into `machine3-sandbox\scripts\yara_rules\`.
 
 ### D. NSA Ghidra Headless Analyzer & Export Limits
-- Prerequisite: Install **JDK 17 or JDK 21** (Eclipse Temurin / OpenJDK) and verify `java -version`.
+- Prerequisite: Install a compatible **JDK** (`JDK 17` for Ghidra 11.0–11.1, `JDK 21` for Ghidra 11.2–12.1, or `JDK 25+` for Ghidra 12.2+; check `Ghidra/application.properties` -> `application.java.min`) and verify `java -version`.
 - Source: https://github.com/NationalSecurityAgency/ghidra/releases
 - Extract the official release archive to `machine3-sandbox\tools\ghidra\` so `analyzeHeadless.bat` sits at `machine3-sandbox\tools\ghidra\support\analyzeHeadless.bat` (or re-run `.\install.ps1` to auto-update `config.json`).
-- **Automated Export Limits (`scripts/ghidra_export.py`):** To keep analysis bounded within `ghidra_timeout_seconds` (default `300s`) and avoid oversized evidence ZIPs, headless export caps output to:
-  - Up to `2000` imports, `500` exports, and `3000` defined strings.
+- MalBox v2 uses the Java post-script **`scripts/GhidraExport.java`** (avoiding Ghidra 12.x PyGhidra/Jython initialization issues). `scripts/ghidra_export.py` is kept only as a legacy reference.
+- **Automated Export Limits (`scripts/GhidraExport.java`):** To keep analysis bounded within `ghidra_timeout_seconds` (default `300s`) and avoid oversized evidence ZIPs, headless export caps output to:
+  - Up to `10000` function records in `functions.json` (with `total_function_count` and `functions_truncated` flags), `2000` imports, `500` exports, and `3000` defined strings.
   - Disassembly for up to `80` non-external functions (`200` instructions per function).
   - Decompiled C pseudocode for up to `40` non-thunk/non-external functions (`30s` timeout per function).
   - Very large, packed, or obfuscated binaries may hit these caps or time out; check `ghidra/analysis.log` for full headless details.

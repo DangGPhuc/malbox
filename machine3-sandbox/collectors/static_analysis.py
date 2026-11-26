@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from collectors.common import (
     STATUS_COMPLETED,
@@ -25,19 +27,44 @@ from collectors.common import (
     write_json,
 )
 
-URL_RE = re.compile(r"https?://[^\s'\"<>]{4,200}", re.IGNORECASE)
-IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
+URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+IPV4_RE = re.compile(r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])")
 DOMAIN_RE = re.compile(
-    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|info|biz|ru|cn|de|uk|top|xyz|pw|cc|tk|local)\b",
+    r"(?<![A-Za-z0-9_.\\/@-])"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:com|net|org|io|info|biz|ru|cn|de|uk|edu|gov|mil|int|co|us|eu|fr|jp|nl|top|xyz|pw|cc|tk|me|tv|cloud|dev|app|onion|local)"
+    r"(?![A-Za-z0-9_.-])",
     re.IGNORECASE,
 )
-WIN_PATH_RE = re.compile(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]{1,64}\\)*[^\\/:*?\"<>|\r\n]{1,64}")
+WIN_PATH_RE = re.compile(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]{1,120}\\)*[^\\/:*?\"<>|\r\n]{1,120}")
 REG_PATH_RE = re.compile(
-    r"\b(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKLM|HKCU|HKCR)\\[^\s'\"]{3,180}",
+    r"\b(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKEY_CURRENT_CONFIG|HKLM|HKCU|HKCR|HKU|HKCC)\\[^\s'\"]{2,220}",
     re.IGNORECASE,
 )
 ASCII_STR_RE = re.compile(rb"[\x20-\x7e]{4,}")
 UTF16LE_STR_RE = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
+
+# Common DOS/Windows legacy `.com` executable names that appear in strings/commands without being domains
+COMMON_COM_EXECUTABLES = {
+    "chcp.com",
+    "command.com",
+    "diskcomp.com",
+    "diskcopy.com",
+    "doskey.com",
+    "edlin.com",
+    "fc.com",
+    "format.com",
+    "graftabl.com",
+    "graphics.com",
+    "keyb.com",
+    "loadfix.com",
+    "mode.com",
+    "more.com",
+    "nlsfunc.com",
+    "recover.com",
+    "sys.com",
+    "tree.com",
+}
 
 SUSPICIOUS_API_KEYWORDS = {
     "VirtualAlloc",
@@ -85,37 +112,259 @@ def detect_file_type(sample_path: Path) -> str:
     return "Unknown / Binary"
 
 
-def extract_indicators_from_lines(lines: list[str]) -> dict[str, list[str]]:
-    """Extract observable string indicators without making any network requests."""
-    urls: set[str] = set()
-    domains: set[str] = set()
-    ips: set[str] = set()
-    file_paths: set[str] = set()
-    registry_paths: set[str] = set()
+def _strip_trailing_punct(token: str) -> str:
+    """Conservatively trim unmatched wrapping or trailing sentence punctuation."""
+    s = token.strip()
+    while s and s[-1] in ".,;:!?\"'<>":
+        s = s[:-1]
+    pairs = (("(", ")"), ("[", "]"), ("{", "}"))
+    changed = True
+    while changed and s:
+        changed = False
+        for opener, closer in pairs:
+            if s.endswith(closer) and s.count(closer) > s.count(opener):
+                s = s[:-1]
+                changed = True
+    while s and s[-1] in ".,;:!?\"'<>":
+        s = s[:-1]
+    return s
+
+
+def _normalize_valid_url(raw_token: str) -> dict[str, Any] | None:
+    """Validate and normalize HTTP(S) URLs purely offline without network resolution."""
+    trimmed = _strip_trailing_punct(raw_token)
+    if len(trimmed) < 10 or len(trimmed) > 512:
+        return None
+    try:
+        parts = urlsplit(trimmed)
+        port = parts.port
+    except ValueError:
+        return None
+
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        return None
+
+    host = (parts.hostname or "").strip().lower().rstrip(".")
+    if not host or any(ch.isspace() or ch in "<>\"'{}|\\^`" for ch in host):
+        return None
+
+    is_ip = False
+    try:
+        ipaddress.IPv4Address(host)
+        is_ip = True
+    except ValueError:
+        if "." not in host and host != "localhost":
+            return None
+        labels = host.split(".")
+        if any((not lbl or len(lbl) > 63 or lbl.startswith("-") or lbl.endswith("-")) for lbl in labels):
+            return None
+
+    if port is not None and not (1 <= port <= 65535):
+        return None
+
+    netloc = host if port is None else f"{host}:{port}"
+    normalized = f"{scheme}://{netloc}{parts.path or ''}"
+    if parts.query:
+        normalized += f"?{parts.query}"
+    if parts.fragment:
+        normalized += f"#{parts.fragment}"
+
+    return {
+        "value": normalized,
+        "original": raw_token,
+        "scheme": scheme,
+        "host": host,
+        "host_is_ip": is_ip,
+        "port": port,
+    }
+
+
+def _classify_ipv4_scope(ip_str: str) -> tuple[str, str]:
+    addr = ipaddress.IPv4Address(ip_str)
+    if addr.is_loopback:
+        return "loopback", "low"
+    if addr.is_unspecified or str(addr) == "255.255.255.255":
+        return "special_use", "low"
+    if addr.is_multicast:
+        return "multicast", "low"
+    if addr.is_link_local:
+        return "link_local", "low"
+    if addr.is_private:
+        return "private_rfc1918", "low"
+    return "public", "medium"
+
+
+def _is_contextual_filename(candidate: str, line: str, start_idx: int, end_idx: int) -> bool:
+    """Reject DOS `.com` filenames or path segments without blocking legitimate `.com` domains."""
+    lower = candidate.lower()
+    if lower in COMMON_COM_EXECUTABLES:
+        return True
+    prefix = line[:start_idx]
+    suffix = line[end_idx:]
+    if prefix.endswith("\\") or (":\\" in prefix and "://" not in prefix and " " not in prefix[prefix.rfind(":\\"):]):
+        return True
+    if suffix.startswith("\\"):
+        return True
+    if lower.endswith(".com") and len(lower.split(".")) == 2:
+        # Reject standalone DOS command invocations like `cmd.exe /c foo.com /arg` or `foo.com"` inside path/command context
+        if re.search(r'(?:cmd(?:\.exe)?\s+/[ck]\s+|start\s+|\\)$', prefix, re.IGNORECASE):
+            return True
+    return False
+
+
+def extract_indicators_from_lines(lines: list[str], source_name: str = "static_strings") -> dict[str, Any]:
+    """Extract normalized static indicators offline without DNS resolution or external requests."""
+    urls_map: dict[str, dict[str, Any]] = {}
+    domains_map: dict[str, dict[str, Any]] = {}
+    ips_map: dict[str, dict[str, Any]] = {}
+    files_map: dict[str, dict[str, Any]] = {}
+    regs_map: dict[str, dict[str, Any]] = {}
     api_names: set[str] = set()
 
     for line in lines:
-        for match in URL_RE.findall(line):
-            urls.add(match)
-        for match in IPV4_RE.findall(line):
-            ips.add(match)
-        for match in DOMAIN_RE.findall(line):
-            domains.add(match.lower())
-        for match in WIN_PATH_RE.findall(line):
-            file_paths.add(match)
-        for match in REG_PATH_RE.findall(line):
-            registry_paths.add(match)
+        if not isinstance(line, str) or not line.strip():
+            continue
+
+        # 1. URLs
+        for m in URL_RE.finditer(line):
+            raw_tok = m.group(0)
+            norm = _normalize_valid_url(raw_tok)
+            if not norm:
+                continue
+            val = norm["value"]
+            if val not in urls_map:
+                urls_map[val] = {
+                    "value": val,
+                    "original": raw_tok,
+                    "source": source_name,
+                    "observation_type": "potential_static_indicator",
+                    "confidence": "medium",
+                }
+            host = norm["host"]
+            if not norm["host_is_ip"] and DOMAIN_RE.fullmatch(host):
+                if host not in domains_map:
+                    domains_map[host] = {
+                        "value": host,
+                        "original": host,
+                        "source": f"{source_name}_url",
+                        "observation_type": "potential_static_indicator",
+                        "confidence": "medium",
+                    }
+            elif norm["host_is_ip"]:
+                scope, conf = _classify_ipv4_scope(host)
+                if host not in ips_map:
+                    ips_map[host] = {
+                        "value": host,
+                        "original": host,
+                        "scope": scope,
+                        "source": f"{source_name}_url",
+                        "observation_type": "potential_static_indicator",
+                        "confidence": conf,
+                    }
+
+        # 2. Windows file paths (extract before standalone `.com` checks)
+        for m in WIN_PATH_RE.finditer(line):
+            raw_tok = m.group(0)
+            cleaned = _strip_trailing_punct(raw_tok)
+            if len(cleaned) < 4:
+                continue
+            norm_key = cleaned.lower()
+            if norm_key not in files_map:
+                files_map[norm_key] = {
+                    "value": cleaned,
+                    "original": raw_tok,
+                    "source": source_name,
+                    "observation_type": "potential_static_indicator",
+                    "confidence": "low",
+                }
+
+        # 3. Registry paths
+        for m in REG_PATH_RE.finditer(line):
+            raw_tok = m.group(0)
+            cleaned = _strip_trailing_punct(raw_tok).rstrip("\\")
+            if "\\" not in cleaned:
+                continue
+            norm_key = cleaned.lower()
+            if norm_key not in regs_map:
+                regs_map[norm_key] = {
+                    "value": cleaned,
+                    "original": raw_tok,
+                    "source": source_name,
+                    "observation_type": "potential_static_indicator",
+                    "confidence": "low",
+                }
+
+        # 4. Standalone domains
+        for m in DOMAIN_RE.finditer(line):
+            raw_tok = m.group(0)
+            if _is_contextual_filename(raw_tok, line, m.start(), m.end()):
+                continue
+            dom = raw_tok.lower().rstrip(".")
+            if len(dom) > 253:
+                continue
+            tld = dom.rsplit(".", 1)[-1]
+            conf = "low" if tld == "local" else "medium"
+            if dom not in domains_map:
+                domains_map[dom] = {
+                    "value": dom,
+                    "original": raw_tok,
+                    "source": source_name,
+                    "observation_type": "potential_static_indicator",
+                    "confidence": conf,
+                }
+
+        # 5. Standalone IPv4 addresses
+        for m in IPV4_RE.finditer(line):
+            raw_tok = m.group(0)
+            prefix = line[: m.start()]
+            if re.search(r'(?:version|ver|assemblyversion|fileversion|productversion)\s*[:=]\s*["\']?$', prefix, re.IGNORECASE):
+                continue
+            try:
+                norm_ip = str(ipaddress.IPv4Address(raw_tok))
+            except ValueError:
+                continue
+            scope, conf = _classify_ipv4_scope(norm_ip)
+            if norm_ip not in ips_map:
+                ips_map[norm_ip] = {
+                    "value": norm_ip,
+                    "original": raw_tok,
+                    "scope": scope,
+                    "source": source_name,
+                    "observation_type": "potential_static_indicator",
+                    "confidence": conf,
+                }
+
+        # 6. Suspicious Windows API string references
         for api in SUSPICIOUS_API_KEYWORDS:
             if api in line:
                 api_names.add(api)
 
+    urls_list = sorted(urls_map.keys())[:200]
+    domains_list = sorted(domains_map.keys())[:200]
+    ips_list = sorted(ips_map.keys())[:200]
+    files_list = sorted(v["value"] for v in files_map.values())[:200]
+    regs_list = sorted(v["value"] for v in regs_map.values())[:200]
+    apis_list = sorted(api_names)[:200]
+
     return {
-        "urls": sorted(urls)[:200],
-        "domains": sorted(domains)[:200],
-        "ip_addresses": sorted(ips)[:200],
-        "file_paths": sorted(file_paths)[:200],
-        "registry_paths": sorted(registry_paths)[:200],
-        "api_names": sorted(api_names)[:200],
+        "urls": urls_list,
+        "domains": domains_list,
+        "ip_addresses": ips_list,
+        "file_paths": files_list,
+        "registry_paths": regs_list,
+        "api_names": apis_list,
+        "note": (
+            "Static string indicators normalized offline without live DNS or HTTP enrichment; "
+            "treat separately from observed dynamic network activity."
+        ),
+        "details": {
+            "urls": [urls_map[k] for k in urls_list],
+            "domains": [domains_map[k] for k in domains_list],
+            "ip_addresses": [ips_map[k] for k in ips_list],
+            "file_paths": sorted(files_map.values(), key=lambda x: x["value"].lower())[:200],
+            "registry_paths": sorted(regs_map.values(), key=lambda x: x["value"].lower())[:200],
+        },
     }
 
 
@@ -367,7 +616,8 @@ class StaticAnalyzer:
         (static_dir / "strings.txt").write_text("\n".join(all_strings), encoding="utf-8", errors="replace")
         res.artifacts.append("static/strings.txt")
 
-        indicators = extract_indicators_from_lines(all_strings)
+        source_label = "floss" if floss_payload.get("source") == "floss" else "python_fallback"
+        indicators = extract_indicators_from_lines(all_strings, source_name=source_label)
         floss_payload["indicators"] = indicators
         write_json(static_dir / "floss.json", floss_payload)
         res.artifacts.append("static/floss.json")

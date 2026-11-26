@@ -197,8 +197,10 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **Process Events:** {_fmt_metric(dynamic.get('process_event_count'), statuses.get('process_monitor'))}",
         "",
         "## 4. Network Activity",
-        f"- **Network Connection Events:** {_fmt_metric(dynamic.get('connection_event_count'), statuses.get('network_monitor'))}",
-        f"- **DNS Queries Observed:** {_fmt_metric(dynamic.get('dns_query_count'), statuses.get('network_monitor'))}",
+        f"- **Network Connection Events (total recorded):** {_fmt_metric(dynamic.get('connection_event_count'), statuses.get('network_monitor'))}",
+        f"- **Sample-Attributed Connection Events:** {_fmt_metric(dynamic.get('sample_related_connection_count'), statuses.get('network_monitor'))}",
+        f"- **Traffic Classification Counts:** {dynamic.get('network_classification') or 'N/A'}",
+        f"- **DNS Queries Observed (total):** {_fmt_metric(dynamic.get('dns_query_count'), statuses.get('network_monitor'))}",
         f"- **PCAPNG Captured:** {dynamic.get('has_pcapng', False)}",
         "",
         "## 5. Filesystem Activity",
@@ -216,11 +218,12 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **Full Physical Memory Status:** `{dynamic.get('full_memory_status', 'skipped')}`",
         "",
         "## 8. Potential Indicators of Compromise",
-        f"- **Static URLs:** {', '.join(iocs.get('static_urls', [])[:20]) or 'None observed'}",
-        f"- **Static Domains:** {', '.join(iocs.get('static_domains', [])[:20]) or 'None observed'}",
-        f"- **Static IP Addresses:** {', '.join(iocs.get('static_ips', [])[:20]) or 'None observed'}",
-        f"- **Dynamic Remote Destinations:** {', '.join(iocs.get('dynamic_destinations', [])[:20]) or 'None observed'}",
-        f"- **Dynamic DNS Queries:** {', '.join(iocs.get('dynamic_dns_queries', [])[:20]) or 'None observed'}",
+        f"- **Static URLs (string candidates):** {', '.join(iocs.get('static_urls', [])[:20]) or 'None observed'}",
+        f"- **Static Domains (string candidates):** {', '.join(iocs.get('static_domains', [])[:20]) or 'None observed'}",
+        f"- **Static IP Addresses (string candidates):** {', '.join(iocs.get('static_ips', [])[:20]) or 'None observed'}",
+        f"- **Dynamic Sample-Attributed Destinations:** {', '.join(iocs.get('dynamic_destinations', [])[:20]) or 'None attributed to tracked sample'}",
+        f"- **Dynamic Unattributed Destinations (review context):** {', '.join(iocs.get('dynamic_unattributed_destinations', [])[:20]) or 'None observed'}",
+        f"- **Dynamic Sample-Attributed DNS Queries:** {', '.join(iocs.get('dynamic_dns_queries', [])[:20]) or 'None attributed to tracked sample'}",
         f"- **YARA Matched Rules:** {', '.join(iocs.get('yara_rules', [])[:20]) or 'None matched'}",
         "",
         "## 9. Analysis Limitations & Collector Status",
@@ -244,38 +247,103 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
     return "\n".join(lines)
 
 
-def _build_inventory(evidence_dir: Path) -> list[dict[str, Any]]:
+COLLECTOR_CLASSIFICATION: dict[str, str] = {
+    "file_metadata": "mandatory_static",
+    "strings_floss": "mandatory_static_with_fallback",
+    "capa": "mandatory_static",
+    "yara": "mandatory_static",
+    "ghidra": "conditional_static",
+    "process_monitor": "mandatory_dynamic",
+    "network_monitor": "mandatory_dynamic",
+    "filesystem_monitor": "mandatory_dynamic",
+    "registry_monitor": "mandatory_dynamic",
+    "eventlog_monitor": "mandatory_dynamic",
+    "memory_monitor": "mandatory_dynamic_telemetry_optional_dumps",
+}
+
+
+def _should_archive_file(
+    rel_path: str,
+    file_path: Path,
+    sample_filename: str,
+    include_raw_pml: bool,
+    max_raw_pml_bytes: int,
+) -> tuple[bool, str | None]:
+    """Single source of truth deciding what goes into both manifest inventory and ZIP archive."""
+    if file_path.name == sample_filename and not rel_path.startswith("ghidra/"):
+        return False, "original_sample_excluded"
+    if rel_path.startswith("dynamic/filesystem/dropped_files/"):
+        return False, "dropped_binary_excluded"
+    if not rel_path.startswith(("logs/", "static/", "ghidra/")) and file_path.suffix.lower() in EXECUTABLE_EXTENSIONS:
+        return False, "executable_artifact_excluded"
+    if rel_path == "raw/procmon.pml":
+        if not include_raw_pml:
+            return False, "omitted_by_config_include_raw_pml_false"
+        try:
+            if file_path.stat().st_size > max_raw_pml_bytes:
+                return False, "omitted_exceeded_max_raw_pml_mb"
+        except OSError:
+            return False, "omitted_stat_failed"
+    return True, None
+
+
+def _build_inventory(
+    evidence_dir: Path,
+    sample_filename: str = "",
+    include_raw_pml: bool = True,
+    max_raw_pml_bytes: int = 200 * 1024 * 1024,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build exact archive-aligned file inventory and explicit omitted/excluded list."""
     inventory: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
     for item in sorted(evidence_dir.rglob("*")):
-        if item.is_file():
-            rel = item.relative_to(evidence_dir).as_posix()
-            try:
-                info = compute_file_hashes(item)
-                inventory.append(
-                    {"path": rel, "size_bytes": info["size_bytes"], "sha256": info["sha256"]}
-                )
-            except OSError:
-                inventory.append({"path": rel, "size_bytes": item.stat().st_size, "sha256": ""})
-    return inventory
+        if not item.is_file():
+            continue
+        rel = item.relative_to(evidence_dir).as_posix()
+        allowed, reason = _should_archive_file(
+            rel_path=rel,
+            file_path=item,
+            sample_filename=sample_filename,
+            include_raw_pml=include_raw_pml,
+            max_raw_pml_bytes=max_raw_pml_bytes,
+        )
+        try:
+            size_b = item.stat().st_size
+        except OSError:
+            size_b = 0
+        if not allowed:
+            omitted.append({"path": rel, "size_bytes": size_b, "reason": reason})
+            continue
+        try:
+            info = compute_file_hashes(item)
+            inventory.append({"path": rel, "size_bytes": info["size_bytes"], "sha256": info["sha256"]})
+        except OSError:
+            inventory.append({"path": rel, "size_bytes": size_b, "sha256": ""})
+    return inventory, omitted
 
 
-def _package_evidence_zip(evidence_dir: Path, zip_path: Path, sample_filename: str) -> str:
-    """Stream evidence files into a ZIP archive while excluding sample and dropped executables."""
+def _package_evidence_zip(
+    evidence_dir: Path,
+    zip_path: Path,
+    sample_filename: str,
+    include_raw_pml: bool = False,
+    max_raw_pml_bytes: int = 200 * 1024 * 1024,
+) -> str:
+    """Stream eligible evidence files into a ZIP archive strictly matching _should_archive_file."""
     digest = hashlib.sha256()
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for file_path in sorted(evidence_dir.rglob("*")):
             if not file_path.is_file():
                 continue
             rel_path = file_path.relative_to(evidence_dir).as_posix()
-            # Never bundle the original sample or raw dropped executable binaries inside evidence ZIP.
-            if file_path.name == sample_filename and not rel_path.startswith("ghidra/"):
-                continue
-            if rel_path.startswith("dynamic/filesystem/dropped_files/"):
-                continue
-            if (
-                not rel_path.startswith(("logs/", "static/", "ghidra/"))
-                and file_path.suffix.lower() in EXECUTABLE_EXTENSIONS
-            ):
+            allowed, _ = _should_archive_file(
+                rel_path=rel_path,
+                file_path=file_path,
+                sample_filename=sample_filename,
+                include_raw_pml=include_raw_pml,
+                max_raw_pml_bytes=max_raw_pml_bytes,
+            )
+            if not allowed:
                 continue
             zf.write(file_path, arcname=rel_path)
 
@@ -589,13 +657,33 @@ def run_analysis(
             for lim in res.limitations:
                 collectors_log.warning("[%s] limitation: %s", name, lim)
 
+        include_raw_pml = bool(config.get("include_raw_pml", False))
+        max_raw_pml_bytes = max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024
+
+        status_buckets: dict[str, list[str]] = {
+            STATUS_COMPLETED: [],
+            STATUS_PARTIAL: [],
+            STATUS_FAILED: [],
+            STATUS_SKIPPED: [],
+            STATUS_UNAVAILABLE: [],
+        }
+        for cname, c_res in collector_results.items():
+            status_buckets.setdefault(c_res.status, []).append(cname)
+
+        disabled_optional_features: list[str] = []
+        if not include_raw_pml:
+            disabled_optional_features.append("include_raw_pml=false")
+        if not bool(config.get("winpmem_enabled", False)):
+            disabled_optional_features.append("winpmem_enabled=false")
+        if not bool(config.get("procdump_enabled", True)):
+            disabled_optional_features.append("procdump_enabled=false")
+
         statuses = [res.status for res in collector_results.values()]
-        if all(s == STATUS_FAILED for s in statuses) or (launch_failed and process_mon.result.status == STATUS_FAILED):
-            final_status = STATUS_PARTIAL if any(s == STATUS_COMPLETED for s in statuses) else STATUS_FAILED
-        elif any(
-            s in (STATUS_FAILED, STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_SKIPPED)
-            for s in statuses
+        if all(s in (STATUS_FAILED, STATUS_UNAVAILABLE) for s in statuses) or (
+            launch_failed and process_mon.result.status == STATUS_FAILED and not status_buckets[STATUS_COMPLETED]
         ):
+            final_status = STATUS_FAILED
+        elif any(s in (STATUS_FAILED, STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_SKIPPED) for s in statuses):
             final_status = STATUS_PARTIAL
         else:
             final_status = STATUS_COMPLETED
@@ -617,15 +705,27 @@ def run_analysis(
         reg_doc = _read_json_safe(evidence_dir / "dynamic" / "registry" / "changes.json")
 
         indicators = floss_doc.get("indicators", {})
+        net_conns = net_doc.get("connections", [])
         dynamic_dests = sorted(
             {
                 f"{c.get('dst_ip')}:{c.get('dst_port')}"
-                for c in net_doc.get("connections", [])
-                if c.get("dst_ip")
+                for c in net_conns
+                if c.get("dst_ip") and c.get("classification", "sample_related_traffic") == "sample_related_traffic"
+            }
+        )
+        dynamic_unattr_dests = sorted(
+            {
+                f"{c.get('dst_ip')}:{c.get('dst_port')}"
+                for c in net_conns
+                if c.get("dst_ip") and c.get("classification") == "unattributed_traffic"
             }
         )
         dynamic_dns = sorted(
-            {q.get("query_name") for q in dns_doc.get("queries", []) if q.get("query_name")}
+            {
+                q.get("query_name")
+                for q in dns_doc.get("queries", [])
+                if q.get("query_name") and q.get("classification", "sample_related_traffic") == "sample_related_traffic"
+            }
         )
         yara_rules = [m.get("rule") for m in yara_doc.get("matches", []) if m.get("rule")]
 
@@ -646,6 +746,8 @@ def run_analysis(
             "job_id": job_id,
             "final_status": final_status,
             "collector_statuses": collector_statuses_short,
+            "collector_status_buckets": status_buckets,
+            "disabled_optional_features": disabled_optional_features,
             "timing": {
                 "analysis_start_time": start_time_utc,
                 "dynamic_started_at": dynamic_started_at or None,
@@ -693,7 +795,7 @@ def run_analysis(
                 "ghidra_function_count": _metric_if_collected(
                     collector_results,
                     "ghidra",
-                    len(ghidra_doc.get("functions", [])) if ghidra_doc else None,
+                    ghidra_doc.get("total_function_count", len(ghidra_doc.get("functions", []))) if ghidra_doc else None,
                 ),
                 "ghidra_mcp": collector_results["ghidra"].summary.get("ghidra_mcp"),
             },
@@ -720,6 +822,13 @@ def run_analysis(
                     net_doc.get("connection_count"),
                     net_doc.get("collected"),
                 ),
+                "sample_related_connection_count": _metric_if_collected(
+                    collector_results,
+                    "network_monitor",
+                    net_doc.get("classification_summary", {}).get("sample_related_traffic"),
+                    net_doc.get("collected"),
+                ),
+                "network_classification": net_doc.get("classification_summary"),
                 "dns_query_count": _metric_if_collected(
                     collector_results,
                     "network_monitor",
@@ -774,10 +883,12 @@ def run_analysis(
                 ),
             },
             "potential_iocs": {
+                "note": "Static string indicators are unverified offline candidates; dynamic_destinations excludes control_traffic and OS background_traffic.",
                 "static_urls": indicators.get("urls", []),
                 "static_domains": indicators.get("domains", []),
                 "static_ips": indicators.get("ip_addresses", []),
                 "dynamic_destinations": dynamic_dests,
+                "dynamic_unattributed_destinations": dynamic_unattr_dests,
                 "dynamic_dns_queries": dynamic_dns,
                 "yara_rules": yara_rules,
             },
@@ -804,9 +915,17 @@ def run_analysis(
             "restore_required": True,
             "windows_version": platform.platform(),
             "tool_versions": tool_versions,
+            "archive_policy": {
+                "include_raw_pml": include_raw_pml,
+                "max_raw_pml_mb": int(config.get("max_raw_pml_mb", 200)),
+            },
+            "collector_classification": COLLECTOR_CLASSIFICATION,
+            "collector_status_buckets": status_buckets,
+            "disabled_optional_features": disabled_optional_features,
             "collector_status": {
                 k: {
                     "status": v["status"],
+                    "classification": COLLECTOR_CLASSIFICATION.get(k, "conditional"),
                     "errors": v["errors"],
                     "limitations": v["limitations"],
                     "artifacts": v["artifacts"],
@@ -815,8 +934,9 @@ def run_analysis(
             },
             "analysis_limitations": sorted(set(all_limitations)),
             "final_status": final_status,
-            "evidence_file_inventory_note": "Inventory lists all evidence artifacts written prior to manifest.json.",
+            "evidence_file_inventory_note": "Inventory strictly lists artifacts packaged into the returned ZIP archive.",
             "evidence_file_inventory": [],
+            "excluded_or_omitted_files": [],
         }
 
         report_md = _build_report_markdown(summary=summary_doc, manifest=manifest_skeleton)
@@ -825,14 +945,25 @@ def run_analysis(
         analysis_log.info("Analysis finalized with status=%s", final_status)
         _close_job_loggers(job_id, log_handlers)
 
-        manifest_skeleton["evidence_file_inventory"] = _build_inventory(evidence_dir)
+        inv, omitted = _build_inventory(
+            evidence_dir=evidence_dir,
+            sample_filename=sample_path.name,
+            include_raw_pml=include_raw_pml,
+            max_raw_pml_bytes=max_raw_pml_bytes,
+        )
+        manifest_skeleton["evidence_file_inventory"] = inv
+        manifest_skeleton["excluded_or_omitted_files"] = omitted
         write_json(evidence_dir / "manifest.json", manifest_skeleton)
 
         terminal_logger.info("[SANDBOX] Packaging evidence...")
         stage_callback("packaging_evidence")
         zip_path = workspace_dir / f"evidence_{job_id}.zip"
         archive_sha256 = _package_evidence_zip(
-            evidence_dir=evidence_dir, zip_path=zip_path, sample_filename=sample_path.name
+            evidence_dir=evidence_dir,
+            zip_path=zip_path,
+            sample_filename=sample_path.name,
+            include_raw_pml=include_raw_pml,
+            max_raw_pml_bytes=max_raw_pml_bytes,
         )
 
         return {
@@ -880,7 +1011,15 @@ def run_analysis(
         _close_job_loggers(job_id, log_handlers)
 
         try:
+            include_raw_pml = bool(config.get("include_raw_pml", False))
+            max_raw_pml_bytes = max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024
             write_json(evidence_dir / "logs" / "tool_status.json", collector_status_map)
+            inv_fail, omitted_fail = _build_inventory(
+                evidence_dir=evidence_dir,
+                sample_filename=sample_path.name,
+                include_raw_pml=include_raw_pml,
+                max_raw_pml_bytes=max_raw_pml_bytes,
+            )
             failure_manifest = {
                 "job_id": job_id,
                 "sample_filename": sample_path.name,
@@ -898,9 +1037,15 @@ def run_analysis(
                 "dynamic_execution_status": dynamic_execution_status,
                 "restore_required": True,
                 "windows_version": platform.platform(),
+                "archive_policy": {
+                    "include_raw_pml": include_raw_pml,
+                    "max_raw_pml_mb": int(config.get("max_raw_pml_mb", 200)),
+                },
+                "collector_classification": COLLECTOR_CLASSIFICATION,
                 "collector_status": {
                     k: {
                         "status": v["status"],
+                        "classification": COLLECTOR_CLASSIFICATION.get(k, "conditional"),
                         "errors": v["errors"],
                         "limitations": v["limitations"],
                         "artifacts": v["artifacts"],
@@ -910,7 +1055,8 @@ def run_analysis(
                 "analysis_limitations": sorted(set(all_limitations + [f"Fatal error: {exc}"])),
                 "fatal_error": str(exc),
                 "final_status": STATUS_FAILED,
-                "evidence_file_inventory": _build_inventory(evidence_dir),
+                "evidence_file_inventory": inv_fail,
+                "excluded_or_omitted_files": omitted_fail,
             }
             write_json(evidence_dir / "manifest.json", failure_manifest)
 
@@ -939,7 +1085,11 @@ def run_analysis(
             if not evidence_dir.exists():
                 raise FileNotFoundError(f"Evidence directory unavailable: {evidence_dir}")
             archive_sha256 = _package_evidence_zip(
-                evidence_dir=evidence_dir, zip_path=zip_path, sample_filename=sample_path.name
+                evidence_dir=evidence_dir,
+                zip_path=zip_path,
+                sample_filename=sample_path.name,
+                include_raw_pml=bool(config.get("include_raw_pml", False)),
+                max_raw_pml_bytes=max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024,
             )
             return {
                 "job_status": STATUS_FAILED,

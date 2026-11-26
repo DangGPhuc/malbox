@@ -124,11 +124,13 @@ class GhidraAnalyzer:
             return res.finish(STATUS_UNAVAILABLE)
 
         script_dir = resolve_path(self.tools_cfg.get("ghidra_script_dir"), self.base_dir)
-        if not script_dir or not (script_dir / "ghidra_export.py").is_file():
-            res.limitations.append("Ghidra export script scripts/ghidra_export.py not found.")
+        post_script_name = str(self.tools_cfg.get("ghidra_export_script") or "GhidraExport.java").strip()
+        if not script_dir or not (script_dir / post_script_name).is_file():
+            res.limitations.append(f"Ghidra export script scripts/{post_script_name} not found.")
             return res.finish(STATUS_UNAVAILABLE)
 
         res.tool_versions["ghidra_headless"] = str(headless_bin)
+        res.tool_versions["ghidra_post_script"] = post_script_name
         project_dir = workspace_dir / "ghidra_project"
         project_dir.mkdir(parents=True, exist_ok=True)
         project_name = f"malbox_{workspace_dir.name}"
@@ -144,7 +146,7 @@ class GhidraAnalyzer:
             "-scriptPath",
             str(script_dir),
             "-postScript",
-            "ghidra_export.py",
+            post_script_name,
             str(ghidra_dir),
             "-deleteProject",
         ]
@@ -175,11 +177,14 @@ class GhidraAnalyzer:
                 parsed = json.loads(functions_json.read_text(encoding="utf-8-sig"))
                 res.summary.update(
                     {
-                        "function_count": len(parsed.get("functions", [])),
+                        "export_script": parsed.get("export_script", post_script_name),
+                        "function_count": parsed.get("total_function_count", len(parsed.get("functions", []))),
+                        "functions_truncated": bool(parsed.get("functions_truncated", False)),
                         "import_count": len(parsed.get("imports", [])),
                         "export_count": len(parsed.get("exports", [])),
                         "string_count": len(parsed.get("strings", [])),
                         "export_caps": {
+                            "max_functions_json": 10000,
                             "max_imports": 2000,
                             "max_exports": 500,
                             "max_strings": 3000,
@@ -189,8 +194,9 @@ class GhidraAnalyzer:
                         },
                     }
                 )
-            except ValueError:
-                pass
+            except ValueError as exc:
+                res.errors.append(f"Invalid JSON in ghidra/functions.json: {exc}")
+                return res.finish(STATUS_FAILED)
 
         if disassembly_txt.is_file():
             res.artifacts.append("ghidra/disassembly.txt")

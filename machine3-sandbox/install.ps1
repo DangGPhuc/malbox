@@ -305,7 +305,7 @@ $checks = @(
     @{ Name = "capa"; Path = $cfg.tools.capa; Note = "Download release zip -> tools\capa\capa.exe" },
     @{ Name = "capa-rules"; Path = $cfg.tools.capa_rules; Note = "git clone https://github.com/mandiant/capa-rules tools\capa-rules" },
     @{ Name = "YARA CLI (optional)"; Path = $cfg.tools.yara; Note = "yara-python is installed in .venv; optional CLI -> tools\yara\yara64.exe" },
-    @{ Name = "Ghidra Headless"; Path = $cfg.tools.ghidra_headless; Note = "Extract official release -> tools\ghidra\ + JDK 17/21" },
+    @{ Name = "Ghidra Headless"; Path = $cfg.tools.ghidra_headless; Note = "Extract official release -> tools\ghidra\ + compatible JDK (uses scripts\GhidraExport.java)" },
     @{ Name = "Sysmon64"; Path = $cfg.tools.sysmon; Note = "Run Admin PS: Sysmon64.exe -accepteula -i configs\sysmon.xml" },
     @{ Name = "Procmon64"; Path = $cfg.tools.procmon; Note = "Extract Sysinternals Suite -> tools\sysinternals\Procmon64.exe" },
     @{ Name = "ProcDump64"; Path = $cfg.tools.procdump; Note = "Extract Sysinternals Suite -> tools\sysinternals\procdump64.exe" },

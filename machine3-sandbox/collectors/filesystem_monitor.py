@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -88,6 +89,7 @@ class ProcmonSession:
         """Read an already-exported Procmon CSV filtered to the current tracked_pids set."""
         if not self.csv_path or not self.csv_path.is_file():
             return []
+        row_cap = max(100, int(self.config.get("max_procmon_export_rows", 15000)))
         filtered_rows: list[dict[str, str]] = []
         try:
             with self.csv_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
@@ -96,7 +98,10 @@ class ProcmonSession:
                     pid = _safe_int(row.get("PID"))
                     if pid in tracked_pids:
                         filtered_rows.append(dict(row))
-                        if len(filtered_rows) >= 15000:
+                        if len(filtered_rows) >= row_cap:
+                            self.notes.append(
+                                f"Procmon CSV row export reached configured limit ({row_cap} rows)."
+                            )
                             break
         except OSError as exc:
             self.notes.append(f"Failed reading Procmon CSV export: {exc}")
@@ -122,6 +127,17 @@ class ProcmonSession:
         if not self.pml_path or not self.pml_path.is_file():
             self.notes.append("Procmon backing file raw/procmon.pml was not created.")
             return []
+
+        pml_size_mb = self.pml_path.stat().st_size / (1024 * 1024)
+        try:
+            free_mb = shutil.disk_usage(workspace_dir).free / (1024 * 1024)
+            if free_mb < max(128.0, pml_size_mb * 1.25):
+                self.notes.append(
+                    f"Skipped Procmon CSV conversion due to low free disk space ({int(free_mb)} MB free vs {int(pml_size_mb)} MB PML)."
+                )
+                return []
+        except OSError:
+            pass
 
         self.csv_path = workspace_dir / "procmon_export.csv"
         conv_res = run_subprocess_safe(
@@ -271,6 +287,29 @@ class FilesystemMonitor:
             except OSError:
                 continue
 
+        include_raw_pml = bool(self.config.get("include_raw_pml", False))
+        max_raw_pml_mb = int(self.config.get("max_raw_pml_mb", 200))
+        raw_pml_generated = bool(procmon_session.pml_path and procmon_session.pml_path.is_file())
+        raw_pml_size_bytes = procmon_session.pml_path.stat().st_size if raw_pml_generated and procmon_session.pml_path else 0
+        raw_pml_archived = False
+        raw_pml_omitted_reason = ""
+
+        if raw_pml_generated:
+            self.result.tool_versions["procmon"] = str(procmon_session.procmon_bin)
+            if not include_raw_pml:
+                raw_pml_omitted_reason = (
+                    "raw/procmon.pml omitted from evidence archive by configuration (include_raw_pml=false); "
+                    "filtered filesystem, registry, and process evidence preserved."
+                )
+            elif raw_pml_size_bytes > max_raw_pml_mb * 1024 * 1024:
+                raw_pml_omitted_reason = (
+                    f"raw/procmon.pml ({raw_pml_size_bytes // (1024 * 1024)} MB) exceeded max_raw_pml_mb "
+                    f"limit ({max_raw_pml_mb} MB) and was omitted from the evidence archive."
+                )
+            else:
+                raw_pml_archived = True
+                self.result.artifacts.append("raw/procmon.pml")
+
         changes.sort(key=lambda item: str(item.get("timestamp") or ""))
         write_json(
             fs_dir / "changes.json",
@@ -279,13 +318,20 @@ class FilesystemMonitor:
                 "change_count": len(changes),
                 "dropped_artifact_metadata_count": len(dropped_artifacts),
                 "dropped_artifact_metadata": dropped_artifacts,
+                "raw_pml_policy": {
+                    "include_raw_pml": include_raw_pml,
+                    "max_raw_pml_mb": max_raw_pml_mb,
+                    "raw_pml_generated": raw_pml_generated,
+                    "raw_pml_size_bytes": raw_pml_size_bytes,
+                    "raw_pml_archived": raw_pml_archived,
+                    "omitted_reason": raw_pml_omitted_reason or None,
+                },
                 "changes": changes[:5000],
             },
         )
         self.result.artifacts.append("dynamic/filesystem/changes.json")
-        if procmon_session.pml_path and procmon_session.pml_path.is_file():
-            self.result.artifacts.append("raw/procmon.pml")
-            self.result.tool_versions["procmon"] = str(procmon_session.procmon_bin)
+        if raw_pml_omitted_reason:
+            self.result.limitations.append(raw_pml_omitted_reason)
 
         self.result.limitations.extend(procmon_session.notes)
         self.result.summary = {
@@ -294,6 +340,8 @@ class FilesystemMonitor:
             "dropped_artifact_count": len(dropped_artifacts),
             "sysmon_available": sysmon_available,
             "procmon_available": procmon_session.exported_ok,
+            "raw_pml_archived": raw_pml_archived,
+            "raw_pml_size_bytes": raw_pml_size_bytes,
         }
 
         if not sysmon_available and not procmon_session.exported_ok:

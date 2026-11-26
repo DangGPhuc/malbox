@@ -90,7 +90,7 @@ class MemoryMonitor:
         dumps_dir.mkdir(parents=True, exist_ok=True)
 
         if not bool(self.config.get("procdump_enabled", True)):
-            self.result.limitations.append("Process memory dumping disabled in config.json.")
+            self.result.summary["procdump_disabled_by_config"] = True
             return
 
         if not live_pids:
@@ -143,10 +143,9 @@ class MemoryMonitor:
         if not bool(self.config.get("winpmem_enabled", False)):
             self.full_memory_info = {
                 "dump_type": "full_physical_memory_dump",
-                "status": "skipped",
+                "status": "disabled_by_config",
                 "reason": "Optional winpmem_enabled is false in config.json; relying on RAM telemetry and process dumps.",
             }
-            self.result.limitations.append(self.full_memory_info["reason"])
             return
 
         if not sys.platform.startswith("win") or not self.winpmem_bin:
@@ -259,8 +258,13 @@ class MemoryMonitor:
             "process_dump_count": sum(1 for d in self.process_dumps if d.get("status") == "completed"),
             "full_memory_status": self.full_memory_info.get("status"),
             "volatility_output_count": len(self.volatility_outputs),
+            "procdump_enabled": bool(self.config.get("procdump_enabled", True)),
+            "winpmem_enabled": bool(self.config.get("winpmem_enabled", False)),
         }
 
-        if self.result.limitations or self.result.errors:
+        has_dump_failure = any(d.get("status") == "failed" for d in self.process_dumps)
+        if self.full_memory_info.get("status") in ("failed", "unavailable"):
+            has_dump_failure = True
+        if self.result.errors or has_dump_failure or self.result.limitations:
             return self.result.finish(STATUS_PARTIAL)
         return self.result.finish(STATUS_COMPLETED)

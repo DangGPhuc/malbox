@@ -255,6 +255,7 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "yara_rules_dir": "./scripts/yara_rules",
         "ghidra_headless": "./tools/ghidra/support/analyzeHeadless.bat",
         "ghidra_script_dir": "./scripts",
+        "ghidra_export_script": "GhidraExport.java",
         "ghidra_mcp_dir": "./tools/GhidraMCP",
         "sysmon": "C:\\Windows\\Sysmon64.exe",
         "procmon": "./tools/sysinternals/Procmon64.exe",
@@ -276,6 +277,9 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "min_free_disk_mb": 2048,
         "procdump_enabled": True,
         "winpmem_enabled": False,
+        "include_raw_pml": False,
+        "max_raw_pml_mb": 200,
+        "max_procmon_export_rows": 15000,
         "network_interface": "",
         "tools": dict(default_tools),
     }
@@ -317,6 +321,9 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
     pd_en = _validate_bool(parsed, "procdump_enabled", errors, required=False)
     wp_en = _validate_bool(parsed, "winpmem_enabled", errors, required=False)
+    raw_pml_en = _validate_bool(parsed, "include_raw_pml", errors, required=False)
+    max_pml_mb = _validate_int(parsed, "max_raw_pml_mb", errors, min_val=1, required=False)
+    max_pml_rows = _validate_int(parsed, "max_procmon_export_rows", errors, min_val=100, required=False)
     net_if = _validate_str(parsed, "network_interface", errors, allow_empty=True, required=False)
 
     safe_tools = dict(default_tools)
@@ -357,6 +364,12 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         safe_cfg["procdump_enabled"] = pd_en
     if wp_en is not None:
         safe_cfg["winpmem_enabled"] = wp_en
+    if raw_pml_en is not None:
+        safe_cfg["include_raw_pml"] = raw_pml_en
+    if max_pml_mb is not None:
+        safe_cfg["max_raw_pml_mb"] = max_pml_mb
+    if max_pml_rows is not None:
+        safe_cfg["max_procmon_export_rows"] = max_pml_rows
     if net_if is not None:
         safe_cfg["network_interface"] = net_if
     safe_cfg["tools"] = safe_tools
@@ -458,16 +471,38 @@ def parse_java_major(raw_text: str) -> int | None:
     return first
 
 
-def get_ghidra_version(headless_bin: Path | None) -> str | None:
+def get_ghidra_props(headless_bin: Path | None) -> tuple[str | None, int | None]:
     if not headless_bin:
-        return None
+        return None, None
     ghidra_root = headless_bin.parent.parent
     props = ghidra_root / "Ghidra" / "application.properties"
+    ver: str | None = None
+    java_min: int | None = None
     if props.is_file():
         for line in props.read_text(encoding="utf-8", errors="replace").splitlines():
             if line.startswith("application.version="):
-                return line.split("=", 1)[1].strip()
-    return None
+                ver = line.split("=", 1)[1].strip()
+            elif line.startswith("application.java.min="):
+                try:
+                    java_min = int(line.split("=", 1)[1].strip().split(".", 1)[0])
+                except ValueError:
+                    pass
+    return ver, java_min
+
+
+def check_ghidra_script_syntax(script_path: Path) -> tuple[bool, str | None]:
+    """Perform static non-executing check on .java or .py Ghidra post-script."""
+    if script_path.suffix.lower() != ".java":
+        return check_python_syntax_ast(script_path)
+    try:
+        src = script_path.read_text(encoding="utf-8-sig", errors="replace")
+        if "extends GhidraScript" not in src or "public void run()" not in src:
+            return False, "Missing `extends GhidraScript` or `public void run()` entry method."
+        if src.count("{") == 0 or src.count("{") != src.count("}"):
+            return False, "Unbalanced curly braces in Java source."
+        return True, None
+    except OSError as exc:
+        return False, str(exc)
 
 
 def check_python_syntax_ast(script_path: Path) -> tuple[bool, str | None]:
@@ -1320,9 +1355,10 @@ def main(argv: list[str] | None = None) -> int:
 
     ghidra_bin = resolve_tool(tools_cfg.get("ghidra_headless"), ["analyzeHeadless.bat", "analyzeHeadless"])
     ghidra_script_dir = resolve_cfg_path(tools_cfg.get("ghidra_script_dir")) or (BASE_DIR / "scripts")
-    ghidra_script = ghidra_script_dir / "ghidra_export.py"
+    ghidra_export_name = str(tools_cfg.get("ghidra_export_script") or "GhidraExport.java").strip()
+    ghidra_script = ghidra_script_dir / ghidra_export_name
     ghidra_script_exists = ghidra_script.is_file()
-    ghidra_script_syntax_ok, ghidra_script_err = check_python_syntax_ast(ghidra_script) if ghidra_script_exists else (False, "missing")
+    ghidra_script_syntax_ok, ghidra_script_err = check_ghidra_script_syntax(ghidra_script) if ghidra_script_exists else (False, "missing")
     ghidra_root_valid = bool(ghidra_bin and (ghidra_bin.parent.parent / "Ghidra").is_dir())
     ghidra_installed = bool(ghidra_bin) and ghidra_root_valid and ghidra_script_exists
 
@@ -1343,11 +1379,12 @@ def main(argv: list[str] | None = None) -> int:
                     "binary_present": True,
                     "ghidra_home_present": True,
                     "export_script_present": True,
-                    "export_script_syntax_valid": True,
+                    "export_script_name": ghidra_export_name,
+                    "export_script_structure_valid": True,
                 },
                 diagnostic_message=(
-                    f"Ghidra headless binary and scripts/ghidra_export.py exist with valid Python syntax "
-                    "(installation check only; execution not yet verified)."
+                    f"Ghidra headless binary and scripts/{ghidra_export_name} exist with valid static structure "
+                    "(installation check only; compilation and export require Ghidra Headless execution on VM)."
                 ),
             )
         )
@@ -1363,8 +1400,8 @@ def main(argv: list[str] | None = None) -> int:
                 installed=True,
                 runtime_verified=False,
                 feature_verified=False,
-                diagnostic_message=f"scripts/ghidra_export.py syntax check failed: {ghidra_script_err}",
-                recommended_action="Restore scripts/ghidra_export.py from repository.",
+                diagnostic_message=f"scripts/{ghidra_export_name} structure/syntax check failed: {ghidra_script_err}",
+                recommended_action=f"Restore scripts/{ghidra_export_name} from repository.",
             )
         )
     else:
@@ -1374,7 +1411,7 @@ def main(argv: list[str] | None = None) -> int:
         elif not ghidra_root_valid:
             missing_parts.append("Ghidra/ layout directory next to support/")
         if not ghidra_script_exists:
-            missing_parts.append("scripts/ghidra_export.py")
+            missing_parts.append(f"scripts/{ghidra_export_name}")
         checks.append(
             make_check(
                 name="ghidra_headless_install",
@@ -1387,12 +1424,12 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_verified=False,
                 feature_verified=False,
                 diagnostic_message=f"Ghidra Headless installation incomplete: missing {', '.join(missing_parts)}.",
-                recommended_action="Extract official Ghidra release to tools\\ghidra\\ (with scripts\\ghidra_export.py present).",
+                recommended_action=f"Extract official Ghidra release to tools\\ghidra\\ (with scripts\\{ghidra_export_name} present).",
             )
         )
 
-    # Stage B: Ghidra version detection & JDK compatibility
-    ghidra_ver = get_ghidra_version(ghidra_bin)
+    # Stage B: Ghidra version detection & JDK compatibility (supports Ghidra 10/11/12 + application.java.min)
+    ghidra_ver, ghidra_prop_java_min = get_ghidra_props(ghidra_bin)
     compat_ok = False
     compat_msg = ""
     if not ghidra_bin:
@@ -1422,12 +1459,16 @@ def main(argv: list[str] | None = None) -> int:
                 compat_msg = f"Unrecognized Ghidra version '{ghidra_ver}'; JDK compatibility unverified."
             else:
                 g_maj, g_min = int(m.group(1)), int(m.group(2))
-                if (g_maj > 11 or (g_maj == 11 and g_min >= 2)) and java_major < 21:
-                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 21+, detected JDK {java_major}."
-                elif g_maj == 11 and java_major < 17:
-                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 17+, detected JDK {java_major}."
-                elif g_maj < 11 and java_major < 17:
-                    compat_msg = f"Ghidra {ghidra_ver} detected with JDK {java_major}; JDK 17+ recommended."
+                req_jdk = ghidra_prop_java_min
+                if req_jdk is None:
+                    if (g_maj > 12) or (g_maj == 12 and g_min >= 2):
+                        req_jdk = 25
+                    elif (g_maj == 12) or (g_maj == 11 and g_min >= 2):
+                        req_jdk = 21
+                    else:
+                        req_jdk = 17
+                if java_major < req_jdk:
+                    compat_msg = f"Ghidra {ghidra_ver} requires JDK {req_jdk}+, detected JDK {java_major}."
                 else:
                     compat_ok = True
 
@@ -1448,7 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
                     if compat_ok
                     else compat_msg
                 ),
-                recommended_action="" if compat_ok else (compat_msg or "Verify Ghidra version and JDK 17/21 installation."),
+                recommended_action="" if compat_ok else (compat_msg or "Verify Ghidra version and compatible JDK installation."),
             )
         )
 
@@ -1522,10 +1563,10 @@ def main(argv: list[str] | None = None) -> int:
                         "functional_export_verified": False,
                     },
                     diagnostic_message=(
-                        "analyzeHeadless -help exited 0 and displayed HeadlessAnalyzer options, but end-to-end binary "
-                        "import, auto-analysis, and scripts/ghidra_export.py export remain UNVERIFIED until VM testing."
+                        f"analyzeHeadless -help exited 0 and displayed HeadlessAnalyzer options, but end-to-end binary "
+                        f"import, auto-analysis, and scripts/{ghidra_export_name} export remain UNVERIFIED until VM testing."
                     ),
-                    recommended_action="Verify full Ghidra Headless export on Windows 11 VM using a harmless test binary.",
+                    recommended_action="Verify full Ghidra Headless export on VM using a harmless test binary.",
                     unavailable_evidence_if_missing="If Ghidra Headless fails at runtime, ghidra/functions.json, disassembly.txt, and decompiled/*.c are unavailable.",
                 )
             )
@@ -1552,9 +1593,9 @@ def main(argv: list[str] | None = None) -> int:
                     },
                     diagnostic_message=(
                         f"analyzeHeadless -help exited {rc} (unsuccessful exit code; normal for Ghidra CLI usage banner, "
-                        "NOT proof of verified execution). Runtime execution and ghidra_export.py export remain UNVERIFIED until VM testing."
+                        f"NOT proof of verified execution). Runtime execution and scripts/{ghidra_export_name} export remain UNVERIFIED until VM testing."
                     ),
-                    recommended_action="Verify full Ghidra Headless export on Windows 11 VM using a harmless test binary.",
+                    recommended_action="Verify full Ghidra Headless export on VM using a harmless test binary.",
                     unavailable_evidence_if_missing="If Ghidra Headless fails at runtime, ghidra/functions.json, disassembly.txt, and decompiled/*.c are unavailable.",
                 )
             )

@@ -178,9 +178,15 @@ class EvidenceStore:
 
         result: dict[str, Any] = {
             "job_id": job_id,
+            "export_script": funcs_doc.get("export_script") if isinstance(funcs_doc, dict) else None,
             "program_name": funcs_doc.get("program_name") if isinstance(funcs_doc, dict) else None,
             "entry_points": funcs_doc.get("entry_points", []) if isinstance(funcs_doc, dict) else [],
-            "function_count": len(funcs_doc.get("functions", [])) if isinstance(funcs_doc, dict) else 0,
+            "function_count": (
+                funcs_doc.get("total_function_count", len(funcs_doc.get("functions", [])))
+                if isinstance(funcs_doc, dict)
+                else 0
+            ),
+            "functions_truncated": bool(funcs_doc.get("functions_truncated", False)) if isinstance(funcs_doc, dict) else False,
             "functions": selected_functions[:100],
             "imports": (funcs_doc.get("imports", []) if isinstance(funcs_doc, dict) else [])[:150],
             "exports": (funcs_doc.get("exports", []) if isinstance(funcs_doc, dict) else [])[:150],
