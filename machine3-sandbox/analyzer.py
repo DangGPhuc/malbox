@@ -733,6 +733,8 @@ def run_analysis(
             disabled_optional_features.append("winpmem_enabled=false")
         if not bool(config.get("procdump_enabled", True)):
             disabled_optional_features.append("procdump_enabled=false")
+        if not bool(config.get("canary_fixtures_enabled", False)):
+            disabled_optional_features.append("canary_fixtures_enabled=false")
 
         optional_collectors_unavailable = [
             cname
@@ -747,14 +749,56 @@ def run_analysis(
         if not enable_attack_mapping:
             disabled_optional_features.append("enable_attack_mapping=false")
 
-        required_statuses = [
-            res.status
-            for cname, res in collector_results.items()
-            if not (COLLECTOR_CLASSIFICATION.get(cname) == "optional_static" and res.status == STATUS_UNAVAILABLE)
+        # Separate mandatory/conditional collectors from optional collectors & unsupported skips
+        mandatory_collectors: dict[str, str] = {}
+        conditional_collectors: dict[str, str] = {}
+        optional_collectors: dict[str, str] = {}
+        required_statuses: list[str] = []
+
+        for cname, c_res in collector_results.items():
+            role = COLLECTOR_CLASSIFICATION.get(cname, "conditional")
+            if role == "optional_static":
+                optional_collectors[cname] = c_res.status
+                # Optional unavailable or optional tool failure is tracked cleanly under
+                # optional_collectors without forcing mandatory evidence into failed/partial
+                # when disabled/absent; if an optional tool ran and failed, still record limitation.
+                if c_res.status == STATUS_FAILED:
+                    all_limitations.append(
+                        f"Optional collector '{cname}' failed; mandatory static/dynamic evidence unaffected."
+                    )
+                continue
+            if role.startswith("conditional"):
+                conditional_collectors[cname] = c_res.status
+                ghidra_assess = str(c_res.summary.get("export_assessment") or "")
+                if c_res.status == STATUS_SKIPPED and ghidra_assess == "unsupported_sample_format":
+                    continue
+                required_statuses.append(c_res.status)
+            else:
+                mandatory_collectors[cname] = c_res.status
+                required_statuses.append(c_res.status)
+
+        missing_mandatory_collectors = [
+            cname
+            for cname, st in mandatory_collectors.items()
+            if st in (STATUS_FAILED, STATUS_UNAVAILABLE, STATUS_SKIPPED)
+        ] + [
+            cname
+            for cname, st in conditional_collectors.items()
+            if st in (STATUS_FAILED, STATUS_UNAVAILABLE)
         ]
+
+        collector_role_summary = {
+            "mandatory": mandatory_collectors,
+            "conditional": conditional_collectors,
+            "optional": optional_collectors,
+            "disabled_optional_features": disabled_optional_features,
+            "missing_or_degraded_mandatory": sorted(missing_mandatory_collectors),
+        }
+
+        required_completed_count = sum(1 for st in required_statuses if st == STATUS_COMPLETED)
         statuses = required_statuses or [res.status for res in collector_results.values()]
         if all(s in (STATUS_FAILED, STATUS_UNAVAILABLE) for s in statuses) or (
-            launch_failed and process_mon.result.status == STATUS_FAILED and not status_buckets[STATUS_COMPLETED]
+            launch_failed and process_mon.result.status == STATUS_FAILED and required_completed_count == 0
         ):
             final_status = STATUS_FAILED
         elif any(s in (STATUS_FAILED, STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_SKIPPED) for s in statuses):
@@ -849,6 +893,7 @@ def run_analysis(
             "final_status": final_status,
             "collector_statuses": collector_statuses_short,
             "collector_status_buckets": status_buckets,
+            "collector_role_summary": collector_role_summary,
             "disabled_optional_features": disabled_optional_features,
             "timing": {
                 "analysis_start_time": start_time_utc,
@@ -904,6 +949,7 @@ def run_analysis(
                     "ghidra",
                     ghidra_doc.get("total_function_count", len(ghidra_doc.get("functions", []))) if ghidra_doc else None,
                 ),
+                "ghidra_export_assessment": collector_results["ghidra"].summary.get("export_assessment"),
                 "ghidra_mcp": collector_results["ghidra"].summary.get("ghidra_mcp"),
             },
             "dynamic": {
@@ -1045,6 +1091,7 @@ def run_analysis(
             },
             "collector_classification": COLLECTOR_CLASSIFICATION,
             "collector_status_buckets": status_buckets,
+            "collector_role_summary": collector_role_summary,
             "disabled_optional_features": disabled_optional_features,
             "collector_status": {
                 k: {

@@ -27,9 +27,18 @@ from collectors.common import (
 
 def _safe_int(val: Any) -> int | None:
     try:
+        if isinstance(val, bool):
+            return None
         return int(val)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_cfg_int(config: dict[str, Any], key: str, default: int, min_val: int) -> int:
+    raw = config.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return default
+    return max(min_val, raw)
 
 
 class ProcmonSession:
@@ -89,7 +98,7 @@ class ProcmonSession:
         """Read an already-exported Procmon CSV filtered to the current tracked_pids set."""
         if not self.csv_path or not self.csv_path.is_file():
             return []
-        row_cap = max(100, int(self.config.get("max_procmon_export_rows", 15000)))
+        row_cap = _safe_cfg_int(self.config, "max_procmon_export_rows", 15000, min_val=100)
         filtered_rows: list[dict[str, str]] = []
         try:
             with self.csv_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
@@ -365,7 +374,7 @@ class FilesystemMonitor:
                 continue
 
         include_raw_pml = bool(self.config.get("include_raw_pml", False))
-        max_raw_pml_mb = int(self.config.get("max_raw_pml_mb", 200))
+        max_raw_pml_mb = _safe_cfg_int(self.config, "max_raw_pml_mb", 200, min_val=1)
         raw_pml_generated = bool(procmon_session.pml_path and procmon_session.pml_path.is_file())
         raw_pml_size_bytes = procmon_session.pml_path.stat().st_size if raw_pml_generated and procmon_session.pml_path else 0
         raw_pml_archived = False

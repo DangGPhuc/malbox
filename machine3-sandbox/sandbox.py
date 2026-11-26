@@ -49,12 +49,65 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     return logging.getLogger("malbox.sandbox")
 
 
+def _cfg_bool(config: dict[str, Any], key: str, default: bool) -> bool:
+    val = config.get(key, default)
+    if isinstance(val, bool):
+        return val
+    raise ValueError(f"Sandbox config '{key}' must be a boolean (got {type(val).__name__}).")
+
+
+def _cfg_int(
+    config: dict[str, Any],
+    key: str,
+    default: int,
+    min_val: int = 1,
+    max_val: int | None = None,
+) -> int:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(f"Sandbox config '{key}' must be an integer (got {type(val).__name__}).")
+    if val < min_val or (max_val is not None and val > max_val):
+        raise ValueError(f"Sandbox config '{key}' out of range: {val}.")
+    return val
+
+
+def _cfg_float(config: dict[str, Any], key: str, default: float, min_val: float = 0.1) -> float:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"Sandbox config '{key}' must be a finite number (got {type(val).__name__}).")
+    fval = float(val)
+    if fval != fval or fval in (float("inf"), float("-inf")) or fval < min_val:
+        raise ValueError(f"Sandbox config '{key}' must be finite and >= {min_val}.")
+    return fval
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load Machine 3 Sandbox configuration (supports UTF-8 with or without BOM)."""
+    """Load and validate Machine 3 Sandbox configuration (supports UTF-8 with or without BOM)."""
     if not config_path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     with config_path.open("r", encoding="utf-8-sig") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"Sandbox config root must be a JSON object (got {type(data).__name__}).")
+    _cfg_int(data, "listen_port", 8001, min_val=1, max_val=65535)
+    _cfg_float(data, "observation_duration_seconds", 120.0, min_val=1.0)
+    _cfg_bool(data, "require_local_approval", True)
+    _cfg_float(data, "poll_sample_interval_seconds", 0.5, min_val=0.05)
+    _cfg_float(data, "ghidra_timeout_seconds", 300.0, min_val=1.0)
+    _cfg_float(data, "floss_timeout_seconds", 120.0, min_val=1.0)
+    _cfg_float(data, "capa_timeout_seconds", 120.0, min_val=1.0)
+    _cfg_float(data, "die_timeout_seconds", 60.0, min_val=1.0)
+    _cfg_float(data, "volatility_timeout_seconds", 180.0, min_val=1.0)
+    _cfg_bool(data, "enable_attack_mapping", True)
+    _cfg_int(data, "chunk_size_bytes", 65536, min_val=1024)
+    _cfg_int(data, "min_free_disk_mb", 2048, min_val=1)
+    _cfg_bool(data, "procdump_enabled", True)
+    _cfg_bool(data, "winpmem_enabled", False)
+    _cfg_bool(data, "include_raw_pml", False)
+    _cfg_int(data, "max_raw_pml_mb", 200, min_val=1)
+    _cfg_int(data, "max_procmon_export_rows", 15000, min_val=100)
+    _cfg_bool(data, "canary_fixtures_enabled", False)
+    return data
 
 
 def resolve_dir(raw_path: str, base_dir: Path) -> Path:
@@ -128,8 +181,8 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
         logger=logger,
     )
     app = Flask(__name__)
-    chunk_size = int(config.get("chunk_size_bytes", 65536))
-    min_free_disk_mb = int(config.get("min_free_disk_mb", 2048))
+    chunk_size = _cfg_int(config, "chunk_size_bytes", 65536, min_val=1024)
+    min_free_disk_mb = _cfg_int(config, "min_free_disk_mb", 2048, min_val=1)
 
     def execute_job_thread(
         job_id: str,
@@ -439,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config).resolve()
     try:
         config = load_config(config_path)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         logger.error("[ERROR] Failed to load sandbox config: %s", exc)
         return 1
 

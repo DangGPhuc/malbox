@@ -275,9 +275,14 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "evidence_dir": "./evidence",
         "observation_duration_seconds": 120,
         "require_local_approval": True,
+        "poll_sample_interval_seconds": 0.5,
         "ghidra_timeout_seconds": 300,
+        "floss_timeout_seconds": 120.0,
+        "capa_timeout_seconds": 120.0,
         "die_timeout_seconds": 60,
+        "volatility_timeout_seconds": 180.0,
         "enable_attack_mapping": True,
+        "chunk_size_bytes": 65536,
         "min_free_disk_mb": 2048,
         "procdump_enabled": True,
         "winpmem_enabled": False,
@@ -321,11 +326,11 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     attack_en = _validate_bool(parsed, "enable_attack_mapping", errors, required=False)
     min_disk = _validate_int(parsed, "min_free_disk_mb", errors, min_val=1, required=True)
 
-    _validate_number(parsed, "poll_sample_interval_seconds", errors, min_val=0.05, required=False)
-    _validate_number(parsed, "floss_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_number(parsed, "capa_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_number(parsed, "volatility_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    poll_intv = _validate_number(parsed, "poll_sample_interval_seconds", errors, min_val=0.05, required=False)
+    floss_to = _validate_number(parsed, "floss_timeout_seconds", errors, min_val=1.0, required=False)
+    capa_to = _validate_number(parsed, "capa_timeout_seconds", errors, min_val=1.0, required=False)
+    vol_to = _validate_number(parsed, "volatility_timeout_seconds", errors, min_val=1.0, required=False)
+    chunk_sz = _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
     pd_en = _validate_bool(parsed, "procdump_enabled", errors, required=False)
     wp_en = _validate_bool(parsed, "winpmem_enabled", errors, required=False)
     raw_pml_en = _validate_bool(parsed, "include_raw_pml", errors, required=False)
@@ -352,40 +357,33 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
                 safe_tools[tkey] = tval.strip()
 
     safe_cfg = dict(defaults)
-    if lhost:
-        safe_cfg["listen_host"] = lhost
-    if lport is not None:
-        safe_cfg["listen_port"] = lport
-    if ws_dir:
-        safe_cfg["workspace_dir"] = ws_dir
-    if ev_dir:
-        safe_cfg["evidence_dir"] = ev_dir
-    if obs_dur is not None:
-        safe_cfg["observation_duration_seconds"] = obs_dur
-    if req_app is not None:
-        safe_cfg["require_local_approval"] = req_app
-    if gh_timeout is not None:
-        safe_cfg["ghidra_timeout_seconds"] = gh_timeout
-    if die_timeout is not None:
-        safe_cfg["die_timeout_seconds"] = die_timeout
-    if attack_en is not None:
-        safe_cfg["enable_attack_mapping"] = attack_en
-    if min_disk is not None:
-        safe_cfg["min_free_disk_mb"] = min_disk
-    if pd_en is not None:
-        safe_cfg["procdump_enabled"] = pd_en
-    if wp_en is not None:
-        safe_cfg["winpmem_enabled"] = wp_en
-    if raw_pml_en is not None:
-        safe_cfg["include_raw_pml"] = raw_pml_en
-    if max_pml_mb is not None:
-        safe_cfg["max_raw_pml_mb"] = max_pml_mb
-    if max_pml_rows is not None:
-        safe_cfg["max_procmon_export_rows"] = max_pml_rows
-    if canary_en is not None:
-        safe_cfg["canary_fixtures_enabled"] = canary_en
-    if net_if is not None:
-        safe_cfg["network_interface"] = net_if
+    updates: dict[str, Any] = {
+        "listen_host": lhost,
+        "listen_port": lport,
+        "workspace_dir": ws_dir,
+        "evidence_dir": ev_dir,
+        "observation_duration_seconds": obs_dur,
+        "require_local_approval": req_app,
+        "poll_sample_interval_seconds": poll_intv,
+        "ghidra_timeout_seconds": gh_timeout,
+        "floss_timeout_seconds": floss_to,
+        "capa_timeout_seconds": capa_to,
+        "die_timeout_seconds": die_timeout,
+        "volatility_timeout_seconds": vol_to,
+        "enable_attack_mapping": attack_en,
+        "chunk_size_bytes": chunk_sz,
+        "min_free_disk_mb": min_disk,
+        "procdump_enabled": pd_en,
+        "winpmem_enabled": wp_en,
+        "include_raw_pml": raw_pml_en,
+        "max_raw_pml_mb": max_pml_mb,
+        "max_procmon_export_rows": max_pml_rows,
+        "canary_fixtures_enabled": canary_en,
+        "network_interface": net_if,
+    }
+    for k, v in updates.items():
+        if v is not None:
+            safe_cfg[k] = v
     safe_cfg["tools"] = safe_tools
 
     return safe_cfg, errors, "valid" if not errors else "validation_error"
@@ -505,14 +503,30 @@ def get_ghidra_props(headless_bin: Path | None) -> tuple[str | None, int | None]
 
 
 def check_ghidra_script_syntax(script_path: Path) -> tuple[bool, str | None]:
-    """Perform static non-executing check on .java or .py Ghidra post-script."""
+    """Perform static non-executing structure check on .java or .py Ghidra post-script."""
     if script_path.suffix.lower() != ".java":
         return check_python_syntax_ast(script_path)
     try:
         src = script_path.read_text(encoding="utf-8-sig", errors="replace")
-        if "extends GhidraScript" not in src or "public void run()" not in src:
-            return False, "Missing `extends GhidraScript` or `public void run()` entry method."
-        if src.count("{") == 0 or src.count("{") != src.count("}"):
+        # Strip line/block comments and char/string literals before checking brace balance and class header
+        stripped = re.sub(r"//[^\n]*|/\*.*?\*/", "", src, flags=re.DOTALL)
+        stripped = re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', '""', stripped)
+        expected_class = script_path.stem
+        if not re.search(rf"\bclass\s+{re.escape(expected_class)}\s+extends\s+GhidraScript\b", stripped):
+            return False, f"Missing 'class {expected_class} extends GhidraScript' matching script filename."
+        if "public void run()" not in stripped:
+            return False, "Missing 'public void run()' entry method."
+        depth = 0
+        saw_brace = False
+        for ch in stripped:
+            if ch == "{":
+                depth += 1
+                saw_brace = True
+            elif ch == "}":
+                depth -= 1
+                if depth < 0:
+                    return False, "Unbalanced closing brace '}' in Java source."
+        if not saw_brace or depth != 0:
             return False, "Unbalanced curly braces in Java source."
         return True, None
     except OSError as exc:

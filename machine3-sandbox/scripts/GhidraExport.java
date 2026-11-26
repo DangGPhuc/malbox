@@ -1,5 +1,6 @@
 // Ghidra Headless Java post-analysis export script for MalBox v2.
-// Compatible with Ghidra 10.x, 11.x, and 12.x headless execution without Jython or PyGhidra.
+// Designed for Ghidra 10.x, 11.x, and 12.x headless execution without Jython or PyGhidra;
+// compilation and runtime export must be verified on the target Windows VM.
 // @category MalBox
 
 import ghidra.app.decompiler.DecompInterface;
@@ -216,20 +217,26 @@ public class GhidraExport extends GhidraScript {
         }
 
         List<Map<String, Object>> imports = new ArrayList<>();
+        int totalImportCount = 0;
         SymbolIterator extIter = symTable.getExternalSymbols();
-        while (extIter.hasNext() && imports.size() < MAX_IMPORTS) {
+        while (extIter.hasNext()) {
             if (monitor.isCancelled()) {
                 break;
             }
             Symbol sym = extIter.next();
-            Map<String, Object> imp = new LinkedHashMap<>();
-            imp.put("name", sym.getName());
-            imp.put("namespace", sym.getParentNamespace() != null ? sym.getParentNamespace().toString() : "");
-            imp.put("address", sym.getAddress() != null ? sym.getAddress().toString() : "");
-            imports.add(imp);
+            totalImportCount++;
+            if (imports.size() < MAX_IMPORTS) {
+                Map<String, Object> imp = new LinkedHashMap<>();
+                imp.put("name", sym.getName());
+                imp.put("namespace", sym.getParentNamespace() != null ? sym.getParentNamespace().toString() : "");
+                imp.put("address", sym.getAddress() != null ? sym.getAddress().toString() : "");
+                imports.add(imp);
+            }
         }
+        boolean importsTruncated = totalImportCount > imports.size();
 
         List<Map<String, Object>> exports = new ArrayList<>();
+        int totalExportCount = entryPoints.size();
         int exportLimit = Math.min(entryPoints.size(), MAX_EXPORTS);
         for (int i = 0; i < exportLimit; i++) {
             if (monitor.isCancelled()) {
@@ -243,34 +250,44 @@ public class GhidraExport extends GhidraScript {
             exp.put("address", epStr);
             exports.add(exp);
         }
+        boolean exportsTruncated = totalExportCount > exports.size();
 
         List<Map<String, Object>> strings = new ArrayList<>();
+        int totalStringCount = 0;
         DataIterator dataIter = DefinedDataIterator.definedStrings(currentProgram);
-        while (dataIter.hasNext() && strings.size() < MAX_STRINGS) {
+        while (dataIter.hasNext()) {
             if (monitor.isCancelled()) {
                 break;
             }
             Data data = dataIter.next();
-            String val = null;
-            StringDataInstance sdi = StringDataInstance.getStringDataInstance(data);
-            if (sdi != null) {
-                val = sdi.getStringValue();
+            totalStringCount++;
+            if (strings.size() < MAX_STRINGS) {
+                String val = null;
+                StringDataInstance sdi = StringDataInstance.getStringDataInstance(data);
+                if (sdi != null) {
+                    val = sdi.getStringValue();
+                }
+                if (val == null) {
+                    val = data.getDefaultValueRepresentation();
+                }
+                Map<String, Object> strEntry = new LinkedHashMap<>();
+                strEntry.put("address", data.getAddress() != null ? data.getAddress().toString() : "");
+                strEntry.put("value", val != null ? val : "");
+                strings.add(strEntry);
             }
-            if (val == null) {
-                val = data.getDefaultValueRepresentation();
-            }
-            Map<String, Object> strEntry = new LinkedHashMap<>();
-            strEntry.put("address", data.getAddress() != null ? data.getAddress().toString() : "");
-            strEntry.put("value", val != null ? val : "");
-            strings.add(strEntry);
         }
+        boolean stringsTruncated = totalStringCount > strings.size();
 
         List<Map<String, Object>> functionsData = new ArrayList<>();
         StringBuilder disasmBuf = new StringBuilder();
         int decompiledCount = 0;
+        int decompilableCandidateCount = 0;
+        int decompileFailedCount = 0;
         int disasmFuncIndex = 0;
+        int nonExternalFunctionCount = 0;
         int totalFunctionCount = 0;
         boolean functionsTruncated = false;
+        boolean disassemblyTruncated = false;
 
         DecompInterface decomp = new DecompInterface();
         boolean decompOk = false;
@@ -308,36 +325,51 @@ public class GhidraExport extends GhidraScript {
                     functionsTruncated = true;
                 }
 
-                if (!func.isExternal() && disasmFuncIndex < MAX_DISASM_FUNCS) {
-                    String entryStr = func.getEntryPoint() != null ? func.getEntryPoint().toString() : "unknown";
-                    disasmBuf.append("=== Function ").append(func.getName()).append(" @ ").append(entryStr).append(" ===\n");
-                    InstructionIterator instIter = listing.getInstructions(func.getBody(), true);
-                    int instCount = 0;
-                    while (instIter.hasNext() && instCount < MAX_INSTRUCTIONS_PER_FUNC) {
-                        Instruction inst = instIter.next();
-                        disasmBuf.append("  ").append(inst.getAddress()).append("  ").append(inst.toString()).append('\n');
-                        instCount++;
+                if (!func.isExternal()) {
+                    nonExternalFunctionCount++;
+                    if (disasmFuncIndex < MAX_DISASM_FUNCS) {
+                        String entryStr = func.getEntryPoint() != null ? func.getEntryPoint().toString() : "unknown";
+                        disasmBuf.append("=== Function ").append(func.getName()).append(" @ ").append(entryStr).append(" ===\n");
+                        InstructionIterator instIter = listing.getInstructions(func.getBody(), true);
+                        int instCount = 0;
+                        while (instIter.hasNext() && instCount < MAX_INSTRUCTIONS_PER_FUNC) {
+                            Instruction inst = instIter.next();
+                            disasmBuf.append("  ").append(inst.getAddress()).append("  ").append(inst.toString()).append('\n');
+                            instCount++;
+                        }
+                        if (instIter.hasNext()) {
+                            disassemblyTruncated = true;
+                        }
+                        disasmBuf.append('\n');
+                        disasmFuncIndex++;
+                    } else {
+                        disassemblyTruncated = true;
                     }
-                    disasmBuf.append('\n');
-                    disasmFuncIndex++;
                 }
 
-                if (decompOk && !func.isExternal() && !func.isThunk() && decompiledCount < MAX_DECOMPILED) {
-                    try {
-                        DecompileResults res = decomp.decompileFunction(func, DECOMPILE_TIMEOUT_SEC, monitor);
-                        if (res != null && res.decompileCompleted() && res.getDecompiledFunction() != null) {
-                            String cCode = res.getDecompiledFunction().getC();
-                            if (cCode != null) {
-                                String entryTag = func.getEntryPoint() != null
-                                        ? func.getEntryPoint().toString().replace(':', '_')
-                                        : String.valueOf(decompiledCount);
-                                String fname = safeName(func.getName()) + "_" + entryTag + ".c";
-                                writeUtf8NoBom(new File(decompiledDir, fname), cCode);
-                                decompiledCount++;
+                if (!func.isExternal() && !func.isThunk()) {
+                    decompilableCandidateCount++;
+                    if (decompOk && decompiledCount < MAX_DECOMPILED) {
+                        try {
+                            DecompileResults res = decomp.decompileFunction(func, DECOMPILE_TIMEOUT_SEC, monitor);
+                            if (res != null && res.decompileCompleted() && res.getDecompiledFunction() != null) {
+                                String cCode = res.getDecompiledFunction().getC();
+                                if (cCode != null) {
+                                    String entryTag = func.getEntryPoint() != null
+                                            ? func.getEntryPoint().toString().replace(':', '_')
+                                            : String.valueOf(decompiledCount);
+                                    String fname = safeName(func.getName()) + "_" + entryTag + ".c";
+                                    writeUtf8NoBom(new File(decompiledDir, fname), cCode);
+                                    decompiledCount++;
+                                } else {
+                                    decompileFailedCount++;
+                                }
+                            } else {
+                                decompileFailedCount++;
                             }
+                        } catch (Exception ignored) {
+                            decompileFailedCount++;
                         }
-                    } catch (Exception ignored) {
-                        // Continue exporting remaining functions if single function decompilation fails
                     }
                 }
             }
@@ -349,6 +381,16 @@ public class GhidraExport extends GhidraScript {
                 }
             }
         }
+        boolean decompiledTruncated = decompilableCandidateCount > MAX_DECOMPILED;
+
+        Map<String, Object> exportCaps = new LinkedHashMap<>();
+        exportCaps.put("max_functions_json", MAX_FUNCTIONS_JSON);
+        exportCaps.put("max_imports", MAX_IMPORTS);
+        exportCaps.put("max_exports", MAX_EXPORTS);
+        exportCaps.put("max_strings", MAX_STRINGS);
+        exportCaps.put("max_disassembled_functions", MAX_DISASM_FUNCS);
+        exportCaps.put("max_instructions_per_function", MAX_INSTRUCTIONS_PER_FUNC);
+        exportCaps.put("max_decompiled_functions", MAX_DECOMPILED);
 
         Map<String, Object> summaryDoc = new LinkedHashMap<>();
         summaryDoc.put("export_script", "GhidraExport.java");
@@ -358,7 +400,23 @@ public class GhidraExport extends GhidraScript {
         summaryDoc.put("image_base", currentProgram.getImageBase() != null ? currentProgram.getImageBase().toString() : "");
         summaryDoc.put("entry_points", Collections.unmodifiableList(entryPoints));
         summaryDoc.put("total_function_count", totalFunctionCount);
+        summaryDoc.put("exported_function_count", functionsData.size());
+        summaryDoc.put("non_external_function_count", nonExternalFunctionCount);
         summaryDoc.put("functions_truncated", functionsTruncated);
+        summaryDoc.put("total_import_count", totalImportCount);
+        summaryDoc.put("imports_truncated", importsTruncated);
+        summaryDoc.put("total_export_count", totalExportCount);
+        summaryDoc.put("exports_truncated", exportsTruncated);
+        summaryDoc.put("total_string_count", totalStringCount);
+        summaryDoc.put("strings_truncated", stringsTruncated);
+        summaryDoc.put("disassembled_function_count", disasmFuncIndex);
+        summaryDoc.put("disassembly_truncated", disassemblyTruncated);
+        summaryDoc.put("decompilable_candidate_count", decompilableCandidateCount);
+        summaryDoc.put("decompiled_function_count", decompiledCount);
+        summaryDoc.put("decompiled_truncated", decompiledTruncated);
+        summaryDoc.put("decompiler_initialized", decompOk);
+        summaryDoc.put("decompile_failed_count", decompileFailedCount);
+        summaryDoc.put("export_caps", exportCaps);
         summaryDoc.put("functions", functionsData);
         summaryDoc.put("imports", imports);
         summaryDoc.put("exports", exports);
