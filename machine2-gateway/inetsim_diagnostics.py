@@ -207,6 +207,19 @@ def _read_bounded_tail(path: Path, max_bytes: int) -> tuple[list[str], bool]:
     return lines, truncated
 
 
+def _safe_bounded_int(
+    config: dict[str, Any],
+    key: str,
+    default: int,
+    min_val: int,
+    max_val: int,
+) -> int:
+    raw = config.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return default
+    return max(min_val, min(raw, max_val))
+
+
 def collect_session_inetsim_evidence(
     job_id: str,
     session_start_utc: datetime,
@@ -214,12 +227,17 @@ def collect_session_inetsim_evidence(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     """Import strictly session-scoped, sanitized INetSim diagnostic events on Machine 2."""
-    log_dir = Path(str(config.get("inetsim_log_dir") or "/var/log/inetsim"))
+    raw_log_dir = config.get("inetsim_log_dir")
+    log_dir = Path(str(raw_log_dir)) if isinstance(raw_log_dir, str) and raw_log_dir.strip() else Path("/var/log/inetsim")
     service_log = log_dir / "service.log"
-    max_bytes = max(1, int(config.get("max_inetsim_log_mb", 5))) * 1024 * 1024
-    max_events = max(10, int(config.get("max_inetsim_events", 1000)))
+    max_mb = _safe_bounded_int(config, "max_inetsim_log_mb", 5, min_val=1, max_val=64)
+    max_bytes = max_mb * 1024 * 1024
+    max_events = _safe_bounded_int(config, "max_inetsim_events", 1000, min_val=10, max_val=10000)
 
-    env_meta = inspect_inetsim_environment(config)
+    try:
+        env_meta = inspect_inetsim_environment(config)
+    except Exception as exc:
+        env_meta = {"installed": False, "error": str(exc)}
     dns_events: list[dict[str, Any]] = []
     http_events: list[dict[str, Any]] = []
     other_lines_in_window = 0
@@ -289,7 +307,7 @@ def collect_session_inetsim_evidence(
                         )
                 else:
                     other_lines_in_window += 1
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             log_status = "read_error"
             note = f"Failed reading {service_log}: {exc}"
 

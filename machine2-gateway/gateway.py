@@ -421,24 +421,53 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     tmp_download_path.replace(zip_path)
 
                     # Optionally save Machine 2 isolated network-simulation diagnostics as a SEPARATE artifact
-                    # without modifying evidence_<job_id>.zip or breaking X-Archive-SHA256 integrity.
+                    # without modifying evidence_<job_id>.zip or blocking verified Sandbox archive transfer.
                     if bool(state.config.get("inetsim_diagnostics_enabled", False)):
-                        with state.lock:
-                            started_utc = (
-                                state.active_job.get("started_at_utc")
-                                if state.active_job and state.active_job.get("job_id") == job_id
-                                else None
-                            )
-                        sess_start = started_utc or datetime.now(timezone.utc)
-                        sess_end = datetime.now(timezone.utc)
-                        netdiag_doc = collect_session_inetsim_evidence(
-                            job_id=safe_id,
-                            session_start_utc=sess_start,
-                            session_end_utc=sess_end,
-                            config=state.config,
-                        )
                         netdiag_path = state.archive_dir / f"gateway_netdiag_{safe_id}.json"
-                        netdiag_path.write_text(json.dumps(netdiag_doc, indent=2), encoding="utf-8")
+                        netdiag_tmp = state.temp_dir / f".gateway_netdiag_{safe_id}.json.tmp"
+                        try:
+                            with state.lock:
+                                started_utc = (
+                                    state.active_job.get("started_at_utc")
+                                    if state.active_job and state.active_job.get("job_id") == job_id
+                                    else None
+                                )
+                            sess_start = started_utc or datetime.now(timezone.utc)
+                            sess_end = datetime.now(timezone.utc)
+                            netdiag_doc = collect_session_inetsim_evidence(
+                                job_id=safe_id,
+                                session_start_utc=sess_start,
+                                session_end_utc=sess_end,
+                                config=state.config,
+                            )
+                            netdiag_tmp.write_text(json.dumps(netdiag_doc, indent=2), encoding="utf-8")
+                            netdiag_tmp.replace(netdiag_path)
+                        except Exception as diag_exc:
+                            safe_unlink(netdiag_tmp)
+                            logger.warning(
+                                "[WARN] Optional Machine 2 network diagnostics failed for job %s (%s); continuing with verified Sandbox archive.",
+                                safe_id,
+                                diag_exc,
+                            )
+                            try:
+                                fallback_diag = {
+                                    "schema_version": "1.0",
+                                    "job_id": safe_id,
+                                    "source_machine": "machine2-gateway",
+                                    "source_component": "inetsim_diagnostics",
+                                    "separate_from_sandbox_zip": True,
+                                    "sandbox_archive_integrity_preserved": True,
+                                    "log_import_status": "unavailable",
+                                    "log_import_note": f"Optional diagnostic collection failed: {diag_exc}",
+                                    "dns_event_count": 0,
+                                    "http_event_count": 0,
+                                    "dns_events": [],
+                                    "http_events": [],
+                                }
+                                netdiag_tmp.write_text(json.dumps(fallback_diag, indent=2), encoding="utf-8")
+                                netdiag_tmp.replace(netdiag_path)
+                            except OSError:
+                                safe_unlink(netdiag_tmp)
 
                     # Acknowledge transfer only after full validation so Sandbox moves to RESTORE_REQUIRED.
                     sandbox_ack_ok = False
