@@ -2,7 +2,7 @@
 
 MalBox is a lightweight, terminal-driven three-VM malware analysis sandbox built for isolated academic and defensive malware-analysis lab workflows, combining **Static Analysis**, **Dynamic Behavioral Observation**, **Archive/Manifest Integrity Verification**, and local **MalBox MCP** evidence querying.
 
-> **Lab Safety Notice:** Execute samples **only** on Machine 3 (`Windows Sandbox`) inside an isolated VirtualBox Internal Network with no Internet access, no DNS, and no Default Gateway. Always restore the clean Machine 3 snapshot (**`M3-CLEAN`**) after every analysis run.
+> **Lab Safety Notice:** Execute samples **only** on Machine 3 (`REMWin Sandbox — Windows 10 x64`) inside an isolated VirtualBox Internal Network with no Internet access, no DNS, and no Default Gateway. Always restore the clean Machine 3 snapshot (**`M3-CLEAN`**) after every analysis run.
 
 ---
 
@@ -13,7 +13,7 @@ MalBox separates roles across three independent VMs bridged by two isolated Virt
 ```text
 +-----------------------+       malbox-net1       +------------------------+       malbox-net2       +-------------------------+
 |  Machine 1 (Client)   |  <------------------->  |  Machine 2 (Gateway)   |  <------------------->  |  Machine 3 (Sandbox)    |
-|  Kali Linux           |     10.10.10.10/24      |  REMnux                |     10.10.20.20/24      |  Windows 10 / 11 x64    |
+|  Kali Linux           |     10.10.10.10/24      |  REMnux                |     10.10.20.20/24      |  REMWin (Win10 x64)     |
 |  CLI: doctor <sample> |  -> 10.10.10.20:8000    |  HTTP Relay (:8000)    |  -> 10.10.20.30:8001    |  Static + Dynamic + MCP |
 +-----------------------+                         +------------------------+                         +-------------------------+
 ```
@@ -22,7 +22,7 @@ MalBox separates roles across three independent VMs bridged by two isolated Virt
 | :--- | :--- | :--- | :--- | :--- |
 | **Machine 1 (Kali)** | Client submits samples & inspects reports | `malbox-net1` | `10.10.10.10/24` | CLI `doctor` |
 | **Machine 2 (REMnux)** | Application-level HTTP Relay (IP forwarding disabled) | `malbox-net1` / `malbox-net2` | `10.10.10.20/24` / `10.10.20.20/24` | `gateway.py` (`:8000`) |
-| **Machine 3 (Windows)** | Malware Analysis Sandbox (REMWin / Win10 x64 / Win11) | `malbox-net2` | `10.10.20.30/24` | `sandbox.py` (`:8001`) |
+| **Machine 3 (REMWin)** | Malware Analysis Sandbox (Windows 10 x64) | `malbox-net2` | `10.10.20.30/24` | `sandbox.py` (`:8001`) |
 
 *(All three VMs omit Default Gateway and DNS configuration to maintain full Internet isolation.)*
 
@@ -36,7 +36,7 @@ malbox/
 ├── .gitignore
 ├── machine1-client/         # Machine 1 (Kali): standalone `doctor` CLI, config, readiness checker
 ├── machine2-gateway/        # Machine 2 (REMnux): standalone HTTP relay, optional INetSim diagnostics, readiness checker
-├── machine3-sandbox/        # Machine 3 (Windows): analyzer, static/dynamic collectors, Sysmon/Ghidra/MCP server
+├── machine3-sandbox/        # Machine 3 (REMWin / Windows 10 x64): analyzer, static/dynamic collectors, Sysmon/Ghidra/MCP server
 └── docs/                    # Architecture, networking, tools setup, snapshots, v2 changelog, and checklist
 ```
 
@@ -62,7 +62,7 @@ Clone the repository onto each VM while temporary Internet access is attached, r
   cd ~/malbox/machine2-gateway
   bash setup.sh
   ```
-- **Machine 3 (Windows — before taking the clean snapshot `M3-CLEAN`):**
+- **Machine 3 (REMWin — before taking the clean snapshot `M3-CLEAN`):**
   ```powershell
   cd C:\malbox\machine3-sandbox
   .\setup.ps1 -CloneGitTools
@@ -81,7 +81,7 @@ Start VMs and services **from inside out** (`Machine 3 -> Machine 2 -> Machine 1
 > sudo swapon /swapfile_malbox && free -h
 > ```
 
-### Step 1: Machine 3 — Windows Sandbox (`10.10.20.30:8001`)
+### Step 1: Machine 3 — REMWin Sandbox (`10.10.20.30:8001`)
 
 Ensure Machine 3 is restored to its clean snapshot (**`M3-CLEAN`**). Open an **Administrator Command Prompt** and start `sandbox.py` (or `run_sandbox.bat`):
 
@@ -188,7 +188,7 @@ To generate an evidence-grounded DFIR Markdown report from a completed `evidence
 
 > **Mandatory:** Always restore **`M3-CLEAN`** on Machine 3 before submitting another sample. Sandbox enforces a dirty-state gate (`HTTP 409 RESTORE_REQUIRED`) until restored.
 
-1. **Machine 3 (Windows):** Press `Ctrl + C` to stop `sandbox.py`, then shut down cleanly:
+1. **Machine 3 (REMWin):** Press `Ctrl + C` to stop `sandbox.py`, then shut down cleanly:
    ```cmd
    shutdown /s /t 0
    ```
@@ -214,7 +214,7 @@ To generate an evidence-grounded DFIR Markdown report from a completed `evidence
 - [Architecture](docs/architecture.md)
 - [Network Setup](docs/network-setup.md)
 - [Setup & Environment Readiness](docs/setup-and-readiness.md)
-- [Tools Setup (Windows Sandbox)](docs/tools-setup.md)
+- [Tools Setup (REMWin Sandbox)](docs/tools-setup.md)
 - [Snapshot Setup & Workflow](docs/snapshot-setup.md)
 - [Analysis Coverage & Capabilities](docs/analysis-coverage.md)
 - [Scope & Explicit Limitations](docs/scope-and-limitations.md)
