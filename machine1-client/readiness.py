@@ -215,6 +215,9 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     _validate_number(parsed, "poll_interval_seconds", errors, min_val=0.1, required=False)
     _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
     _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    _validate_int(parsed, "max_evidence_archive_mb", errors, min_val=1, required=False)
+    _validate_int(parsed, "max_extracted_size_mb", errors, min_val=1, required=False)
+    _validate_int(parsed, "max_archive_entries", errors, min_val=10, required=False)
     _validate_bool(parsed, "extract_archive", errors, required=False)
     _validate_bool(parsed, "keep_zip", errors, required=False)
 

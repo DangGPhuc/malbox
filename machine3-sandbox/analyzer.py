@@ -476,6 +476,7 @@ def run_analysis(
         eventlog_mon = EventLogMonitor(config=config, base_dir=base_dir, logger=collectors_log)
 
         process_mon.start_baseline()
+        filesystem_mon.deploy_canary_fixtures(workspace_dir / "run")
         procmon_session.start(evidence_dir=evidence_dir)
         network_mon.start(evidence_dir=evidence_dir)
         memory_mon.poll_once(set())

@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +134,10 @@ class GatewayState:
     def max_sample_bytes(self) -> int:
         return int(self.config.get("max_sample_size_mb", 200)) * 1024 * 1024
 
+    @property
+    def max_archive_bytes(self) -> int:
+        return int(self.config.get("max_evidence_archive_mb", 512)) * 1024 * 1024
+
 
 def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger) -> Flask:
     """Create the Flask Gateway application."""
@@ -140,6 +145,12 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
     archive_dir = resolve_dir(str(config.get("evidence_archive_dir", "./retained_evidence")), config_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        for d in (temp_dir, archive_dir):
+            try:
+                os.chmod(d, 0o750)
+            except OSError:
+                pass
 
     state = GatewayState(config=config, temp_dir=temp_dir, archive_dir=archive_dir, logger=logger)
     app = Flask(__name__)
@@ -173,6 +184,13 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
         consecutive_errors = 0
         max_consecutive_errors = 5
 
+        def _fail_job(err_msg: str, err_code: str) -> None:
+            with state.lock:
+                if state.active_job and state.active_job.get("job_id") == job_id:
+                    state.active_job["status"] = "FAILED"
+                    state.active_job["error"] = err_msg
+                    state.active_job["error_code"] = err_code
+
         while time.monotonic() < deadline:
             try:
                 resp = requests.get(
@@ -180,6 +198,20 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     timeout=(state.connect_timeout, state.request_timeout),
                 )
                 consecutive_errors = 0
+            except requests.Timeout as exc:
+                consecutive_errors += 1
+                logger.warning(
+                    "[WARN] Sandbox status poll timeout (%d/%d): %s",
+                    consecutive_errors,
+                    max_consecutive_errors,
+                    exc,
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    _fail_job("Sandbox connection timed out repeatedly during analysis.", "connection_timeout")
+                    logger.error("[ERROR] Sandbox became unreachable during job %s.", job_id)
+                    return
+                time.sleep(state.poll_interval)
+                continue
             except requests.RequestException as exc:
                 consecutive_errors += 1
                 logger.warning(
@@ -189,26 +221,37 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     exc,
                 )
                 if consecutive_errors >= max_consecutive_errors:
-                    with state.lock:
-                        if state.active_job and state.active_job.get("job_id") == job_id:
-                            state.active_job["status"] = "FAILED"
-                            state.active_job["error"] = "Sandbox unavailable during analysis."
+                    _fail_job("Sandbox service unavailable during analysis.", "service_unavailable")
                     logger.error("[ERROR] Sandbox became unreachable during job %s.", job_id)
                     return
                 time.sleep(state.poll_interval)
                 continue
 
+            if resp.status_code == 404:
+                _fail_job("Sandbox job interrupted or no longer present (HTTP 404).", "interrupted_job")
+                logger.error("[ERROR] Sandbox job interrupted or unknown (HTTP 404).")
+                return
+
             if resp.status_code != 200:
-                with state.lock:
-                    if state.active_job and state.active_job.get("job_id") == job_id:
-                        state.active_job["status"] = "FAILED"
-                        state.active_job["error"] = f"Sandbox returned HTTP {resp.status_code}"
+                _fail_job(f"Sandbox returned unexpected HTTP {resp.status_code}", "unexpected_http_response")
                 logger.error("[ERROR] Sandbox job query error (HTTP %s).", resp.status_code)
                 return
 
             try:
                 job_info = resp.json()
+                if not isinstance(job_info, dict):
+                    raise ValueError("JSON root is not an object")
             except ValueError:
+                consecutive_errors += 1
+                logger.warning(
+                    "[WARN] Sandbox returned non-JSON status payload (%d/%d).",
+                    consecutive_errors,
+                    max_consecutive_errors,
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    _fail_job("Sandbox returned repeated invalid HTTP status responses.", "unexpected_http_response")
+                    logger.error("[ERROR] Sandbox returned invalid payloads repeatedly on job %s.", job_id)
+                    return
                 time.sleep(state.poll_interval)
                 continue
 
@@ -226,21 +269,38 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                         stream=True,
                         timeout=(state.connect_timeout, max(state.request_timeout, 300)),
                     ) as dl:
+                        if dl.status_code == 404 or dl.status_code == 409:
+                            raise FileNotFoundError(f"evidence_unavailable: HTTP {dl.status_code}: {dl.text.strip()}")
                         if dl.status_code != 200:
-                            raise RuntimeError(f"HTTP {dl.status_code}: {dl.text.strip()}")
+                            raise RuntimeError(f"unexpected_http_response: HTTP {dl.status_code}: {dl.text.strip()}")
                         expected_sha256 = dl.headers.get("X-Archive-SHA256", "").strip().lower()
                         digest = hashlib.sha256()
+                        total_zip_bytes = 0
                         with tmp_download_path.open("wb") as fh:
                             for chunk in dl.iter_content(chunk_size=state.chunk_size):
                                 if chunk:
+                                    total_zip_bytes += len(chunk)
+                                    if total_zip_bytes > state.max_archive_bytes:
+                                        raise ValueError(
+                                            f"Evidence archive exceeds max_evidence_archive_mb limit ({state.max_archive_bytes // (1024 * 1024)} MB)."
+                                        )
                                     fh.write(chunk)
                                     digest.update(chunk)
+
+                    if total_zip_bytes == 0:
+                        raise ValueError("evidence_unavailable: Downloaded evidence archive is empty.")
 
                     actual_sha256 = digest.hexdigest().lower()
                     if expected_sha256 and actual_sha256 != expected_sha256:
                         raise ValueError(
                             f"Evidence checksum mismatch ({actual_sha256} != {expected_sha256})"
                         )
+
+                    # Validate ZIP structure strictly before acknowledging Sandbox or marking EVIDENCE_READY
+                    with zipfile.ZipFile(tmp_download_path, "r") as zf:
+                        bad_member = zf.testzip()
+                        if bad_member is not None:
+                            raise zipfile.BadZipFile(f"Corrupt ZIP entry from sandbox: {bad_member}")
 
                     tmp_download_path.replace(zip_path)
 
@@ -271,13 +331,11 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             state.active_job["archive_sha256"] = actual_sha256
                             state.active_job["sandbox_ack_confirmed"] = sandbox_ack_ok
                     return
-                except (requests.RequestException, OSError, RuntimeError, ValueError) as exc:
+                except (requests.RequestException, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
                     safe_unlink(tmp_download_path)
                     logger.error("[ERROR] Evidence transfer from sandbox failed: %s", exc)
-                    with state.lock:
-                        if state.active_job and state.active_job.get("job_id") == job_id:
-                            state.active_job["status"] = "FAILED"
-                            state.active_job["error"] = f"Evidence transfer failed: {exc}"
+                    err_cat = "evidence_unavailable" if isinstance(exc, (FileNotFoundError, zipfile.BadZipFile)) else "unexpected_http_response"
+                    _fail_job(f"Evidence transfer failed: {exc}", err_cat)
                     return
 
             if str(job_info.get("job_status", "")).lower() == "failed" and not job_info.get(
@@ -285,19 +343,13 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
             ):
                 err = job_info.get("error") or "Sandbox analysis failed."
                 logger.error("[ERROR] Sandbox analysis failed: %s", err)
-                with state.lock:
-                    if state.active_job and state.active_job.get("job_id") == job_id:
-                        state.active_job["status"] = "FAILED"
-                        state.active_job["error"] = err
+                _fail_job(err, "interrupted_job")
                 return
 
             time.sleep(state.poll_interval)
 
         logger.error("[ERROR] Timed out waiting for sandbox evidence on job %s.", job_id)
-        with state.lock:
-            if state.active_job and state.active_job.get("job_id") == job_id:
-                state.active_job["status"] = "FAILED"
-                state.active_job["error"] = "Timed out waiting for sandbox evidence."
+        _fail_job("Timed out waiting for sandbox evidence.", "connection_timeout")
 
     @app.get("/health")
     def health() -> tuple[Response, int]:
@@ -533,6 +585,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                 "evidence_ready": bool(job.get("evidence_ready")),
                 "archive_sha256": job.get("archive_sha256", ""),
                 "error": job.get("error"),
+                "error_code": job.get("error_code"),
             }
         return jsonify(payload), 200
 

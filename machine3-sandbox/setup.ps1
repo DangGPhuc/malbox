@@ -107,7 +107,7 @@ $Arch = $env:PROCESSOR_ARCHITECTURE
 if (-not $Arch) { $Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() }
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " MalBox Machine 3 (Windows 11 Sandbox) - Setup & Readiness" -ForegroundColor Cyan
+Write-Host " MalBox Machine 3 (Windows 10/11 Sandbox) - Setup & Readiness" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "OS / Arch : $([System.Environment]::OSVersion.VersionString) / $Arch"
 Write-Host "PowerShell: $($PSVersionTable.PSVersion)"

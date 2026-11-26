@@ -27,6 +27,8 @@ Then complete the manual Windows tool setup (Sysmon driver install, Wireshark/Np
 ## Starting the Sandbox Server
 
 ```powershell
+.\run_sandbox.bat
+# or:
 .\.venv\Scripts\Activate.ps1
 python sandbox.py
 ```

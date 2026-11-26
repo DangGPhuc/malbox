@@ -39,6 +39,7 @@ MCP_DIR = BASE_DIR / "mcp"
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_REPORT_PATH = BASE_DIR / "setup_report.json"
 MIN_PYTHON = (3, 10)
+WIN10_MIN_BUILD = 10240
 WIN11_MIN_BUILD = 22000
 
 STATUS_PASS = "PASS"
@@ -280,6 +281,7 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "include_raw_pml": False,
         "max_raw_pml_mb": 200,
         "max_procmon_export_rows": 15000,
+        "canary_fixtures_enabled": False,
         "network_interface": "",
         "tools": dict(default_tools),
     }
@@ -324,6 +326,7 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     raw_pml_en = _validate_bool(parsed, "include_raw_pml", errors, required=False)
     max_pml_mb = _validate_int(parsed, "max_raw_pml_mb", errors, min_val=1, required=False)
     max_pml_rows = _validate_int(parsed, "max_procmon_export_rows", errors, min_val=100, required=False)
+    canary_en = _validate_bool(parsed, "canary_fixtures_enabled", errors, required=False)
     net_if = _validate_str(parsed, "network_interface", errors, allow_empty=True, required=False)
 
     safe_tools = dict(default_tools)
@@ -370,6 +373,8 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         safe_cfg["max_raw_pml_mb"] = max_pml_mb
     if max_pml_rows is not None:
         safe_cfg["max_procmon_export_rows"] = max_pml_rows
+    if canary_en is not None:
+        safe_cfg["canary_fixtures_enabled"] = canary_en
     if net_if is not None:
         safe_cfg["network_interface"] = net_if
     safe_cfg["tools"] = safe_tools
@@ -609,8 +614,10 @@ def main(argv: list[str] | None = None) -> int:
     manual_actions: list[str] = []
     cloned_repos: dict[str, str | None] = {}
 
-    # === 1. Windows OS Detection vs Windows 11 Build/Version Verification ===
+    # === 1. Windows OS Detection vs Supported Windows 10 x64 / Windows 11 Build Verification ===
     is_win = sys.platform.startswith("win")
+    arch_raw = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine()).upper()
+    is_x64_os = arch_raw in ("AMD64", "X86_64", "ARM64")
     win_build_int: int | None = None
     win_ubr: str | None = None
     win_display: str | None = None
@@ -627,6 +634,7 @@ def main(argv: list[str] | None = None) -> int:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") as key:
                 for reg_name, setter in (
                     ("DisplayVersion", "disp"),
+                    ("ReleaseId", "relid"),
                     ("EditionID", "ed"),
                     ("ProductName", "prod"),
                     ("CurrentBuildNumber", "build"),
@@ -634,7 +642,9 @@ def main(argv: list[str] | None = None) -> int:
                 ):
                     try:
                         val, _ = winreg.QueryValueEx(key, reg_name)
-                        if setter == "disp":
+                        if setter == "disp" and str(val).strip():
+                            win_display = str(val)
+                        elif setter == "relid" and not win_display and str(val).strip():
                             win_display = str(val)
                         elif setter == "ed":
                             win_edition = str(val)
@@ -649,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-    os_desc = f"{platform.system()} {platform.release()} (arch={platform.machine()})"
+    os_desc = f"{platform.system()} {platform.release()} (arch={arch_raw})"
     checks.append(
         make_check(
             name="windows_os",
@@ -661,75 +671,84 @@ def main(argv: list[str] | None = None) -> int:
             runtime_verified=is_win,
             feature_verified=is_win,
             diagnostic_message=f"Detected host OS: {os_desc}",
-            recommended_action="" if is_win else "Machine 3 Sandbox must run on Windows 11 VM.",
+            recommended_action="" if is_win else "Machine 3 Sandbox must run on Windows 10 x64 (e.g. REMWin) or Windows 11 x64 VM.",
         )
     )
 
-    win11_verified = bool(is_win and win_build_int is not None and win_build_int >= WIN11_MIN_BUILD)
-    win11_ver_label = (
-        f"build={win_build_int}.{win_ubr or '0'}, display={win_display or 'N/A'}, edition={win_edition or 'N/A'}"
+    win_family = None
+    if is_win and win_build_int is not None:
+        if win_build_int >= WIN11_MIN_BUILD:
+            win_family = "Windows 11"
+        elif win_build_int >= WIN10_MIN_BUILD:
+            win_family = "Windows 10"
+        else:
+            win_family = f"Legacy Windows (build {win_build_int})"
+
+    win_supported = bool(is_win and is_x64_os and win_build_int is not None and win_build_int >= WIN10_MIN_BUILD)
+    win_ver_label = (
+        f"{win_family or 'Windows'} build={win_build_int}.{win_ubr or '0'}, arch={arch_raw}, display={win_display or 'N/A'}, edition={win_edition or 'N/A'}"
         if is_win and win_build_int is not None
         else None
     )
     if not is_win:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_SKIPPED,
                 installed=False,
                 runtime_verified=False,
                 feature_verified=False,
-                diagnostic_message="Skipped Windows 11 version/build verification: host OS is not Windows.",
-                recommended_action="Run setup.ps1 inside a Windows 11 VM.",
+                diagnostic_message="Skipped Windows 10/11 build verification: host OS is not Windows.",
+                recommended_action="Run setup.ps1 inside a Windows 10 x64 (REMWin) or Windows 11 x64 VM.",
             )
         )
-    elif win11_verified:
+    elif win_supported:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_PASS,
-                detected_version=win11_ver_label,
+                detected_version=win_ver_label,
                 installed=True,
                 runtime_verified=True,
                 feature_verified=True,
                 diagnostic_message=(
-                    f"Verified Windows 11 (build {win_build_int} >= {WIN11_MIN_BUILD}, {win_display or 'N/A'}, {win_edition or win_product or 'Windows'})."
+                    f"Verified supported {win_family} x64 environment (build {win_build_int}, {win_display or 'N/A'}, {win_edition or win_product or 'Windows'})."
                 ),
             )
         )
     elif win_build_int is not None:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_FAIL,
-                detected_version=win11_ver_label,
+                detected_version=win_ver_label,
                 installed=True,
                 runtime_verified=True,
                 feature_verified=False,
                 diagnostic_message=(
-                    f"Windows detected (build {win_build_int}), which is below Windows 11 minimum build {WIN11_MIN_BUILD}."
+                    f"Windows detected (build={win_build_int}, arch={arch_raw}), but MalBox requires Windows 10 x64 (build >= {WIN10_MIN_BUILD}) or Windows 11 x64 (build >= {WIN11_MIN_BUILD})."
                 ),
-                recommended_action="Deploy Machine 3 Sandbox on a Windows 11 (build >= 22000) x64 VM.",
+                recommended_action="Deploy Machine 3 Sandbox on a 64-bit Windows 10 (e.g. REMWin) or Windows 11 VM.",
             )
         )
     else:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_FAIL,
                 installed=True,
                 runtime_verified=False,
                 feature_verified=False,
-                diagnostic_message="Windows OS detected, but build number could not be read to verify Windows 11.",
-                recommended_action="Verify Windows version (winver) is Windows 11 build >= 22000.",
+                diagnostic_message="Windows OS detected, but build number could not be read to verify Windows 10/11.",
+                recommended_action="Verify OS version (winver) is 64-bit Windows 10 (build >= 10240) or Windows 11.",
             )
         )
 
@@ -2590,7 +2609,9 @@ def main(argv: list[str] | None = None) -> int:
         "config_validation_state": cfg_state,
         "environment": {
             "os": os_desc,
-            "windows_11_verified": win11_verified,
+            "windows_supported": win_supported,
+            "windows_family": win_family,
+            "windows_11_verified": bool(is_win and win_build_int is not None and win_build_int >= WIN11_MIN_BUILD),
             "windows_build": str(win_build_int) if win_build_int is not None else None,
             "windows_ubr": win_ubr,
             "windows_display_version": win_display,

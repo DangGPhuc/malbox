@@ -223,6 +223,7 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
     _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
     _validate_number(parsed, "max_sample_size_mb", errors, min_val=1.0, required=False)
+    _validate_int(parsed, "max_evidence_archive_mb", errors, min_val=1, required=False)
 
     safe_cfg = dict(defaults)
     if lhost:

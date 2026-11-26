@@ -8,5 +8,8 @@
   "analysis_timeout_seconds": 1800,
   "chunk_size_bytes": 65536,
   "extract_archive": true,
-  "keep_zip": false
+  "keep_zip": false,
+  "max_evidence_archive_mb": 512,
+  "max_extracted_size_mb": 1024,
+  "max_archive_entries": 5000
 }

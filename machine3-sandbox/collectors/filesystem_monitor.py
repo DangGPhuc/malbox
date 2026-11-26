@@ -170,6 +170,83 @@ class FilesystemMonitor:
         self.base_dir = base_dir
         self.logger = logger
         self.result = CollectorResult(name="filesystem_monitor")
+        self.canary_baseline: list[dict[str, Any]] = []
+        self.canary_dir: Path | None = None
+
+    def deploy_canary_fixtures(self, run_dir: Path) -> None:
+        """Optionally create strictly synthetic non-sensitive canary files to verify FS monitoring."""
+        if not bool(self.config.get("canary_fixtures_enabled", False)):
+            return
+        self.canary_dir = run_dir / "canary_fixtures"
+        self.canary_dir.mkdir(parents=True, exist_ok=True)
+        fixtures = {
+            "malbox_canary_note.txt": "MALBOX_SYNTHETIC_CANARY_FIXTURE_NOT_SENSITIVE\nfixture_id=canary_note\n",
+            "malbox_canary_matrix.csv": "id,label,status\n1,synthetic_fixture,placeholder\n",
+            "malbox_canary_sample.log": "[CANARY] Harmless synthetic integrity verification file\n",
+        }
+        self.canary_baseline = []
+        for fname, content in fixtures.items():
+            fpath = self.canary_dir / fname
+            fpath.write_text(content, encoding="utf-8")
+            meta = compute_file_hashes(fpath)
+            meta["path"] = str(fpath)
+            self.canary_baseline.append(meta)
+
+    def _verify_canary_fixtures(self, fs_dir: Path) -> dict[str, Any] | None:
+        """Compare synthetic canary files against baseline and write canary_integrity.json."""
+        if not self.canary_baseline or self.canary_dir is None:
+            return None
+        results: list[dict[str, Any]] = []
+        baseline_names = set()
+        modified = 0
+        deleted = 0
+        for base in self.canary_baseline:
+            fpath = Path(base["path"])
+            baseline_names.add(fpath.name)
+            if not fpath.is_file():
+                deleted += 1
+                results.append(
+                    {
+                        "filename": fpath.name,
+                        "path": str(fpath),
+                        "before_sha256": base["sha256"],
+                        "after_sha256": None,
+                        "status": "deleted",
+                    }
+                )
+            else:
+                after = compute_file_hashes(fpath)
+                changed = after["sha256"] != base["sha256"]
+                if changed:
+                    modified += 1
+                results.append(
+                    {
+                        "filename": fpath.name,
+                        "path": str(fpath),
+                        "before_sha256": base["sha256"],
+                        "after_sha256": after["sha256"],
+                        "status": "modified" if changed else "unchanged",
+                    }
+                )
+        extra_files: list[str] = []
+        if self.canary_dir.is_dir():
+            for item in sorted(self.canary_dir.iterdir()):
+                if item.is_file() and item.name not in baseline_names:
+                    extra_files.append(item.name)
+
+        report = {
+            "enabled": True,
+            "synthetic_only": True,
+            "canary_dir": str(self.canary_dir),
+            "total_canaries": len(results),
+            "modified_count": modified,
+            "deleted_count": deleted,
+            "new_files_in_canary_dir": extra_files,
+            "entries": results,
+        }
+        write_json(fs_dir / "canary_integrity.json", report)
+        self.result.artifacts.append("dynamic/filesystem/canary_integrity.json")
+        return report
 
     def finalize(
         self,
@@ -310,6 +387,8 @@ class FilesystemMonitor:
                 raw_pml_archived = True
                 self.result.artifacts.append("raw/procmon.pml")
 
+        canary_report = self._verify_canary_fixtures(fs_dir)
+
         changes.sort(key=lambda item: str(item.get("timestamp") or ""))
         write_json(
             fs_dir / "changes.json",
@@ -318,6 +397,16 @@ class FilesystemMonitor:
                 "change_count": len(changes),
                 "dropped_artifact_metadata_count": len(dropped_artifacts),
                 "dropped_artifact_metadata": dropped_artifacts,
+                "canary_integrity_enabled": bool(canary_report),
+                "canary_integrity_summary": (
+                    {
+                        "total_canaries": canary_report["total_canaries"],
+                        "modified_count": canary_report["modified_count"],
+                        "deleted_count": canary_report["deleted_count"],
+                    }
+                    if canary_report
+                    else None
+                ),
                 "raw_pml_policy": {
                     "include_raw_pml": include_raw_pml,
                     "max_raw_pml_mb": max_raw_pml_mb,

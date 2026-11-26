@@ -27,8 +27,8 @@ Each MalBox machine includes a one-command setup and readiness verification entr
 | Machine | Default Setup Command | Offline Check-Only Command | Output Report |
 | --- | --- | --- | --- |
 | **Machine 1 (Kali)** | `cd malbox/machine1-client && bash setup.sh` | `bash setup.sh --check-only` | `machine1-client/setup_report.json` |
-| **Machine 2 (Gateway)** | `cd malbox/machine2-gateway && bash setup.sh` | `bash setup.sh --check-only` | `machine2-gateway/setup_report.json` |
-| **Machine 3 (Windows 11)** | `cd malbox\machine3-sandbox; .\setup.ps1` | `.\setup.ps1 -CheckOnly` | `machine3-sandbox/setup_report.json` |
+| **Machine 2 (REMnux)** | `cd malbox/machine2-gateway && bash setup.sh` | `bash setup.sh --check-only` | `machine2-gateway/setup_report.json` |
+| **Machine 3 (REMWin Win10 x64 / Win11 x64)** | `cd malbox\machine3-sandbox; .\setup.ps1` | `.\setup.ps1 -CheckOnly` | `machine3-sandbox/setup_report.json` |
 
 ### Behavior of `--check-only` / `-CheckOnly`
 - Runs strictly offline without `pip install`, `git clone`, `git pull`, or file downloads.
@@ -56,9 +56,9 @@ All three setup wrappers (`setup.sh`, `setup.ps1`) and readiness checkers (`read
 - **Mandatory:** Linux OS, Python `>= 3.10`, `.venv` (`>= 3.10`), `pip`, `requests` (and `Flask` on Machine 2) passing `pip check`, valid `config.json`, writable `evidence`/`tmp`/`retained_evidence` directories, `doctor --help` (Machine 1), `ip_forward=0` (Machine 2), sufficient disk space.
 - **Peer/Network (not counted against `LOCAL_READINESS`):** Reachable peer HTTP `/health` and `/status` endpoints, loopback safety on `listen_host`, and host NIC static IP checks.
 
-### Machine 3 (Windows 11 Sandbox)
+### Machine 3 (Windows 10 x64 REMWin / Windows 11 x64 Sandbox)
 - **Mandatory (`LOCAL_READINESS` becomes `NOT_READY` if missing or failing):**
-  - **OS & Build:** Windows OS (`windows_os`) and verified **Windows 11 build >= 22000** (`windows_11_version`).
+  - **OS & Build:** Windows OS (`windows_os`) and verified **64-bit Windows 10 (build >= 10240, e.g. REMWin)** or **Windows 11 x64 (build >= 22000)** (`windows_version_compat`).
   - **Runtimes:** PowerShell (`5.1` or `7+`), **64-bit Python `>= 3.10`** (`python_runtime` & `.venv`), `pip`, all `requirements.txt` packages (`Flask`, `requests`, `psutil`, `pefile`, `yara-python`, `python-evtx`, `mcp`) passing `pip check`.
   - **Config & State:** Strictly valid `config.json`, writable `workspace`/`evidence` directories, free disk `>= min_free_disk_mb`, no `.dirty_state` marker (`sandbox_snapshot_state`).
   - **Static Tools:** `hashlib`, `pefile`, `floss.exe`, `capa.exe`, `capa-rules`, `yara-python` + compiled `.yar` rules, `Java` (matching Ghidra's `application.java.min`, e.g. `17`/`21`/`25`), `Ghidra Headless` installation (`analyzeHeadless` + `scripts/GhidraExport.java`), and compatible Ghidra/JDK version metadata (`ghidra_version_compat`).

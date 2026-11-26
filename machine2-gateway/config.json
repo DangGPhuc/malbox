@@ -11,5 +11,6 @@
   "poll_interval_seconds": 3,
   "analysis_timeout_seconds": 1800,
   "chunk_size_bytes": 65536,
-  "max_sample_size_mb": 200
+  "max_sample_size_mb": 200,
+  "max_evidence_archive_mb": 512
 }

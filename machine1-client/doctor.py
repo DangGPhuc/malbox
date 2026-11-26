@@ -180,6 +180,19 @@ def wait_for_evidence(
                 timeout=(connect_timeout, request_timeout),
             )
             consecutive_errors = 0
+        except requests.Timeout as exc:
+            consecutive_errors += 1
+            logger.warning(
+                "[WARN] Gateway poll timed out (%d/%d): %s",
+                consecutive_errors,
+                max_consecutive_errors,
+                exc,
+            )
+            if consecutive_errors >= max_consecutive_errors:
+                logger.error("[ERROR] Connection timeout: Gateway stopped responding while waiting for analysis.")
+                return None
+            time.sleep(poll_interval)
+            continue
         except requests.RequestException as exc:
             consecutive_errors += 1
             logger.warning(
@@ -189,19 +202,24 @@ def wait_for_evidence(
                 exc,
             )
             if consecutive_errors >= max_consecutive_errors:
-                logger.error("[ERROR] Gateway became unreachable while waiting for analysis.")
+                logger.error("[ERROR] Service unavailable: Gateway became unreachable while waiting for analysis.")
                 return None
             time.sleep(poll_interval)
             continue
 
+        if resp.status_code == 404:
+            logger.error("[ERROR] Interrupted job: Gateway no longer tracks job %s (HTTP 404).", job_id)
+            return None
         if resp.status_code != 200:
-            logger.error("[ERROR] Gateway job query failed: %s", format_gateway_error(resp))
+            logger.error("[ERROR] Unexpected HTTP response during job query: %s", format_gateway_error(resp))
             return None
 
         try:
             job_data = resp.json()
+            if not isinstance(job_data, dict):
+                raise ValueError("JSON root is not an object")
         except ValueError:
-            logger.error("[ERROR] Invalid status payload received from gateway.")
+            logger.error("[ERROR] Unexpected HTTP response: invalid status payload received from gateway.")
             return None
 
         stage = str(job_data.get("stage") or "")
@@ -214,7 +232,9 @@ def wait_for_evidence(
 
         job_status = str(job_data.get("status") or "").upper()
         if job_status == "FAILED" and not job_data.get("evidence_ready"):
-            logger.error("[ERROR] Analysis failed: %s", job_data.get("error") or "Unknown error")
+            err_cat = job_data.get("error_code")
+            prefix = f"[{err_cat}] " if err_cat else ""
+            logger.error("[ERROR] Analysis failed: %s%s", prefix, job_data.get("error") or "Unknown error")
             return None
 
         time.sleep(poll_interval)
@@ -241,31 +261,106 @@ def allocate_job_dir(evidence_root: Path, job_id: str) -> Path:
         suffix += 1
 
 
-def safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
-    """Safely extract a ZIP archive preventing path traversal and symlink creation."""
+def safe_extract_zip(
+    zip_path: Path,
+    dest_dir: Path,
+    max_entries: int = 5000,
+    max_single_file_bytes: int = 256 * 1024 * 1024,
+    max_total_bytes: int = 1024 * 1024 * 1024,
+) -> None:
+    """Safely extract a ZIP archive with traversal, symlink, and ZIP-bomb expansion guards."""
     dest_real = dest_dir.resolve()
+    total_extracted = 0
     with zipfile.ZipFile(zip_path, "r") as zf:
-        for member in zf.infolist():
+        infos = zf.infolist()
+        if len(infos) > max_entries:
+            raise ValueError(f"Archive entry count ({len(infos)}) exceeds safety limit ({max_entries}).")
+
+        for member in infos:
+            raw_name = member.filename
+            if not raw_name or "\\" in raw_name or raw_name.startswith("/") or (len(raw_name) >= 2 and raw_name[1] == ":"):
+                raise ValueError(f"Unsafe archive entry path detected: {raw_name}")
+            if any(part == ".." for part in raw_name.split("/")):
+                raise ValueError(f"Path traversal component in archive entry: {raw_name}")
+
             # Skip symlinks (Unix mode 0120000 in external_attr >> 16)
             unix_mode = (member.external_attr >> 16) & 0o170000
             if unix_mode == 0o120000:
                 continue
 
-            member_path = (dest_real / member.filename).resolve()
+            member_path = (dest_real / raw_name).resolve()
             if member_path != dest_real and dest_real not in member_path.parents:
-                raise ValueError(f"Unsafe archive entry path detected: {member.filename}")
+                raise ValueError(f"Unsafe archive entry path detected: {raw_name}")
 
             if member.is_dir():
                 member_path.mkdir(parents=True, exist_ok=True)
                 continue
 
+            if member.file_size > max_single_file_bytes:
+                raise ValueError(f"Archive entry {raw_name} exceeds max single file size limit.")
+
             member_path.parent.mkdir(parents=True, exist_ok=True)
+            entry_bytes = 0
             with zf.open(member, "r") as src, member_path.open("wb") as dst:
                 while True:
                     chunk = src.read(65536)
                     if not chunk:
                         break
+                    entry_bytes += len(chunk)
+                    total_extracted += len(chunk)
+                    if entry_bytes > max_single_file_bytes:
+                        raise ValueError(f"Decompressed entry {raw_name} exceeded single-file expansion limit.")
+                    if total_extracted > max_total_bytes:
+                        raise ValueError("Total decompressed archive size exceeded safety expansion limit.")
                     dst.write(chunk)
+
+
+def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
+    """Verify manifest.json structure and cross-check inventory entries against extracted files."""
+    manifest_path = job_dir / "manifest.json"
+    if not manifest_path.is_file():
+        logger.warning("[WARN] Extracted evidence lacks manifest.json for inventory cross-check.")
+        return True
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest.json root is not a JSON object")
+    except (OSError, ValueError) as exc:
+        logger.error("[ERROR] Malformed manifest.json in evidence archive: %s", exc)
+        return False
+
+    inventory = manifest.get("evidence_file_inventory")
+    if not isinstance(inventory, list):
+        return True
+
+    mismatches: list[str] = []
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            continue
+        rel = str(entry.get("path") or "")
+        if not rel:
+            continue
+        target = (job_dir / rel).resolve()
+        if job_dir.resolve() not in target.parents:
+            mismatches.append(f"unsafe manifest path: {rel}")
+            continue
+        if not target.is_file():
+            mismatches.append(f"missing: {rel}")
+            continue
+        expected_sha = str(entry.get("sha256") or "").lower()
+        if expected_sha:
+            actual_sha = compute_sha256(target, 65536).lower()
+            if actual_sha != expected_sha:
+                mismatches.append(f"sha256 mismatch: {rel}")
+
+    if mismatches:
+        logger.warning(
+            "[WARN] Manifest/archive consistency warnings (%d): %s",
+            len(mismatches),
+            "; ".join(mismatches[:5]),
+        )
+        return False
+    return True
 
 
 def download_evidence(
@@ -278,9 +373,17 @@ def download_evidence(
     extract_archive: bool,
     keep_zip: bool,
     logger: logging.Logger,
+    max_archive_bytes: int = 512 * 1024 * 1024,
+    max_entries: int = 5000,
+    max_extracted_bytes: int = 1024 * 1024 * 1024,
 ) -> Path | None:
     """Stream the evidence ZIP archive from Gateway, verify integrity, extract, and acknowledge."""
     evidence_root.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        try:
+            os.chmod(evidence_root, 0o750)
+        except OSError:
+            pass
     safe_id = "".join(ch for ch in job_id if ch.isalnum() or ch in ("-", "_")) or "job"
     staging_zip = evidence_root / f".downloading_{safe_id}.zip"
 
@@ -290,6 +393,13 @@ def download_evidence(
             stream=True,
             timeout=(connect_timeout, max(request_timeout, 300)),
         ) as resp:
+            if resp.status_code in (404, 409):
+                logger.error(
+                    "[ERROR] Evidence unavailable (HTTP %s): %s",
+                    resp.status_code,
+                    format_gateway_error(resp),
+                )
+                return None
             if resp.status_code != 200:
                 logger.error(
                     "[ERROR] Evidence transfer failed (HTTP %s): %s",
@@ -300,10 +410,16 @@ def download_evidence(
 
             expected_sha256 = resp.headers.get("X-Archive-SHA256", "").strip().lower()
             digest = hashlib.sha256()
+            total_zip_bytes = 0
 
             with staging_zip.open("wb") as fh:
                 for chunk in resp.iter_content(chunk_size=chunk_size):
                     if chunk:
+                        total_zip_bytes += len(chunk)
+                        if total_zip_bytes > max_archive_bytes:
+                            raise ValueError(
+                                f"Evidence archive exceeds max size limit ({max_archive_bytes // (1024 * 1024)} MB)."
+                            )
                         fh.write(chunk)
                         digest.update(chunk)
 
@@ -329,7 +445,12 @@ def download_evidence(
 
         if extract_archive:
             try:
-                safe_extract_zip(zip_path, job_dir)
+                safe_extract_zip(
+                    zip_path,
+                    job_dir,
+                    max_entries=max_entries,
+                    max_total_bytes=max_extracted_bytes,
+                )
             except (zipfile.BadZipFile, OSError, ValueError) as ext_exc:
                 logger.error(
                     "[ERROR] Failed extracting %s (%s). Archive preserved at %s and retained on gateway.",
@@ -338,6 +459,7 @@ def download_evidence(
                     zip_path,
                 )
                 return None
+            verify_extracted_manifest(job_dir, logger)
             if not keep_zip and zip_path.exists():
                 zip_path.unlink()
 
@@ -432,6 +554,9 @@ def main(argv: list[str] | None = None) -> int:
     chunk_size = int(config.get("chunk_size_bytes", 65536))
     extract_archive = bool(config.get("extract_archive", True))
     keep_zip = bool(config.get("keep_zip", False))
+    max_archive_bytes = max(1, int(config.get("max_evidence_archive_mb", 512))) * 1024 * 1024
+    max_entries = max(10, int(config.get("max_archive_entries", 5000)))
+    max_extracted_bytes = max(1, int(config.get("max_extracted_size_mb", 1024))) * 1024 * 1024
     evidence_root = resolve_evidence_dir(str(config.get("evidence_dir", "./evidence")), config_path.parent)
 
     if not check_gateway(base_url, connect_timeout, logger):
@@ -471,6 +596,9 @@ def main(argv: list[str] | None = None) -> int:
         extract_archive=extract_archive,
         keep_zip=keep_zip,
         logger=logger,
+        max_archive_bytes=max_archive_bytes,
+        max_entries=max_entries,
+        max_extracted_bytes=max_extracted_bytes,
     )
     if not saved_dir:
         return 1

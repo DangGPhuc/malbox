@@ -17,6 +17,7 @@
   "include_raw_pml": false,
   "max_raw_pml_mb": 200,
   "max_procmon_export_rows": 15000,
+  "canary_fixtures_enabled": false,
   "network_interface": "",
   "tools": {
     "floss": "./tools/floss/floss.exe",
