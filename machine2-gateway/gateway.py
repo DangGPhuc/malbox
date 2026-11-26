@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,12 +47,63 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     return logging.getLogger("malbox.gateway")
 
 
+def _cfg_bool(config: dict[str, Any], key: str, default: bool) -> bool:
+    val = config.get(key, default)
+    if isinstance(val, bool):
+        return val
+    raise ValueError(f"Gateway config '{key}' must be a boolean (got {type(val).__name__}).")
+
+
+def _cfg_int(
+    config: dict[str, Any],
+    key: str,
+    default: int,
+    min_val: int = 1,
+    max_val: int | None = None,
+) -> int:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(f"Gateway config '{key}' must be an integer (got {type(val).__name__}).")
+    if val < min_val or (max_val is not None and val > max_val):
+        raise ValueError(f"Gateway config '{key}' out of range: {val}.")
+    return val
+
+
+def _cfg_float(config: dict[str, Any], key: str, default: float, min_val: float = 0.1) -> float:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"Gateway config '{key}' must be a finite number (got {type(val).__name__}).")
+    fval = float(val)
+    if fval != fval or fval in (float("inf"), float("-inf")) or fval < min_val:
+        raise ValueError(f"Gateway config '{key}' must be finite and >= {min_val}.")
+    return fval
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load Machine 2 Gateway configuration from JSON (UTF-8 with/without BOM)."""
+    """Load and validate Machine 2 Gateway configuration from JSON (UTF-8 with/without BOM)."""
     if not config_path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     with config_path.open("r", encoding="utf-8-sig") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"Gateway config root must be a JSON object (got {type(data).__name__}).")
+    _cfg_int(data, "listen_port", 8000, min_val=1, max_val=65535)
+    _cfg_int(data, "sandbox_port", 8001, min_val=1, max_val=65535)
+    _cfg_bool(data, "retain_evidence_archives", True)
+    _cfg_float(data, "connect_timeout_seconds", 5.0, min_val=0.1)
+    _cfg_float(data, "request_timeout_seconds", 30.0, min_val=0.1)
+    _cfg_float(data, "poll_interval_seconds", 3.0, min_val=0.1)
+    _cfg_float(data, "analysis_timeout_seconds", 1800.0, min_val=1.0)
+    _cfg_int(data, "chunk_size_bytes", 65536, min_val=1024)
+    _cfg_float(data, "max_sample_size_mb", 200.0, min_val=1.0)
+    _cfg_int(data, "max_evidence_archive_mb", 512, min_val=1)
+    _cfg_int(data, "max_extracted_size_mb", 1024, min_val=1)
+    _cfg_int(data, "max_single_file_mb", 256, min_val=1)
+    _cfg_int(data, "max_archive_entries", 5000, min_val=10)
+    _cfg_bool(data, "inetsim_diagnostics_enabled", False)
+    _cfg_int(data, "max_inetsim_log_mb", 5, min_val=1)
+    _cfg_int(data, "max_inetsim_events", 1000, min_val=10)
+    return data
 
 
 def resolve_dir(raw_path: str, base_dir: Path) -> Path:
@@ -88,6 +140,46 @@ def safe_unlink(path: Path | None) -> None:
         pass
 
 
+def validate_evidence_zip(
+    zf: zipfile.ZipFile,
+    max_entries: int,
+    max_single_file_bytes: int,
+    max_total_bytes: int,
+) -> None:
+    """Reject unsafe archive metadata before CRC checks or retention."""
+    infos = zf.infolist()
+    if len(infos) > max_entries:
+        raise ValueError(f"Archive entry count ({len(infos)}) exceeds safety limit ({max_entries}).")
+    seen: set[str] = set()
+    total_bytes = 0
+    for member in infos:
+        name = member.filename
+        if "\x00" in name:
+            raise ValueError(f"Archive entry contains null byte: {name!r}")
+        parts = name.rstrip("/").split("/")
+        if (
+            not name
+            or "\\" in name
+            or name.startswith("/")
+            or any(part in ("", ".", "..") or ":" in part for part in parts)
+        ):
+            raise ValueError(f"Unsafe archive entry path detected: {name}")
+        normalized = "/".join(parts)
+        if normalized in seen:
+            raise ValueError(f"Duplicate archive entry: {name}")
+        seen.add(normalized)
+        mode = (member.external_attr >> 16) & 0o170000
+        if mode not in (0, 0o040000, 0o100000):
+            raise ValueError(f"Unsupported archive member type: {name}")
+        if member.flag_bits & 1:
+            raise ValueError(f"Encrypted evidence member is unsupported: {name}")
+        if member.file_size < 0 or member.file_size > max_single_file_bytes:
+            raise ValueError(f"Archive entry {name} exceeds max single file size limit.")
+        total_bytes += member.file_size
+        if total_bytes > max_total_bytes:
+            raise ValueError("Total declared archive size exceeds safety expansion limit.")
+
+
 class GatewayState:
     """Thread-safe single-job state holder for the Gateway relay."""
 
@@ -117,31 +209,43 @@ class GatewayState:
 
     @property
     def connect_timeout(self) -> float:
-        return float(self.config.get("connect_timeout_seconds", 5))
+        return max(0.1, float(self.config.get("connect_timeout_seconds", 5)))
 
     @property
     def request_timeout(self) -> float:
-        return float(self.config.get("request_timeout_seconds", 30))
+        return max(0.1, float(self.config.get("request_timeout_seconds", 30)))
 
     @property
     def poll_interval(self) -> float:
-        return float(self.config.get("poll_interval_seconds", 3))
+        return max(0.1, float(self.config.get("poll_interval_seconds", 3)))
 
     @property
     def analysis_timeout(self) -> float:
-        return float(self.config.get("analysis_timeout_seconds", 1800))
+        return max(1.0, float(self.config.get("analysis_timeout_seconds", 1800)))
 
     @property
     def chunk_size(self) -> int:
-        return int(self.config.get("chunk_size_bytes", 65536))
+        return max(1024, int(self.config.get("chunk_size_bytes", 65536)))
 
     @property
     def max_sample_bytes(self) -> int:
-        return int(self.config.get("max_sample_size_mb", 200)) * 1024 * 1024
+        return max(1, int(float(self.config.get("max_sample_size_mb", 200)) * 1024 * 1024))
 
     @property
     def max_archive_bytes(self) -> int:
-        return int(self.config.get("max_evidence_archive_mb", 512)) * 1024 * 1024
+        return max(1, int(self.config.get("max_evidence_archive_mb", 512))) * 1024 * 1024
+
+    @property
+    def max_extracted_bytes(self) -> int:
+        return max(1, int(self.config.get("max_extracted_size_mb", 1024))) * 1024 * 1024
+
+    @property
+    def max_single_file_bytes(self) -> int:
+        return max(1, int(self.config.get("max_single_file_mb", 256))) * 1024 * 1024
+
+    @property
+    def max_archive_entries(self) -> int:
+        return max(10, int(self.config.get("max_archive_entries", 5000)))
 
 
 def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger) -> Flask:
@@ -266,11 +370,12 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     state.active_job["job_status"] = job_info.get("job_status", "")
 
             if job_info.get("evidence_ready"):
-                zip_path = state.archive_dir / f"evidence_{job_id}.zip"
-                tmp_download_path = state.temp_dir / f".dl_evidence_{job_id}.zip"
+                safe_id = sanitize_job_id(job_id)
+                zip_path = state.archive_dir / f"evidence_{safe_id}.zip"
+                tmp_download_path = state.temp_dir / f".dl_evidence_{safe_id}.zip"
                 try:
                     with requests.get(
-                        f"{state.sandbox_base_url}/jobs/{job_id}/evidence",
+                        f"{state.sandbox_base_url}/jobs/{safe_id}/evidence",
                         stream=True,
                         timeout=(state.connect_timeout, max(state.request_timeout, 300)),
                     ) as dl:
@@ -301,8 +406,14 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             f"Evidence checksum mismatch ({actual_sha256} != {expected_sha256})"
                         )
 
-                    # Validate ZIP structure strictly before acknowledging Sandbox or marking EVIDENCE_READY
+                    # Validate ZIP metadata limits and safety BEFORE CRC checks or retention.
                     with zipfile.ZipFile(tmp_download_path, "r") as zf:
+                        validate_evidence_zip(
+                            zf,
+                            max_entries=state.max_archive_entries,
+                            max_single_file_bytes=state.max_single_file_bytes,
+                            max_total_bytes=state.max_extracted_bytes,
+                        )
                         bad_member = zf.testzip()
                         if bad_member is not None:
                             raise zipfile.BadZipFile(f"Corrupt ZIP entry from sandbox: {bad_member}")
@@ -321,19 +432,19 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                         sess_start = started_utc or datetime.now(timezone.utc)
                         sess_end = datetime.now(timezone.utc)
                         netdiag_doc = collect_session_inetsim_evidence(
-                            job_id=job_id,
+                            job_id=safe_id,
                             session_start_utc=sess_start,
                             session_end_utc=sess_end,
                             config=state.config,
                         )
-                        netdiag_path = state.archive_dir / f"gateway_netdiag_{job_id}.json"
+                        netdiag_path = state.archive_dir / f"gateway_netdiag_{safe_id}.json"
                         netdiag_path.write_text(json.dumps(netdiag_doc, indent=2), encoding="utf-8")
 
-                    # Acknowledge transfer so Sandbox moves to RESTORE_REQUIRED.
+                    # Acknowledge transfer only after full validation so Sandbox moves to RESTORE_REQUIRED.
                     sandbox_ack_ok = False
                     try:
                         ack_resp = requests.post(
-                            f"{state.sandbox_base_url}/jobs/{job_id}/ack",
+                            f"{state.sandbox_base_url}/jobs/{safe_id}/ack",
                             timeout=(state.connect_timeout, state.request_timeout),
                         )
                         if ack_resp.status_code == 200:
@@ -356,10 +467,22 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             state.active_job["archive_sha256"] = actual_sha256
                             state.active_job["sandbox_ack_confirmed"] = sandbox_ack_ok
                     return
-                except (requests.RequestException, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+                except (
+                    requests.RequestException,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    zipfile.BadZipFile,
+                    NotImplementedError,
+                    zlib.error,
+                ) as exc:
                     safe_unlink(tmp_download_path)
                     logger.error("[ERROR] Evidence transfer from sandbox failed: %s", exc)
-                    err_cat = "evidence_unavailable" if isinstance(exc, (FileNotFoundError, zipfile.BadZipFile)) else "unexpected_http_response"
+                    err_cat = (
+                        "evidence_unavailable"
+                        if isinstance(exc, (FileNotFoundError, zipfile.BadZipFile, ValueError, NotImplementedError, zlib.error))
+                        else "unexpected_http_response"
+                    )
                     _fail_job(f"Evidence transfer failed: {exc}", err_cat)
                     return
 
@@ -763,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config).resolve()
     try:
         config = load_config(config_path)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         logger.error("[ERROR] Failed to load gateway config: %s", exc)
         return 1
 
