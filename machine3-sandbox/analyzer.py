@@ -327,6 +327,10 @@ def _build_inventory(
         if not item.is_file():
             continue
         rel = item.relative_to(evidence_dir).as_posix()
+        # Self-reference exception: manifest.json is packaged in the ZIP archive,
+        # but cannot contain its own final SHA-256 digest without invalidating itself.
+        if rel == "manifest.json":
+            continue
         allowed, reason = _should_archive_file(
             rel_path=rel,
             file_path=item,
@@ -345,8 +349,32 @@ def _build_inventory(
             info = compute_file_hashes(item)
             inventory.append({"path": rel, "size_bytes": info["size_bytes"], "sha256": info["sha256"]})
         except OSError:
-            inventory.append({"path": rel, "size_bytes": size_b, "sha256": ""})
+            omitted.append({"path": rel, "size_bytes": size_b, "reason": "unreadable_for_digest"})
     return inventory, omitted
+
+
+def _reconcile_collector_artifacts(
+    collector_status: dict[str, Any],
+    archived_paths: set[str],
+    omitted_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Ensure collector artifact lists distinguish packaged files from omitted files cleanly."""
+    omitted_lookup = {entry["path"]: entry.get("reason", "omitted") for entry in omitted_entries}
+    reconciled: dict[str, Any] = {}
+    for cname, cdata in collector_status.items():
+        orig_arts = list(cdata.get("artifacts", []))
+        packaged = [p for p in orig_arts if p in archived_paths or p == "manifest.json"]
+        omitted = [
+            {"path": p, "reason": omitted_lookup.get(p, "not_packaged_in_zip")}
+            for p in orig_arts
+            if p not in archived_paths and p != "manifest.json"
+        ]
+        updated = dict(cdata)
+        updated["artifacts"] = packaged
+        if omitted:
+            updated["omitted_artifacts"] = omitted
+        reconciled[cname] = updated
+    return reconciled
 
 
 def _package_evidence_zip(
@@ -1030,7 +1058,17 @@ def run_analysis(
             },
             "analysis_limitations": sorted(set(all_limitations)),
             "final_status": final_status,
-            "evidence_file_inventory_note": "Inventory strictly lists artifacts packaged into the returned ZIP archive.",
+            "evidence_file_inventory_note": (
+                "Inventory strictly lists artifacts packaged into the returned ZIP archive, excluding "
+                "manifest.json itself (self-reference exception: manifest.json is included in the ZIP "
+                "archive but cannot contain its own final SHA-256 digest)."
+            ),
+            "manifest_self_reference": {
+                "path": "manifest.json",
+                "packaged_in_zip": True,
+                "included_in_hash_inventory": False,
+                "reason": "Self-reference exception: writing manifest.json alters its own byte size and SHA-256 digest.",
+            },
             "evidence_file_inventory": [],
             "excluded_or_omitted_files": [],
         }
@@ -1046,6 +1084,12 @@ def run_analysis(
             sample_filename=sample_path.name,
             include_raw_pml=include_raw_pml,
             max_raw_pml_bytes=max_raw_pml_bytes,
+        )
+        archived_paths = {entry["path"] for entry in inv}
+        manifest_skeleton["collector_status"] = _reconcile_collector_artifacts(
+            manifest_skeleton["collector_status"],
+            archived_paths=archived_paths,
+            omitted_entries=omitted,
         )
         manifest_skeleton["evidence_file_inventory"] = inv
         manifest_skeleton["excluded_or_omitted_files"] = omitted
@@ -1109,14 +1153,47 @@ def run_analysis(
         try:
             include_raw_pml = bool(config.get("include_raw_pml", False))
             max_raw_pml_bytes = max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024
+            (evidence_dir / "logs").mkdir(parents=True, exist_ok=True)
             write_json(evidence_dir / "logs" / "tool_status.json", collector_status_map)
-            inv_fail, omitted_fail = _build_inventory(
-                evidence_dir=evidence_dir,
-                sample_filename=sample_path.name,
-                include_raw_pml=include_raw_pml,
-                max_raw_pml_bytes=max_raw_pml_bytes,
+
+            existing_summary = _read_json_safe(evidence_dir / "summary.json")
+            failure_summary = existing_summary if isinstance(existing_summary, dict) else {}
+            failure_summary.update(
+                {
+                    "job_id": job_id,
+                    "final_status": STATUS_FAILED,
+                    "fatal_error": str(exc),
+                    "collector_statuses": {k: v["status"] for k, v in collector_status_map.items()},
+                }
             )
-            failure_manifest = {
+            failure_timing = dict(failure_summary.get("timing") or {})
+            failure_timing.update(
+                {
+                    "analysis_start_time": start_time_utc,
+                    "dynamic_started_at": dynamic_started_at or None,
+                    "dynamic_completed_at": dynamic_completed_at or None,
+                    "process_session_ended_at": process_session_ended_at or None,
+                    "evidence_finalized_at": end_time_utc,
+                    "configured_observation_duration_seconds": configured_duration,
+                    "actual_observation_duration_seconds": actual_duration_seconds,
+                    "actual_process_session_duration_seconds": actual_process_session_duration_seconds,
+                    "dynamic_execution_status": dynamic_execution_status,
+                }
+            )
+            failure_summary["timing"] = failure_timing
+            if "sample" not in failure_summary or not isinstance(failure_summary.get("sample"), dict):
+                try:
+                    sample_size = sample_path.stat().st_size
+                except OSError:
+                    sample_size = None
+                failure_summary["sample"] = {
+                    "filename": sample_path.name,
+                    "size_bytes": sample_size,
+                    "sha256": sample_sha256,
+                }
+            write_json(evidence_dir / "summary.json", failure_summary)
+
+            failure_manifest: dict[str, Any] = {
                 "job_id": job_id,
                 "sample_filename": sample_path.name,
                 "sample_sha256": sample_sha256,
@@ -1135,7 +1212,7 @@ def run_analysis(
                 "windows_version": platform.platform(),
                 "archive_policy": {
                     "include_raw_pml": include_raw_pml,
-                    "max_raw_pml_mb": int(config.get("max_raw_pml_mb", 200)),
+                    "max_raw_pml_mb": max(1, int(config.get("max_raw_pml_mb", 200))),
                 },
                 "collector_classification": COLLECTOR_CLASSIFICATION,
                 "collector_status": {
@@ -1151,28 +1228,38 @@ def run_analysis(
                 "analysis_limitations": sorted(set(all_limitations + [f"Fatal error: {exc}"])),
                 "fatal_error": str(exc),
                 "final_status": STATUS_FAILED,
-                "evidence_file_inventory": inv_fail,
-                "excluded_or_omitted_files": omitted_fail,
+                "evidence_file_inventory_note": (
+                    "Inventory strictly lists artifacts packaged into the returned ZIP archive, excluding "
+                    "manifest.json itself (self-reference exception: manifest.json is included in the ZIP "
+                    "archive but cannot contain its own final SHA-256 digest)."
+                ),
+                "manifest_self_reference": {
+                    "path": "manifest.json",
+                    "packaged_in_zip": True,
+                    "included_in_hash_inventory": False,
+                    "reason": "Self-reference exception: writing manifest.json alters its own byte size and SHA-256 digest.",
+                },
+                "evidence_file_inventory": [],
+                "excluded_or_omitted_files": [],
             }
-            write_json(evidence_dir / "manifest.json", failure_manifest)
+            failure_report_md = _build_report_markdown(summary=failure_summary, manifest=failure_manifest)
+            (evidence_dir / "report.md").write_text(failure_report_md, encoding="utf-8")
 
-            if not (evidence_dir / "summary.json").is_file():
-                write_json(
-                    evidence_dir / "summary.json",
-                    {
-                        "job_id": job_id,
-                        "final_status": STATUS_FAILED,
-                        "fatal_error": str(exc),
-                        "collector_statuses": {k: v["status"] for k, v in collector_status_map.items()},
-                    },
-                )
-            if not (evidence_dir / "report.md").is_file():
-                (evidence_dir / "report.md").write_text(
-                    f"# MalBox Analysis Report — `{job_id}` (FAILED)\n\n"
-                    f"- **Fatal Error:** {exc}\n"
-                    "- **Snapshot Status:** Restore the `CLEAN` snapshot before running another analysis.\n",
-                    encoding="utf-8",
-                )
+            inv_fail, omitted_fail = _build_inventory(
+                evidence_dir=evidence_dir,
+                sample_filename=sample_path.name,
+                include_raw_pml=include_raw_pml,
+                max_raw_pml_bytes=max_raw_pml_bytes,
+            )
+            archived_fail_paths = {entry["path"] for entry in inv_fail}
+            failure_manifest["collector_status"] = _reconcile_collector_artifacts(
+                failure_manifest["collector_status"],
+                archived_paths=archived_fail_paths,
+                omitted_entries=omitted_fail,
+            )
+            failure_manifest["evidence_file_inventory"] = inv_fail
+            failure_manifest["excluded_or_omitted_files"] = omitted_fail
+            write_json(evidence_dir / "manifest.json", failure_manifest)
         except OSError as io_exc:
             terminal_logger.error("[ERROR] Could not write failure artifacts to %s: %s", evidence_dir, io_exc)
 
