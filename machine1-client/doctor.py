@@ -13,9 +13,11 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,38 @@ import requests
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
+
+
+def _cfg_bool(config: dict[str, Any], key: str, default: bool) -> bool:
+    val = config.get(key, default)
+    if isinstance(val, bool):
+        return val
+    raise ValueError(f"Client config '{key}' must be a boolean (got {type(val).__name__}).")
+
+
+def _cfg_int(
+    config: dict[str, Any],
+    key: str,
+    default: int,
+    min_val: int = 1,
+    max_val: int | None = None,
+) -> int:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(f"Client config '{key}' must be an integer (got {type(val).__name__}).")
+    if val < min_val or (max_val is not None and val > max_val):
+        raise ValueError(f"Client config '{key}' out of range: {val}.")
+    return val
+
+
+def _cfg_float(config: dict[str, Any], key: str, default: float, min_val: float = 0.1) -> float:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"Client config '{key}' must be a finite number (got {type(val).__name__}).")
+    fval = float(val)
+    if fval != fval or fval in (float("inf"), float("-inf")) or fval < min_val:
+        raise ValueError(f"Client config '{key}' must be finite and >= {min_val}.")
+    return fval
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -38,11 +72,27 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load Machine 1 client configuration from JSON (tolerates UTF-8 BOM)."""
+    """Load and validate Machine 1 client configuration from JSON (tolerates UTF-8 BOM)."""
     if not config_path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     with config_path.open("r", encoding="utf-8-sig") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"Client config root must be a JSON object (got {type(data).__name__}).")
+    _cfg_int(data, "gateway_port", 8000, min_val=1, max_val=65535)
+    _cfg_float(data, "connect_timeout_seconds", 5.0, min_val=0.1)
+    _cfg_float(data, "request_timeout_seconds", 30.0, min_val=0.1)
+    _cfg_float(data, "poll_interval_seconds", 3.0, min_val=0.1)
+    _cfg_float(data, "analysis_timeout_seconds", 1800.0, min_val=1.0)
+    _cfg_int(data, "chunk_size_bytes", 65536, min_val=1024)
+    _cfg_bool(data, "extract_archive", True)
+    _cfg_bool(data, "keep_zip", False)
+    _cfg_int(data, "max_evidence_archive_mb", 512, min_val=1)
+    _cfg_int(data, "max_extracted_size_mb", 1024, min_val=1)
+    _cfg_int(data, "max_single_file_mb", 256, min_val=1)
+    _cfg_int(data, "max_archive_entries", 5000, min_val=10)
+    _cfg_bool(data, "fetch_gateway_network_diagnostics", False)
+    return data
 
 
 def resolve_evidence_dir(raw_path: str, config_dir: Path) -> Path:
@@ -275,9 +325,15 @@ def validate_evidence_zip(
     total_bytes = 0
     for member in infos:
         name = member.filename
+        if "\x00" in name:
+            raise ValueError(f"Archive entry contains null byte: {name!r}")
         parts = name.rstrip("/").split("/")
-        if (not name or "\\" in name or name.startswith("/")
-                or any(part in ("", ".", "..") or ":" in part for part in parts)):
+        if (
+            not name
+            or "\\" in name
+            or name.startswith("/")
+            or any(part in ("", ".", "..") or ":" in part for part in parts)
+        ):
             raise ValueError(f"Unsafe archive entry path detected: {name}")
         normalized = "/".join(parts)
         if normalized in seen:
@@ -288,11 +344,29 @@ def validate_evidence_zip(
             raise ValueError(f"Unsupported archive member type: {name}")
         if member.flag_bits & 1:
             raise ValueError(f"Encrypted evidence member is unsupported: {name}")
-        if member.file_size > max_single_file_bytes:
+        if member.file_size < 0 or member.file_size > max_single_file_bytes:
             raise ValueError(f"Archive entry {name} exceeds max single file size limit.")
         total_bytes += member.file_size
         if total_bytes > max_total_bytes:
             raise ValueError("Total declared archive size exceeds safety expansion limit.")
+
+
+def _cleanup_partial_extraction(job_dir: Path, keep_zip_path: Path) -> None:
+    """Remove partially extracted or unverified files while preserving the downloaded ZIP archive."""
+    keep_resolved = keep_zip_path.resolve()
+    try:
+        for child in list(job_dir.iterdir()):
+            if child.resolve() == keep_resolved:
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def safe_extract_zip(
@@ -311,15 +385,14 @@ def safe_extract_zip(
 
         for member in infos:
             raw_name = member.filename
-            if not raw_name or "\\" in raw_name or raw_name.startswith("/") or (len(raw_name) >= 2 and raw_name[1] == ":"):
+            if not raw_name or "\x00" in raw_name or "\\" in raw_name or raw_name.startswith("/") or (len(raw_name) >= 2 and raw_name[1] == ":"):
                 raise ValueError(f"Unsafe archive entry path detected: {raw_name}")
             if any(part == ".." for part in raw_name.split("/")):
                 raise ValueError(f"Path traversal component in archive entry: {raw_name}")
 
-            # Skip symlinks (Unix mode 0120000 in external_attr >> 16)
             unix_mode = (member.external_attr >> 16) & 0o170000
-            if unix_mode == 0o120000:
-                continue
+            if unix_mode not in (0, 0o040000, 0o100000):
+                raise ValueError(f"Unsupported archive member type: {raw_name}")
 
             member_path = (dest_real / raw_name).resolve()
             if member_path != dest_real and dest_real not in member_path.parents:
@@ -329,23 +402,108 @@ def safe_extract_zip(
                 member_path.mkdir(parents=True, exist_ok=True)
                 continue
 
-            if member.file_size > max_single_file_bytes:
+            if member.file_size < 0 or member.file_size > max_single_file_bytes:
                 raise ValueError(f"Archive entry {raw_name} exceeds max single file size limit.")
 
             member_path.parent.mkdir(parents=True, exist_ok=True)
             entry_bytes = 0
-            with zf.open(member, "r") as src, member_path.open("xb") as dst:
-                while True:
-                    chunk = src.read(65536)
-                    if not chunk:
-                        break
-                    entry_bytes += len(chunk)
-                    total_extracted += len(chunk)
-                    if entry_bytes > max_single_file_bytes:
-                        raise ValueError(f"Decompressed entry {raw_name} exceeded single-file expansion limit.")
-                    if total_extracted > max_total_bytes:
-                        raise ValueError("Total decompressed archive size exceeded safety expansion limit.")
-                    dst.write(chunk)
+            try:
+                with zf.open(member, "r") as src, member_path.open("xb") as dst:
+                    while True:
+                        chunk = src.read(65536)
+                        if not chunk:
+                            break
+                        entry_bytes += len(chunk)
+                        total_extracted += len(chunk)
+                        if entry_bytes > max_single_file_bytes:
+                            raise ValueError(f"Decompressed entry {raw_name} exceeded single-file expansion limit.")
+                        if total_extracted > max_total_bytes:
+                            raise ValueError("Total decompressed archive size exceeded safety expansion limit.")
+                        dst.write(chunk)
+            except Exception:
+                if member_path.exists():
+                    try:
+                        member_path.unlink()
+                    except OSError:
+                        pass
+                raise
+
+
+def _verify_manifest_inventory_structure(manifest: Any, logger: logging.Logger) -> list[dict[str, Any]] | None:
+    if not isinstance(manifest, dict):
+        logger.error("[ERROR] Malformed manifest.json: root is not a JSON object.")
+        return None
+    inventory = manifest.get("evidence_file_inventory")
+    if not isinstance(inventory, list):
+        logger.error("[ERROR] Missing or invalid manifest evidence_file_inventory.")
+        return None
+    return inventory
+
+
+def verify_zip_manifest_metadata(
+    zf: zipfile.ZipFile,
+    max_single_file_bytes: int,
+    logger: logging.Logger,
+) -> bool:
+    """Validate manifest.json inside an unextracted ZIP archive without trusting unextracted paths."""
+    try:
+        m_info = zf.getinfo("manifest.json")
+    except KeyError:
+        logger.error("[ERROR] Evidence ZIP archive lacks manifest.json.")
+        return False
+    manifest_cap = min(max_single_file_bytes, 32 * 1024 * 1024)
+    if m_info.file_size > manifest_cap:
+        logger.error("[ERROR] Archive manifest.json exceeds bounded metadata inspection size.")
+        return False
+    raw = bytearray()
+    with zf.open(m_info, "r") as src:
+        while True:
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > manifest_cap:
+                logger.error("[ERROR] Decompressed manifest.json exceeds bounded inspection size.")
+                return False
+    try:
+        manifest = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, ValueError) as exc:
+        logger.error("[ERROR] Malformed manifest.json inside evidence ZIP: %s", exc)
+        return False
+
+    inventory = _verify_manifest_inventory_structure(manifest, logger)
+    if inventory is None:
+        return False
+
+    zip_members = {info.filename: info for info in zf.infolist() if not info.is_dir()}
+    mismatches: list[str] = []
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            mismatches.append("invalid manifest inventory entry")
+            continue
+        rel = str(entry.get("path") or "")
+        if not rel or rel == "manifest.json":
+            mismatches.append(f"invalid manifest inventory path: {rel!r}")
+            continue
+        member = zip_members.get(rel)
+        if member is None:
+            mismatches.append(f"missing in zip: {rel}")
+            continue
+        expected_size = entry.get("size_bytes")
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size != member.file_size:
+            mismatches.append(f"size mismatch in zip: {rel}")
+        expected_sha = str(entry.get("sha256") or "").lower()
+        if len(expected_sha) != 64:
+            mismatches.append(f"missing or invalid sha256 digest in manifest: {rel}")
+
+    if mismatches:
+        logger.warning(
+            "[WARN] Unextracted ZIP manifest consistency errors (%d): %s",
+            len(mismatches),
+            "; ".join(mismatches[:5]),
+        )
+        return False
+    return True
 
 
 def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
@@ -362,9 +520,8 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
         logger.error("[ERROR] Malformed manifest.json in evidence archive: %s", exc)
         return False
 
-    inventory = manifest.get("evidence_file_inventory")
-    if not isinstance(inventory, list):
-        logger.error("[ERROR] Missing or invalid manifest evidence_file_inventory.")
+    inventory = _verify_manifest_inventory_structure(manifest, logger)
+    if inventory is None:
         return False
 
     mismatches: list[str] = []
@@ -373,8 +530,8 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
             mismatches.append("invalid manifest inventory entry")
             continue
         rel = str(entry.get("path") or "")
-        if not rel:
-            mismatches.append("missing manifest inventory path")
+        if not rel or rel == "manifest.json":
+            mismatches.append(f"invalid manifest inventory path: {rel!r}")
             continue
         target = (job_dir / rel).resolve()
         if job_dir.resolve() not in target.parents:
@@ -384,13 +541,15 @@ def verify_extracted_manifest(job_dir: Path, logger: logging.Logger) -> bool:
             mismatches.append(f"missing: {rel}")
             continue
         expected_size = entry.get("size_bytes")
-        if expected_size is not None and expected_size != target.stat().st_size:
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size != target.stat().st_size:
             mismatches.append(f"size mismatch: {rel}")
         expected_sha = str(entry.get("sha256") or "").lower()
-        if expected_sha:
-            actual_sha = compute_sha256(target, 65536).lower()
-            if actual_sha != expected_sha:
-                mismatches.append(f"sha256 mismatch: {rel}")
+        if len(expected_sha) != 64:
+            mismatches.append(f"missing or invalid sha256 digest in manifest: {rel}")
+            continue
+        actual_sha = compute_sha256(target, 65536).lower()
+        if actual_sha != expected_sha:
+            mismatches.append(f"sha256 mismatch: {rel}")
 
     if mismatches:
         logger.warning(
@@ -411,6 +570,8 @@ def fetch_optional_gateway_netdiag(
     logger: logging.Logger,
 ) -> None:
     """Optionally save separate Machine 2 isolated network diagnostic artifact without altering ZIP."""
+    out_path = job_dir / "gateway_network_diagnostics.json"
+    tmp_path = job_dir / ".gateway_network_diagnostics.json.tmp"
     try:
         resp = requests.get(
             f"{base_url}/jobs/{job_id}/network-diagnostics",
@@ -419,10 +580,22 @@ def fetch_optional_gateway_netdiag(
         if resp.status_code == 200:
             doc = resp.json()
             if isinstance(doc, dict):
-                out_path = job_dir / "gateway_network_diagnostics.json"
-                out_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+                tmp_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+                tmp_path.replace(out_path)
                 logger.debug("[CLIENT] Saved separate Machine 2 network diagnostics to %s", out_path.name)
-    except (requests.RequestException, OSError, ValueError) as exc:
+            else:
+                logger.warning("[WARN] Optional gateway network-diagnostics returned non-object JSON; skipping.")
+        else:
+            logger.debug(
+                "[CLIENT] Optional gateway network-diagnostics unavailable (HTTP %s); verified Sandbox archive unaffected.",
+                resp.status_code,
+            )
+    except (requests.RequestException, OSError, ValueError, TypeError) as exc:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         logger.debug("[CLIENT] Optional gateway network-diagnostics fetch skipped (%s)", exc)
 
 
@@ -438,6 +611,7 @@ def download_evidence(
     logger: logging.Logger,
     max_archive_bytes: int = 512 * 1024 * 1024,
     max_entries: int = 5000,
+    max_single_file_bytes: int = 256 * 1024 * 1024,
     max_extracted_bytes: int = 1024 * 1024 * 1024,
     fetch_gateway_netdiag: bool = False,
 ) -> Path | None:
@@ -497,7 +671,7 @@ def download_evidence(
             )
 
         with zipfile.ZipFile(staging_zip, "r") as zf:
-            validate_evidence_zip(zf, max_entries, 256 * 1024 * 1024, max_extracted_bytes)
+            validate_evidence_zip(zf, max_entries, max_single_file_bytes, max_extracted_bytes)
             corrupt_member = zf.testzip()
             if corrupt_member is not None:
                 raise zipfile.BadZipFile(f"Corrupt ZIP member: {corrupt_member}")
@@ -514,21 +688,34 @@ def download_evidence(
                     zip_path,
                     job_dir,
                     max_entries=max_entries,
+                    max_single_file_bytes=max_single_file_bytes,
                     max_total_bytes=max_extracted_bytes,
                 )
-            except (zipfile.BadZipFile, OSError, ValueError) as ext_exc:
+            except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError, RuntimeError, zlib.error) as ext_exc:
+                _cleanup_partial_extraction(job_dir, zip_path)
                 logger.error(
-                    "[ERROR] Failed extracting %s (%s). Archive preserved at %s and retained on gateway.",
+                    "[ERROR] Archive downloaded to %s, but extraction failed (%s). Partial files cleaned; archive preserved and receipt not acknowledged.",
                     zip_path,
                     ext_exc,
-                    zip_path,
                 )
                 return None
             if not verify_extracted_manifest(job_dir, logger):
-                logger.error("[ERROR] Manifest verification failed; archive preserved at %s and receipt not acknowledged.", zip_path)
+                _cleanup_partial_extraction(job_dir, zip_path)
+                logger.error(
+                    "[ERROR] Archive downloaded to %s, but manifest verification failed; extracted files cleaned, archive preserved, and receipt not acknowledged.",
+                    zip_path,
+                )
                 return None
             if not keep_zip and zip_path.exists():
                 zip_path.unlink()
+        else:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                if not verify_zip_manifest_metadata(zf, max_single_file_bytes, logger):
+                    logger.error(
+                        "[ERROR] Archive downloaded to %s, but ZIP manifest check failed; archive preserved and receipt not acknowledged.",
+                        zip_path,
+                    )
+                    return None
 
         if fetch_gateway_netdiag:
             fetch_optional_gateway_netdiag(
@@ -555,7 +742,7 @@ def download_evidence(
             logger.warning("[WARN] Could not send receipt ack to gateway: %s", ack_exc)
 
         return job_dir
-    except (requests.RequestException, zipfile.BadZipFile, OSError, ValueError, RuntimeError, NotImplementedError) as exc:
+    except (requests.RequestException, zipfile.BadZipFile, OSError, ValueError, RuntimeError, NotImplementedError, zlib.error) as exc:
         if staging_zip.exists():
             try:
                 staging_zip.unlink()
@@ -605,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config).resolve()
     try:
         config = load_config(config_path)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         logger.error("[ERROR] Failed to load config: %s", exc)
         return 1
 
@@ -620,21 +807,22 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("[ERROR] Sample file is empty (0 bytes): %s", sample_path)
         return 1
 
-    gateway_host = config.get("gateway_host", "10.10.10.20")
-    gateway_port = int(config.get("gateway_port", 8000))
+    gateway_host = str(config.get("gateway_host", "10.10.10.20")).strip() or "10.10.10.20"
+    gateway_port = _cfg_int(config, "gateway_port", 8000, min_val=1, max_val=65535)
     base_url = f"http://{gateway_host}:{gateway_port}"
 
-    connect_timeout = float(config.get("connect_timeout_seconds", 5))
-    request_timeout = float(config.get("request_timeout_seconds", 30))
-    poll_interval = float(config.get("poll_interval_seconds", 3))
-    analysis_timeout = float(config.get("analysis_timeout_seconds", 1800))
-    chunk_size = int(config.get("chunk_size_bytes", 65536))
-    extract_archive = bool(config.get("extract_archive", True))
-    keep_zip = bool(config.get("keep_zip", False))
-    max_archive_bytes = max(1, int(config.get("max_evidence_archive_mb", 512))) * 1024 * 1024
-    max_entries = max(10, int(config.get("max_archive_entries", 5000)))
-    max_extracted_bytes = max(1, int(config.get("max_extracted_size_mb", 1024))) * 1024 * 1024
-    fetch_gateway_netdiag = bool(config.get("fetch_gateway_network_diagnostics", False))
+    connect_timeout = _cfg_float(config, "connect_timeout_seconds", 5.0, min_val=0.1)
+    request_timeout = _cfg_float(config, "request_timeout_seconds", 30.0, min_val=0.1)
+    poll_interval = _cfg_float(config, "poll_interval_seconds", 3.0, min_val=0.1)
+    analysis_timeout = _cfg_float(config, "analysis_timeout_seconds", 1800.0, min_val=1.0)
+    chunk_size = _cfg_int(config, "chunk_size_bytes", 65536, min_val=1024)
+    extract_archive = _cfg_bool(config, "extract_archive", True)
+    keep_zip = _cfg_bool(config, "keep_zip", False)
+    max_archive_bytes = _cfg_int(config, "max_evidence_archive_mb", 512, min_val=1) * 1024 * 1024
+    max_entries = _cfg_int(config, "max_archive_entries", 5000, min_val=10)
+    max_single_file_bytes = _cfg_int(config, "max_single_file_mb", 256, min_val=1) * 1024 * 1024
+    max_extracted_bytes = _cfg_int(config, "max_extracted_size_mb", 1024, min_val=1) * 1024 * 1024
+    fetch_gateway_netdiag = _cfg_bool(config, "fetch_gateway_network_diagnostics", False)
     evidence_root = resolve_evidence_dir(str(config.get("evidence_dir", "./evidence")), config_path.parent)
 
     if not check_gateway(base_url, connect_timeout, logger):
@@ -676,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
         logger=logger,
         max_archive_bytes=max_archive_bytes,
         max_entries=max_entries,
+        max_single_file_bytes=max_single_file_bytes,
         max_extracted_bytes=max_extracted_bytes,
         fetch_gateway_netdiag=fetch_gateway_netdiag,
     )

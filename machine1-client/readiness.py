@@ -169,13 +169,15 @@ def _validate_number(
     return fval
 
 
-def _validate_bool(cfg: dict[str, Any], key: str, errors: list[str], required: bool = False) -> None:
+def _validate_bool(cfg: dict[str, Any], key: str, errors: list[str], required: bool = False) -> bool | None:
     if key not in cfg:
         if required:
             errors.append(f"Missing key '{key}'")
-        return
+        return None
     if not isinstance(cfg[key], bool):
         errors.append(f"Key '{key}' must be a boolean (got {type(cfg[key]).__name__})")
+        return None
+    return cfg[key]
 
 
 def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[str], str]:
@@ -185,6 +187,17 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "gateway_port": 8000,
         "evidence_dir": "./evidence",
         "connect_timeout_seconds": 5.0,
+        "request_timeout_seconds": 30.0,
+        "poll_interval_seconds": 3.0,
+        "analysis_timeout_seconds": 1800.0,
+        "chunk_size_bytes": 65536,
+        "extract_archive": True,
+        "keep_zip": False,
+        "max_evidence_archive_mb": 512,
+        "max_extracted_size_mb": 1024,
+        "max_single_file_mb": 256,
+        "max_archive_entries": 5000,
+        "fetch_gateway_network_diagnostics": False,
     }
     errors: list[str] = []
     if not config_path.is_file():
@@ -211,26 +224,39 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     gw_port = _validate_int(parsed, "gateway_port", errors, min_val=1, max_val=65535, required=True)
     ev_dir = _validate_str(parsed, "evidence_dir", errors)
     conn_t = _validate_number(parsed, "connect_timeout_seconds", errors, min_val=0.1, required=True)
-    _validate_number(parsed, "request_timeout_seconds", errors, min_val=0.1, required=False)
-    _validate_number(parsed, "poll_interval_seconds", errors, min_val=0.1, required=False)
-    _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
-    _validate_int(parsed, "max_evidence_archive_mb", errors, min_val=1, required=False)
-    _validate_int(parsed, "max_extracted_size_mb", errors, min_val=1, required=False)
-    _validate_int(parsed, "max_archive_entries", errors, min_val=10, required=False)
-    _validate_bool(parsed, "extract_archive", errors, required=False)
-    _validate_bool(parsed, "keep_zip", errors, required=False)
-    _validate_bool(parsed, "fetch_gateway_network_diagnostics", errors, required=False)
+    req_t = _validate_number(parsed, "request_timeout_seconds", errors, min_val=0.1, required=False)
+    poll_i = _validate_number(parsed, "poll_interval_seconds", errors, min_val=0.1, required=False)
+    ana_t = _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
+    chunk_sz = _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    max_arch = _validate_int(parsed, "max_evidence_archive_mb", errors, min_val=1, required=False)
+    max_ext = _validate_int(parsed, "max_extracted_size_mb", errors, min_val=1, required=False)
+    max_sf = _validate_int(parsed, "max_single_file_mb", errors, min_val=1, required=False)
+    max_ent = _validate_int(parsed, "max_archive_entries", errors, min_val=10, required=False)
+    ext_arch = _validate_bool(parsed, "extract_archive", errors, required=False)
+    keep_z = _validate_bool(parsed, "keep_zip", errors, required=False)
+    fetch_nd = _validate_bool(parsed, "fetch_gateway_network_diagnostics", errors, required=False)
 
     safe_cfg = dict(defaults)
-    if gw_host:
-        safe_cfg["gateway_host"] = gw_host
-    if gw_port is not None:
-        safe_cfg["gateway_port"] = gw_port
-    if ev_dir:
-        safe_cfg["evidence_dir"] = ev_dir
-    if conn_t is not None:
-        safe_cfg["connect_timeout_seconds"] = conn_t
+    updates: dict[str, Any] = {
+        "gateway_host": gw_host,
+        "gateway_port": gw_port,
+        "evidence_dir": ev_dir,
+        "connect_timeout_seconds": conn_t,
+        "request_timeout_seconds": req_t,
+        "poll_interval_seconds": poll_i,
+        "analysis_timeout_seconds": ana_t,
+        "chunk_size_bytes": chunk_sz,
+        "max_evidence_archive_mb": max_arch,
+        "max_extracted_size_mb": max_ext,
+        "max_single_file_mb": max_sf,
+        "max_archive_entries": max_ent,
+        "extract_archive": ext_arch,
+        "keep_zip": keep_z,
+        "fetch_gateway_network_diagnostics": fetch_nd,
+    }
+    for k, v in updates.items():
+        if v is not None:
+            safe_cfg[k] = v
 
     return safe_cfg, errors, "valid" if not errors else "validation_error"
 
