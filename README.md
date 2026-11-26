@@ -178,6 +178,10 @@ cat manifest.json
 cat logs/errors.log
 ```
 
+### Optional Post-Collection AI/LLM Report Generation (Machine 1)
+
+To generate an evidence-grounded DFIR Markdown report from a completed `evidence/<JOB_ID>/` bundle, use the defensive prompt template in [machine1-client/prompts/evidence-analysis-report.md](machine1-client/prompts/evidence-analysis-report.md) against a **read-only copy** of the evidence folder and save the LLM report outside `evidence/<JOB_ID>/` (never overwriting MalBox's original `report.md`). See [machine1-client/README.md](machine1-client/README.md#post-collection-llm-analysis--reporting).
+
 ---
 
 ## 6. Post-Analysis Cleanup & Snapshot Restore (Mandatory)
