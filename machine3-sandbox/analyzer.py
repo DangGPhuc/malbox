@@ -23,6 +23,7 @@ from collectors.common import (
     utc_now_iso,
     write_json,
 )
+from collectors.attack_mapping import build_attack_mapping
 from collectors.eventlog_monitor import EventLogMonitor
 from collectors.filesystem_monitor import FilesystemMonitor, ProcmonSession
 from collectors.ghidra_analysis import GhidraAnalyzer
@@ -152,10 +153,12 @@ def _fmt_metric(value: Any, collector_status: str | None) -> str:
 
 def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) -> str:
     sample = summary.get("sample", {})
+    file_ident = sample.get("file_identification", {}) or {}
     static = summary.get("static", {})
     dynamic = summary.get("dynamic", {})
     statuses = summary.get("collector_statuses", {})
     iocs = summary.get("potential_iocs", {})
+    attack_summary = summary.get("attack_mapping", {}) or {}
     limitations = manifest.get("analysis_limitations", [])
 
     lines = [
@@ -167,7 +170,10 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         "## 1. Sample Information",
         f"- **Filename:** `{sample.get('filename')}`",
         f"- **Size (bytes):** {sample.get('size_bytes')}",
-        f"- **File Type:** {sample.get('file_type')}",
+        f"- **File Type (magic/header):** {sample.get('file_type')}",
+        f"- **Declared Extension / Format Family:** `{file_ident.get('declared_extension') or 'none'}` / `{file_ident.get('format_family') or 'unknown'}`",
+        f"- **Format Extension Mismatch:** `{bool(file_ident.get('format_mismatch', False))}`"
+        + (f" ({file_ident.get('format_mismatch_reason')})" if file_ident.get("format_mismatch_reason") else ""),
         f"- **MD5:** `{sample.get('md5')}`",
         f"- **SHA-1:** `{sample.get('sha1')}`",
         f"- **SHA-256:** `{sample.get('sha256')}`",
@@ -189,6 +195,7 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **Extracted Strings:** {_fmt_metric(static.get('string_count'), statuses.get('strings_floss'))} (source: `{static.get('strings_source') or 'N/A'}`)",
         f"- **CAPA Capabilities:** {_fmt_metric(static.get('capa_capability_count'), statuses.get('capa'))}",
         f"- **YARA Matches:** {_fmt_metric(static.get('yara_match_count'), statuses.get('yara'))}",
+        f"- **Detect It Easy (optional):** {_fmt_metric(static.get('die_detections'), statuses.get('detect_it_easy'))}",
         f"- **Ghidra Functions:** {_fmt_metric(static.get('ghidra_function_count'), statuses.get('ghidra'))}",
         "",
         "## 3. Observed Process Activity",
@@ -197,8 +204,10 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **Process Events:** {_fmt_metric(dynamic.get('process_event_count'), statuses.get('process_monitor'))}",
         "",
         "## 4. Network Activity",
-        f"- **Network Connection Events:** {_fmt_metric(dynamic.get('connection_event_count'), statuses.get('network_monitor'))}",
-        f"- **DNS Queries Observed:** {_fmt_metric(dynamic.get('dns_query_count'), statuses.get('network_monitor'))}",
+        f"- **Network Connection Events (total recorded):** {_fmt_metric(dynamic.get('connection_event_count'), statuses.get('network_monitor'))}",
+        f"- **Sample-Attributed Connection Events:** {_fmt_metric(dynamic.get('sample_related_connection_count'), statuses.get('network_monitor'))}",
+        f"- **Traffic Classification Counts:** {dynamic.get('network_classification') or 'N/A'}",
+        f"- **DNS Queries Observed (total):** {_fmt_metric(dynamic.get('dns_query_count'), statuses.get('network_monitor'))}",
         f"- **PCAPNG Captured:** {dynamic.get('has_pcapng', False)}",
         "",
         "## 5. Filesystem Activity",
@@ -216,11 +225,12 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
         f"- **Full Physical Memory Status:** `{dynamic.get('full_memory_status', 'skipped')}`",
         "",
         "## 8. Potential Indicators of Compromise",
-        f"- **Static URLs:** {', '.join(iocs.get('static_urls', [])[:20]) or 'None observed'}",
-        f"- **Static Domains:** {', '.join(iocs.get('static_domains', [])[:20]) or 'None observed'}",
-        f"- **Static IP Addresses:** {', '.join(iocs.get('static_ips', [])[:20]) or 'None observed'}",
-        f"- **Dynamic Remote Destinations:** {', '.join(iocs.get('dynamic_destinations', [])[:20]) or 'None observed'}",
-        f"- **Dynamic DNS Queries:** {', '.join(iocs.get('dynamic_dns_queries', [])[:20]) or 'None observed'}",
+        f"- **Static URLs (string candidates):** {', '.join(iocs.get('static_urls', [])[:20]) or 'None observed'}",
+        f"- **Static Domains (string candidates):** {', '.join(iocs.get('static_domains', [])[:20]) or 'None observed'}",
+        f"- **Static IP Addresses (string candidates):** {', '.join(iocs.get('static_ips', [])[:20]) or 'None observed'}",
+        f"- **Dynamic Sample-Attributed Destinations:** {', '.join(iocs.get('dynamic_destinations', [])[:20]) or 'None attributed to tracked sample'}",
+        f"- **Dynamic Unattributed Destinations (review context):** {', '.join(iocs.get('dynamic_unattributed_destinations', [])[:20]) or 'None observed'}",
+        f"- **Dynamic Sample-Attributed DNS Queries:** {', '.join(iocs.get('dynamic_dns_queries', [])[:20]) or 'None attributed to tracked sample'}",
         f"- **YARA Matched Rules:** {', '.join(iocs.get('yara_rules', [])[:20]) or 'None matched'}",
         "",
         "## 9. Analysis Limitations & Collector Status",
@@ -240,45 +250,238 @@ def _build_report_markdown(summary: dict[str, Any], manifest: dict[str, Any]) ->
     else:
         lines.append("- No collector limitations reported.")
 
+    lines.extend(["", "## 10. Evidence-Backed MITRE ATT&CK Mapping"])
+    if not attack_summary.get("enabled", True):
+        lines.append("- ATT&CK mapping disabled by configuration (`enable_attack_mapping=false`).")
+    else:
+        top_techs = attack_summary.get("top_techniques") or []
+        lines.append(
+            f"- **Mapped Techniques:** {attack_summary.get('technique_count', 0)} "
+            f"(counts: {attack_summary.get('counts_by_observation_type') or {}})"
+        )
+        if top_techs:
+            for m in top_techs[:15]:
+                srcs = ", ".join(m.get("evidence_sources") or [])
+                lines.append(
+                    f"- `{m.get('technique_id')}` {m.get('technique_name')} "
+                    f"[{m.get('observation_type')}, confidence={m.get('confidence')}, sources={srcs}]"
+                )
+        else:
+            lines.append("- No ATT&CK technique indicators or correlated behaviors mapped.")
+
     lines.append("")
     return "\n".join(lines)
 
 
-def _build_inventory(evidence_dir: Path) -> list[dict[str, Any]]:
+COLLECTOR_CLASSIFICATION: dict[str, str] = {
+    "file_metadata": "mandatory_static",
+    "strings_floss": "mandatory_static_with_fallback",
+    "capa": "mandatory_static",
+    "yara": "mandatory_static",
+    "detect_it_easy": "optional_static",
+    "ghidra": "conditional_static",
+    "process_monitor": "mandatory_dynamic",
+    "network_monitor": "mandatory_dynamic",
+    "filesystem_monitor": "mandatory_dynamic",
+    "registry_monitor": "mandatory_dynamic",
+    "eventlog_monitor": "mandatory_dynamic",
+    "memory_monitor": "mandatory_dynamic_telemetry_optional_dumps",
+}
+
+
+def _should_archive_file(
+    rel_path: str,
+    file_path: Path,
+    sample_filename: str,
+    include_raw_pml: bool,
+    max_raw_pml_bytes: int,
+) -> tuple[bool, str | None]:
+    """Single source of truth deciding what goes into both manifest inventory and ZIP archive."""
+    if file_path.name == sample_filename and not rel_path.startswith("ghidra/"):
+        return False, "original_sample_excluded"
+    if rel_path.startswith("dynamic/filesystem/dropped_files/"):
+        return False, "dropped_binary_excluded"
+    if not rel_path.startswith(("logs/", "static/", "ghidra/")) and file_path.suffix.lower() in EXECUTABLE_EXTENSIONS:
+        return False, "executable_artifact_excluded"
+    if rel_path == "raw/procmon.pml":
+        if not include_raw_pml:
+            return False, "omitted_by_config_include_raw_pml_false"
+        try:
+            if file_path.stat().st_size > max_raw_pml_bytes:
+                return False, "omitted_exceeded_max_raw_pml_mb"
+        except OSError:
+            return False, "omitted_stat_failed"
+    return True, None
+
+
+def _build_inventory(
+    evidence_dir: Path,
+    sample_filename: str = "",
+    include_raw_pml: bool = True,
+    max_raw_pml_bytes: int = 200 * 1024 * 1024,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build exact archive-aligned file inventory and explicit omitted/excluded list."""
     inventory: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
     for item in sorted(evidence_dir.rglob("*")):
-        if item.is_file():
-            rel = item.relative_to(evidence_dir).as_posix()
-            try:
-                info = compute_file_hashes(item)
-                inventory.append(
-                    {"path": rel, "size_bytes": info["size_bytes"], "sha256": info["sha256"]}
-                )
-            except OSError:
-                inventory.append({"path": rel, "size_bytes": item.stat().st_size, "sha256": ""})
-    return inventory
+        if not item.is_file():
+            continue
+        rel = item.relative_to(evidence_dir).as_posix()
+        # Self-reference exception: manifest.json is packaged in the ZIP archive,
+        # but cannot contain its own final SHA-256 digest without invalidating itself.
+        if rel == "manifest.json":
+            continue
+        allowed, reason = _should_archive_file(
+            rel_path=rel,
+            file_path=item,
+            sample_filename=sample_filename,
+            include_raw_pml=include_raw_pml,
+            max_raw_pml_bytes=max_raw_pml_bytes,
+        )
+        try:
+            size_b = item.stat().st_size
+        except OSError:
+            size_b = 0
+        if not allowed:
+            omitted.append({"path": rel, "size_bytes": size_b, "reason": reason})
+            continue
+        try:
+            info = compute_file_hashes(item)
+            inventory.append({"path": rel, "size_bytes": info["size_bytes"], "sha256": info["sha256"]})
+        except OSError:
+            omitted.append({"path": rel, "size_bytes": size_b, "reason": "unreadable_for_digest"})
+    return inventory, omitted
 
 
-def _package_evidence_zip(evidence_dir: Path, zip_path: Path, sample_filename: str) -> str:
-    """Stream evidence files into a ZIP archive while excluding sample and dropped executables."""
+def _reconcile_collector_artifacts(
+    collector_status: dict[str, Any],
+    archived_paths: set[str],
+    omitted_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Ensure collector artifact lists distinguish packaged files from omitted files cleanly."""
+    omitted_lookup = {entry["path"]: entry.get("reason", "omitted") for entry in omitted_entries}
+    reconciled: dict[str, Any] = {}
+    for cname, cdata in collector_status.items():
+        orig_arts = list(cdata.get("artifacts", []))
+        packaged = [p for p in orig_arts if p in archived_paths or p == "manifest.json"]
+        omitted = [
+            {"path": p, "reason": omitted_lookup.get(p, "not_packaged_in_zip")}
+            for p in orig_arts
+            if p not in archived_paths and p != "manifest.json"
+        ]
+        updated = dict(cdata)
+        updated["artifacts"] = packaged
+        if omitted:
+            updated["omitted_artifacts"] = omitted
+        reconciled[cname] = updated
+    return reconciled
+
+
+def _stream_file_to_zip(zf: zipfile.ZipFile, file_path: Path, arcname: str) -> tuple[int, str]:
+    """Stream one non-symlink file into a ZIP archive while counting bytes and SHA-256."""
+    if file_path.is_symlink() or not file_path.is_file():
+        raise ValueError(f"Evidence file missing or unsupported file type for packaging: {arcname}")
+    zinfo = zipfile.ZipInfo.from_file(file_path, arcname=arcname)
+    zinfo.compress_type = zipfile.ZIP_DEFLATED
+    zinfo.flag_bits &= ~0x1
     digest = hashlib.sha256()
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for file_path in sorted(evidence_dir.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel_path = file_path.relative_to(evidence_dir).as_posix()
-            # Never bundle the original sample or raw dropped executable binaries inside evidence ZIP.
-            if file_path.name == sample_filename and not rel_path.startswith("ghidra/"):
-                continue
-            if rel_path.startswith("dynamic/filesystem/dropped_files/"):
-                continue
-            if (
-                not rel_path.startswith(("logs/", "static/", "ghidra/"))
-                and file_path.suffix.lower() in EXECUTABLE_EXTENSIONS
-            ):
-                continue
-            zf.write(file_path, arcname=rel_path)
+    written = 0
+    with file_path.open("rb") as src, zf.open(zinfo, "w", force_zip64=True) as dst:
+        while True:
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            written += len(chunk)
+            digest.update(chunk)
+            dst.write(chunk)
+    return written, digest.hexdigest().lower()
 
+
+def _package_evidence_zip(
+    evidence_dir: Path,
+    zip_path: Path,
+    sample_filename: str,
+    include_raw_pml: bool = False,
+    max_raw_pml_bytes: int = 200 * 1024 * 1024,
+    inventory: list[dict[str, Any]] | None = None,
+) -> str:
+    """Package evidence files strictly from the finalized manifest inventory plus manifest.json."""
+    manifest_path = evidence_dir / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise FileNotFoundError(f"Finalized manifest.json unavailable for packaging: {manifest_path}")
+
+    if inventory is None:
+        manifest_doc = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(manifest_doc, dict) or not isinstance(manifest_doc.get("evidence_file_inventory"), list):
+            raise ValueError("manifest.json lacks valid evidence_file_inventory for ZIP packaging.")
+        inventory_entries = manifest_doc["evidence_file_inventory"]
+    else:
+        inventory_entries = inventory
+
+    ev_root = evidence_dir.resolve()
+    tmp_zip = zip_path.with_name(f".{zip_path.name}.tmp")
+    seen_rel: set[str] = set()
+
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            for entry in inventory_entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("Invalid non-object entry in evidence_file_inventory.")
+                rel_path = entry.get("path")
+                if (
+                    not isinstance(rel_path, str)
+                    or not rel_path
+                    or "\x00" in rel_path
+                    or "\\" in rel_path
+                    or rel_path.startswith("/")
+                    or rel_path.endswith("/")
+                    or rel_path == "manifest.json"
+                    or any(part in ("", ".", "..") or ":" in part for part in rel_path.split("/"))
+                ):
+                    raise ValueError(f"Invalid inventory path for ZIP packaging: {rel_path!r}")
+                if rel_path in seen_rel:
+                    raise ValueError(f"Duplicate inventory path during packaging: {rel_path}")
+                seen_rel.add(rel_path)
+
+                expected_size = entry.get("size_bytes")
+                expected_sha = entry.get("sha256")
+                if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+                    raise ValueError(f"Invalid expected size_bytes for {rel_path}: {expected_size!r}")
+                if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+                    raise ValueError(f"Invalid expected sha256 for {rel_path}")
+
+                file_path = evidence_dir / rel_path
+                if file_path.is_symlink():
+                    raise ValueError(f"Symlink disallowed in evidence directory: {rel_path}")
+                resolved_file = file_path.resolve()
+                if ev_root not in resolved_file.parents or not file_path.is_file():
+                    raise FileNotFoundError(f"Evidence file missing during packaging: {rel_path}")
+
+                allowed, reason = _should_archive_file(
+                    rel_path=rel_path,
+                    file_path=file_path,
+                    sample_filename=sample_filename,
+                    include_raw_pml=include_raw_pml,
+                    max_raw_pml_bytes=max_raw_pml_bytes,
+                )
+                if not allowed:
+                    raise ValueError(f"Disallowed artifact in packaging inventory ({reason}): {rel_path}")
+
+                written_bytes, actual_sha = _stream_file_to_zip(zf, file_path, rel_path)
+                if written_bytes != expected_size or actual_sha != expected_sha.lower():
+                    raise ValueError(
+                        f"Evidence file changed between inventory generation and ZIP packaging: {rel_path}"
+                    )
+
+            _stream_file_to_zip(zf, manifest_path, "manifest.json")
+
+        tmp_zip.replace(zip_path)
+    except Exception:
+        tmp_zip.unlink(missing_ok=True)
+        zip_path.unlink(missing_ok=True)
+        raise
+
+    digest = hashlib.sha256()
     with zip_path.open("rb") as fh:
         while True:
             chunk = fh.read(65536)
@@ -408,6 +611,7 @@ def run_analysis(
         eventlog_mon = EventLogMonitor(config=config, base_dir=base_dir, logger=collectors_log)
 
         process_mon.start_baseline()
+        filesystem_mon.deploy_canary_fixtures(workspace_dir / "run")
         procmon_session.start(evidence_dir=evidence_dir)
         network_mon.start(evidence_dir=evidence_dir)
         memory_mon.poll_once(set())
@@ -589,13 +793,95 @@ def run_analysis(
             for lim in res.limitations:
                 collectors_log.warning("[%s] limitation: %s", name, lim)
 
-        statuses = [res.status for res in collector_results.values()]
-        if all(s == STATUS_FAILED for s in statuses) or (launch_failed and process_mon.result.status == STATUS_FAILED):
-            final_status = STATUS_PARTIAL if any(s == STATUS_COMPLETED for s in statuses) else STATUS_FAILED
-        elif any(
-            s in (STATUS_FAILED, STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_SKIPPED)
-            for s in statuses
+        include_raw_pml = bool(config.get("include_raw_pml", False))
+        max_raw_pml_bytes = max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024
+
+        status_buckets: dict[str, list[str]] = {
+            STATUS_COMPLETED: [],
+            STATUS_PARTIAL: [],
+            STATUS_FAILED: [],
+            STATUS_SKIPPED: [],
+            STATUS_UNAVAILABLE: [],
+        }
+        for cname, c_res in collector_results.items():
+            status_buckets.setdefault(c_res.status, []).append(cname)
+
+        disabled_optional_features: list[str] = []
+        if not include_raw_pml:
+            disabled_optional_features.append("include_raw_pml=false")
+        if not bool(config.get("winpmem_enabled", False)):
+            disabled_optional_features.append("winpmem_enabled=false")
+        if not bool(config.get("procdump_enabled", True)):
+            disabled_optional_features.append("procdump_enabled=false")
+        if not bool(config.get("canary_fixtures_enabled", False)):
+            disabled_optional_features.append("canary_fixtures_enabled=false")
+
+        optional_collectors_unavailable = [
+            cname
+            for cname, c_res in collector_results.items()
+            if COLLECTOR_CLASSIFICATION.get(cname) == "optional_static" and c_res.status == STATUS_UNAVAILABLE
+        ]
+        if optional_collectors_unavailable:
+            disabled_optional_features.extend(
+                f"{cname}=unavailable" for cname in optional_collectors_unavailable
+            )
+        enable_attack_mapping = bool(config.get("enable_attack_mapping", True))
+        if not enable_attack_mapping:
+            disabled_optional_features.append("enable_attack_mapping=false")
+
+        # Separate mandatory/conditional collectors from optional collectors & unsupported skips
+        mandatory_collectors: dict[str, str] = {}
+        conditional_collectors: dict[str, str] = {}
+        optional_collectors: dict[str, str] = {}
+        required_statuses: list[str] = []
+
+        for cname, c_res in collector_results.items():
+            role = COLLECTOR_CLASSIFICATION.get(cname, "conditional")
+            if role == "optional_static":
+                optional_collectors[cname] = c_res.status
+                # Optional unavailable or optional tool failure is tracked cleanly under
+                # optional_collectors without forcing mandatory evidence into failed/partial
+                # when disabled/absent; if an optional tool ran and failed, still record limitation.
+                if c_res.status == STATUS_FAILED:
+                    all_limitations.append(
+                        f"Optional collector '{cname}' failed; mandatory static/dynamic evidence unaffected."
+                    )
+                continue
+            if role.startswith("conditional"):
+                conditional_collectors[cname] = c_res.status
+                ghidra_assess = str(c_res.summary.get("export_assessment") or "")
+                if c_res.status == STATUS_SKIPPED and ghidra_assess == "unsupported_sample_format":
+                    continue
+                required_statuses.append(c_res.status)
+            else:
+                mandatory_collectors[cname] = c_res.status
+                required_statuses.append(c_res.status)
+
+        missing_mandatory_collectors = [
+            cname
+            for cname, st in mandatory_collectors.items()
+            if st in (STATUS_FAILED, STATUS_UNAVAILABLE, STATUS_SKIPPED)
+        ] + [
+            cname
+            for cname, st in conditional_collectors.items()
+            if st in (STATUS_FAILED, STATUS_UNAVAILABLE)
+        ]
+
+        collector_role_summary = {
+            "mandatory": mandatory_collectors,
+            "conditional": conditional_collectors,
+            "optional": optional_collectors,
+            "disabled_optional_features": disabled_optional_features,
+            "missing_or_degraded_mandatory": sorted(missing_mandatory_collectors),
+        }
+
+        required_completed_count = sum(1 for st in required_statuses if st == STATUS_COMPLETED)
+        statuses = required_statuses or [res.status for res in collector_results.values()]
+        if all(s in (STATUS_FAILED, STATUS_UNAVAILABLE) for s in statuses) or (
+            launch_failed and process_mon.result.status == STATUS_FAILED and required_completed_count == 0
         ):
+            final_status = STATUS_FAILED
+        elif any(s in (STATUS_FAILED, STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_SKIPPED) for s in statuses):
             final_status = STATUS_PARTIAL
         else:
             final_status = STATUS_COMPLETED
@@ -608,24 +894,64 @@ def run_analysis(
         floss_doc = _read_json_safe(evidence_dir / "static" / "floss.json")
         capa_doc = _read_json_safe(evidence_dir / "static" / "capa.json")
         yara_doc = _read_json_safe(evidence_dir / "static" / "yara.json")
+        die_doc = _read_json_safe(evidence_dir / "static" / "die.json")
         ghidra_doc = _read_json_safe(evidence_dir / "ghidra" / "functions.json")
         proc_doc = _read_json_safe(evidence_dir / "dynamic" / "process" / "processes.json")
+        proc_events_doc = _read_json_safe(evidence_dir / "dynamic" / "process" / "process_events.json")
         net_doc = _read_json_safe(evidence_dir / "dynamic" / "network" / "connections.json")
         dns_doc = _read_json_safe(evidence_dir / "dynamic" / "network" / "dns.json")
         mem_doc = _read_json_safe(evidence_dir / "dynamic" / "memory" / "memory_usage.json")
         fs_doc = _read_json_safe(evidence_dir / "dynamic" / "filesystem" / "changes.json")
         reg_doc = _read_json_safe(evidence_dir / "dynamic" / "registry" / "changes.json")
 
+        if enable_attack_mapping:
+            attack_doc = build_attack_mapping(
+                pe_doc=pe_doc,
+                floss_doc=floss_doc,
+                capa_doc=capa_doc,
+                yara_doc=yara_doc,
+                die_doc=die_doc,
+                proc_doc=proc_doc,
+                proc_events_doc=proc_events_doc,
+                net_doc=net_doc,
+                dns_doc=dns_doc,
+                fs_doc=fs_doc,
+                reg_doc=reg_doc,
+                sysmon_events=sysmon_events,
+            )
+            write_json(evidence_dir / "attack_mapping.json", attack_doc)
+        else:
+            attack_doc = {
+                "schema_version": "1.0",
+                "disabled_by_config": True,
+                "technique_count": 0,
+                "counts_by_observation_type": {},
+                "mappings": [],
+                "limitations": ["ATT&CK mapping disabled by config (enable_attack_mapping=false)."],
+            }
+
         indicators = floss_doc.get("indicators", {})
+        net_conns = net_doc.get("connections", [])
         dynamic_dests = sorted(
             {
                 f"{c.get('dst_ip')}:{c.get('dst_port')}"
-                for c in net_doc.get("connections", [])
-                if c.get("dst_ip")
+                for c in net_conns
+                if c.get("dst_ip") and c.get("classification", "sample_related_traffic") == "sample_related_traffic"
+            }
+        )
+        dynamic_unattr_dests = sorted(
+            {
+                f"{c.get('dst_ip')}:{c.get('dst_port')}"
+                for c in net_conns
+                if c.get("dst_ip") and c.get("classification") == "unattributed_traffic"
             }
         )
         dynamic_dns = sorted(
-            {q.get("query_name") for q in dns_doc.get("queries", []) if q.get("query_name")}
+            {
+                q.get("query_name")
+                for q in dns_doc.get("queries", [])
+                if q.get("query_name") and q.get("classification", "sample_related_traffic") == "sample_related_traffic"
+            }
         )
         yara_rules = [m.get("rule") for m in yara_doc.get("matches", []) if m.get("rule")]
 
@@ -646,6 +972,9 @@ def run_analysis(
             "job_id": job_id,
             "final_status": final_status,
             "collector_statuses": collector_statuses_short,
+            "collector_status_buckets": status_buckets,
+            "collector_role_summary": collector_role_summary,
+            "disabled_optional_features": disabled_optional_features,
             "timing": {
                 "analysis_start_time": start_time_utc,
                 "dynamic_started_at": dynamic_started_at or None,
@@ -664,6 +993,7 @@ def run_analysis(
                 "sha1": hashes_doc.get("sha1"),
                 "sha256": sample_sha256,
                 "file_type": hashes_doc.get("file_type"),
+                "file_identification": hashes_doc.get("file_identification", {}),
             },
             "static": {
                 "architecture": pe_doc.get("architecture"),
@@ -690,11 +1020,16 @@ def run_analysis(
                 "yara_match_count": _metric_if_collected(
                     collector_results, "yara", yara_doc.get("match_count")
                 ),
+                "die_detections": _metric_if_collected(
+                    collector_results, "detect_it_easy", die_doc.get("detection_count")
+                ),
+                "optional_collectors_unavailable": optional_collectors_unavailable,
                 "ghidra_function_count": _metric_if_collected(
                     collector_results,
                     "ghidra",
-                    len(ghidra_doc.get("functions", [])) if ghidra_doc else None,
+                    ghidra_doc.get("total_function_count", len(ghidra_doc.get("functions", []))) if ghidra_doc else None,
                 ),
+                "ghidra_export_assessment": collector_results["ghidra"].summary.get("export_assessment"),
                 "ghidra_mcp": collector_results["ghidra"].summary.get("ghidra_mcp"),
             },
             "dynamic": {
@@ -720,6 +1055,13 @@ def run_analysis(
                     net_doc.get("connection_count"),
                     net_doc.get("collected"),
                 ),
+                "sample_related_connection_count": _metric_if_collected(
+                    collector_results,
+                    "network_monitor",
+                    net_doc.get("classification_summary", {}).get("sample_related_traffic"),
+                    net_doc.get("collected"),
+                ),
+                "network_classification": net_doc.get("classification_summary"),
                 "dns_query_count": _metric_if_collected(
                     collector_results,
                     "network_monitor",
@@ -774,12 +1116,31 @@ def run_analysis(
                 ),
             },
             "potential_iocs": {
+                "note": "Static string indicators are unverified offline candidates; dynamic_destinations excludes control_traffic and OS background_traffic.",
                 "static_urls": indicators.get("urls", []),
                 "static_domains": indicators.get("domains", []),
                 "static_ips": indicators.get("ip_addresses", []),
                 "dynamic_destinations": dynamic_dests,
+                "dynamic_unattributed_destinations": dynamic_unattr_dests,
                 "dynamic_dns_queries": dynamic_dns,
                 "yara_rules": yara_rules,
+            },
+            "attack_mapping": {
+                "enabled": enable_attack_mapping,
+                "technique_count": attack_doc.get("technique_count", 0),
+                "counts_by_observation_type": attack_doc.get("counts_by_observation_type", {}),
+                "artifact": "attack_mapping.json" if enable_attack_mapping else None,
+                "top_techniques": [
+                    {
+                        "technique_id": m.get("technique_id"),
+                        "technique_name": m.get("technique_name"),
+                        "tactic": m.get("tactic"),
+                        "observation_type": m.get("observation_type"),
+                        "confidence": m.get("confidence"),
+                        "evidence_sources": m.get("evidence_sources", []),
+                    }
+                    for m in (attack_doc.get("mappings") or [])[:15]
+                ],
             },
         }
         write_json(evidence_dir / "summary.json", summary_doc)
@@ -804,9 +1165,18 @@ def run_analysis(
             "restore_required": True,
             "windows_version": platform.platform(),
             "tool_versions": tool_versions,
+            "archive_policy": {
+                "include_raw_pml": include_raw_pml,
+                "max_raw_pml_mb": int(config.get("max_raw_pml_mb", 200)),
+            },
+            "collector_classification": COLLECTOR_CLASSIFICATION,
+            "collector_status_buckets": status_buckets,
+            "collector_role_summary": collector_role_summary,
+            "disabled_optional_features": disabled_optional_features,
             "collector_status": {
                 k: {
                     "status": v["status"],
+                    "classification": COLLECTOR_CLASSIFICATION.get(k, "conditional"),
                     "errors": v["errors"],
                     "limitations": v["limitations"],
                     "artifacts": v["artifacts"],
@@ -815,8 +1185,19 @@ def run_analysis(
             },
             "analysis_limitations": sorted(set(all_limitations)),
             "final_status": final_status,
-            "evidence_file_inventory_note": "Inventory lists all evidence artifacts written prior to manifest.json.",
+            "evidence_file_inventory_note": (
+                "Inventory strictly lists artifacts packaged into the returned ZIP archive, excluding "
+                "manifest.json itself (self-reference exception: manifest.json is included in the ZIP "
+                "archive but cannot contain its own final SHA-256 digest)."
+            ),
+            "manifest_self_reference": {
+                "path": "manifest.json",
+                "packaged_in_zip": True,
+                "included_in_hash_inventory": False,
+                "reason": "Self-reference exception: writing manifest.json alters its own byte size and SHA-256 digest.",
+            },
             "evidence_file_inventory": [],
+            "excluded_or_omitted_files": [],
         }
 
         report_md = _build_report_markdown(summary=summary_doc, manifest=manifest_skeleton)
@@ -825,14 +1206,32 @@ def run_analysis(
         analysis_log.info("Analysis finalized with status=%s", final_status)
         _close_job_loggers(job_id, log_handlers)
 
-        manifest_skeleton["evidence_file_inventory"] = _build_inventory(evidence_dir)
+        inv, omitted = _build_inventory(
+            evidence_dir=evidence_dir,
+            sample_filename=sample_path.name,
+            include_raw_pml=include_raw_pml,
+            max_raw_pml_bytes=max_raw_pml_bytes,
+        )
+        archived_paths = {entry["path"] for entry in inv}
+        manifest_skeleton["collector_status"] = _reconcile_collector_artifacts(
+            manifest_skeleton["collector_status"],
+            archived_paths=archived_paths,
+            omitted_entries=omitted,
+        )
+        manifest_skeleton["evidence_file_inventory"] = inv
+        manifest_skeleton["excluded_or_omitted_files"] = omitted
         write_json(evidence_dir / "manifest.json", manifest_skeleton)
 
         terminal_logger.info("[SANDBOX] Packaging evidence...")
         stage_callback("packaging_evidence")
         zip_path = workspace_dir / f"evidence_{job_id}.zip"
         archive_sha256 = _package_evidence_zip(
-            evidence_dir=evidence_dir, zip_path=zip_path, sample_filename=sample_path.name
+            evidence_dir=evidence_dir,
+            zip_path=zip_path,
+            sample_filename=sample_path.name,
+            include_raw_pml=include_raw_pml,
+            max_raw_pml_bytes=max_raw_pml_bytes,
+            inventory=inv,
         )
 
         return {
@@ -879,9 +1278,57 @@ def run_analysis(
 
         _close_job_loggers(job_id, log_handlers)
 
+        zip_path = workspace_dir / f"evidence_{job_id}.zip"
+        zip_path.unlink(missing_ok=True)
+        zip_path.with_name(f".{zip_path.name}.tmp").unlink(missing_ok=True)
+
+        inv_fail: list[dict[str, Any]] = []
+        failure_artifacts_ok = False
+        failure_gen_error = ""
         try:
+            include_raw_pml = bool(config.get("include_raw_pml", False))
+            max_raw_pml_bytes = max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024
+            (evidence_dir / "logs").mkdir(parents=True, exist_ok=True)
             write_json(evidence_dir / "logs" / "tool_status.json", collector_status_map)
-            failure_manifest = {
+
+            existing_summary = _read_json_safe(evidence_dir / "summary.json")
+            failure_summary = existing_summary if isinstance(existing_summary, dict) else {}
+            failure_summary.update(
+                {
+                    "job_id": job_id,
+                    "final_status": STATUS_FAILED,
+                    "fatal_error": str(exc),
+                    "collector_statuses": {k: v["status"] for k, v in collector_status_map.items()},
+                }
+            )
+            failure_timing = dict(failure_summary.get("timing") or {})
+            failure_timing.update(
+                {
+                    "analysis_start_time": start_time_utc,
+                    "dynamic_started_at": dynamic_started_at or None,
+                    "dynamic_completed_at": dynamic_completed_at or None,
+                    "process_session_ended_at": process_session_ended_at or None,
+                    "evidence_finalized_at": end_time_utc,
+                    "configured_observation_duration_seconds": configured_duration,
+                    "actual_observation_duration_seconds": actual_duration_seconds,
+                    "actual_process_session_duration_seconds": actual_process_session_duration_seconds,
+                    "dynamic_execution_status": dynamic_execution_status,
+                }
+            )
+            failure_summary["timing"] = failure_timing
+            if "sample" not in failure_summary or not isinstance(failure_summary.get("sample"), dict):
+                try:
+                    sample_size = sample_path.stat().st_size
+                except OSError:
+                    sample_size = None
+                failure_summary["sample"] = {
+                    "filename": sample_path.name,
+                    "size_bytes": sample_size,
+                    "sha256": sample_sha256,
+                }
+            write_json(evidence_dir / "summary.json", failure_summary)
+
+            failure_manifest: dict[str, Any] = {
                 "job_id": job_id,
                 "sample_filename": sample_path.name,
                 "sample_sha256": sample_sha256,
@@ -898,9 +1345,15 @@ def run_analysis(
                 "dynamic_execution_status": dynamic_execution_status,
                 "restore_required": True,
                 "windows_version": platform.platform(),
+                "archive_policy": {
+                    "include_raw_pml": include_raw_pml,
+                    "max_raw_pml_mb": max(1, int(config.get("max_raw_pml_mb", 200))),
+                },
+                "collector_classification": COLLECTOR_CLASSIFICATION,
                 "collector_status": {
                     k: {
                         "status": v["status"],
+                        "classification": COLLECTOR_CLASSIFICATION.get(k, "conditional"),
                         "errors": v["errors"],
                         "limitations": v["limitations"],
                         "artifacts": v["artifacts"],
@@ -910,36 +1363,61 @@ def run_analysis(
                 "analysis_limitations": sorted(set(all_limitations + [f"Fatal error: {exc}"])),
                 "fatal_error": str(exc),
                 "final_status": STATUS_FAILED,
-                "evidence_file_inventory": _build_inventory(evidence_dir),
+                "evidence_file_inventory_note": (
+                    "Inventory strictly lists artifacts packaged into the returned ZIP archive, excluding "
+                    "manifest.json itself (self-reference exception: manifest.json is included in the ZIP "
+                    "archive but cannot contain its own final SHA-256 digest)."
+                ),
+                "manifest_self_reference": {
+                    "path": "manifest.json",
+                    "packaged_in_zip": True,
+                    "included_in_hash_inventory": False,
+                    "reason": "Self-reference exception: writing manifest.json alters its own byte size and SHA-256 digest.",
+                },
+                "evidence_file_inventory": [],
+                "excluded_or_omitted_files": [],
             }
-            write_json(evidence_dir / "manifest.json", failure_manifest)
+            failure_report_md = _build_report_markdown(summary=failure_summary, manifest=failure_manifest)
+            (evidence_dir / "report.md").write_text(failure_report_md, encoding="utf-8")
 
-            if not (evidence_dir / "summary.json").is_file():
-                write_json(
-                    evidence_dir / "summary.json",
-                    {
-                        "job_id": job_id,
-                        "final_status": STATUS_FAILED,
-                        "fatal_error": str(exc),
-                        "collector_statuses": {k: v["status"] for k, v in collector_status_map.items()},
-                    },
-                )
-            if not (evidence_dir / "report.md").is_file():
-                (evidence_dir / "report.md").write_text(
-                    f"# MalBox Analysis Report — `{job_id}` (FAILED)\n\n"
-                    f"- **Fatal Error:** {exc}\n"
-                    "- **Snapshot Status:** Restore the `CLEAN` snapshot before running another analysis.\n",
-                    encoding="utf-8",
-                )
-        except OSError as io_exc:
+            inv_fail, omitted_fail = _build_inventory(
+                evidence_dir=evidence_dir,
+                sample_filename=sample_path.name,
+                include_raw_pml=include_raw_pml,
+                max_raw_pml_bytes=max_raw_pml_bytes,
+            )
+            archived_fail_paths = {entry["path"] for entry in inv_fail}
+            failure_manifest["collector_status"] = _reconcile_collector_artifacts(
+                failure_manifest["collector_status"],
+                archived_paths=archived_fail_paths,
+                omitted_entries=omitted_fail,
+            )
+            failure_manifest["evidence_file_inventory"] = inv_fail
+            failure_manifest["excluded_or_omitted_files"] = omitted_fail
+            write_json(evidence_dir / "manifest.json", failure_manifest)
+            failure_artifacts_ok = True
+        except (OSError, ValueError, TypeError, RuntimeError) as io_exc:
+            failure_gen_error = str(io_exc)
             terminal_logger.error("[ERROR] Could not write failure artifacts to %s: %s", evidence_dir, io_exc)
 
-        zip_path = workspace_dir / f"evidence_{job_id}.zip"
+        if not failure_artifacts_ok:
+            return {
+                "job_status": STATUS_FAILED,
+                "zip_path": None,
+                "archive_sha256": "",
+                "error": f"{exc} (failure manifest generation failed: {failure_gen_error})",
+            }
+
         try:
             if not evidence_dir.exists():
                 raise FileNotFoundError(f"Evidence directory unavailable: {evidence_dir}")
             archive_sha256 = _package_evidence_zip(
-                evidence_dir=evidence_dir, zip_path=zip_path, sample_filename=sample_path.name
+                evidence_dir=evidence_dir,
+                zip_path=zip_path,
+                sample_filename=sample_path.name,
+                include_raw_pml=bool(config.get("include_raw_pml", False)),
+                max_raw_pml_bytes=max(1, int(config.get("max_raw_pml_mb", 200))) * 1024 * 1024,
+                inventory=inv_fail,
             )
             return {
                 "job_status": STATUS_FAILED,
@@ -948,6 +1426,7 @@ def run_analysis(
                 "error": str(exc),
             }
         except Exception as pkg_exc:
+            zip_path.unlink(missing_ok=True)
             return {
                 "job_status": STATUS_FAILED,
                 "zip_path": None,

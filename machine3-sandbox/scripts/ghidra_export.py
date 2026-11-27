@@ -1,3 +1,5 @@
+# LEGACY FALLBACK REFERENCE ONLY:
+# MalBox v2 defaults to `scripts/GhidraExport.java` for Ghidra 10.x-12.x compatibility without PyGhidra/Jython.
 # Ghidra Headless post-analysis export script for MalBox.
 # Written to be compatible with Ghidra's Jython 2.7 engine and PyGhidra.
 # @category MalBox

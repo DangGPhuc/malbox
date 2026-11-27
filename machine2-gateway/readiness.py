@@ -169,13 +169,15 @@ def _validate_number(
     return fval
 
 
-def _validate_bool(cfg: dict[str, Any], key: str, errors: list[str], required: bool = False) -> None:
+def _validate_bool(cfg: dict[str, Any], key: str, errors: list[str], required: bool = False) -> bool | None:
     if key not in cfg:
         if required:
             errors.append(f"Missing key '{key}'")
-        return
+        return None
     if not isinstance(cfg[key], bool):
         errors.append(f"Key '{key}' must be a boolean (got {type(cfg[key]).__name__})")
+        return None
+    return cfg[key]
 
 
 def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[str], str]:
@@ -188,6 +190,21 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "evidence_archive_dir": "./retained_evidence",
         "retain_evidence_archives": True,
         "connect_timeout_seconds": 5.0,
+        "request_timeout_seconds": 30.0,
+        "poll_interval_seconds": 3.0,
+        "analysis_timeout_seconds": 1800.0,
+        "chunk_size_bytes": 65536,
+        "max_sample_size_mb": 200.0,
+        "max_evidence_archive_mb": 512,
+        "max_extracted_size_mb": 1024,
+        "max_single_file_mb": 256,
+        "max_archive_entries": 5000,
+        "inetsim_diagnostics_enabled": False,
+        "inetsim_binary": "/usr/bin/inetsim",
+        "inetsim_conf_path": "/etc/inetsim/inetsim.conf",
+        "inetsim_log_dir": "/var/log/inetsim",
+        "max_inetsim_log_mb": 5,
+        "max_inetsim_events": 1000,
     }
     errors: list[str] = []
     if not config_path.is_file():
@@ -216,29 +233,53 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     sport = _validate_int(parsed, "sandbox_port", errors, min_val=1, max_val=65535, required=True)
     tmp_dir = _validate_str(parsed, "temp_dir", errors)
     ret_dir = _validate_str(parsed, "evidence_archive_dir", errors)
-    _validate_bool(parsed, "retain_evidence_archives", errors, required=True)
+    ret_en = _validate_bool(parsed, "retain_evidence_archives", errors, required=True)
     conn_t = _validate_number(parsed, "connect_timeout_seconds", errors, min_val=0.1, required=False)
-    _validate_number(parsed, "request_timeout_seconds", errors, min_val=0.1, required=False)
-    _validate_number(parsed, "poll_interval_seconds", errors, min_val=0.1, required=False)
-    _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
-    _validate_number(parsed, "max_sample_size_mb", errors, min_val=1.0, required=False)
+    req_t = _validate_number(parsed, "request_timeout_seconds", errors, min_val=0.1, required=False)
+    poll_i = _validate_number(parsed, "poll_interval_seconds", errors, min_val=0.1, required=False)
+    ana_t = _validate_number(parsed, "analysis_timeout_seconds", errors, min_val=1.0, required=False)
+    chunk_sz = _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    max_samp = _validate_number(parsed, "max_sample_size_mb", errors, min_val=1.0, required=False)
+    max_arch = _validate_int(parsed, "max_evidence_archive_mb", errors, min_val=1, required=False)
+    max_ext = _validate_int(parsed, "max_extracted_size_mb", errors, min_val=1, required=False)
+    max_sf = _validate_int(parsed, "max_single_file_mb", errors, min_val=1, required=False)
+    max_ent = _validate_int(parsed, "max_archive_entries", errors, min_val=10, required=False)
+    inet_en = _validate_bool(parsed, "inetsim_diagnostics_enabled", errors, required=False)
+    inet_bin = _validate_str(parsed, "inetsim_binary", errors) if "inetsim_binary" in parsed else None
+    inet_conf = _validate_str(parsed, "inetsim_conf_path", errors) if "inetsim_conf_path" in parsed else None
+    inet_log = _validate_str(parsed, "inetsim_log_dir", errors) if "inetsim_log_dir" in parsed else None
+    inet_log_mb = _validate_int(parsed, "max_inetsim_log_mb", errors, min_val=1, required=False)
+    inet_ev = _validate_int(parsed, "max_inetsim_events", errors, min_val=10, required=False)
 
     safe_cfg = dict(defaults)
-    if lhost:
-        safe_cfg["listen_host"] = lhost
-    if lport is not None:
-        safe_cfg["listen_port"] = lport
-    if shost:
-        safe_cfg["sandbox_host"] = shost
-    if sport is not None:
-        safe_cfg["sandbox_port"] = sport
-    if tmp_dir:
-        safe_cfg["temp_dir"] = tmp_dir
-    if ret_dir:
-        safe_cfg["evidence_archive_dir"] = ret_dir
-    if conn_t is not None:
-        safe_cfg["connect_timeout_seconds"] = conn_t
+    updates: dict[str, Any] = {
+        "listen_host": lhost,
+        "listen_port": lport,
+        "sandbox_host": shost,
+        "sandbox_port": sport,
+        "temp_dir": tmp_dir,
+        "evidence_archive_dir": ret_dir,
+        "retain_evidence_archives": ret_en,
+        "connect_timeout_seconds": conn_t,
+        "request_timeout_seconds": req_t,
+        "poll_interval_seconds": poll_i,
+        "analysis_timeout_seconds": ana_t,
+        "chunk_size_bytes": chunk_sz,
+        "max_sample_size_mb": max_samp,
+        "max_evidence_archive_mb": max_arch,
+        "max_extracted_size_mb": max_ext,
+        "max_single_file_mb": max_sf,
+        "max_archive_entries": max_ent,
+        "inetsim_diagnostics_enabled": inet_en,
+        "inetsim_binary": inet_bin,
+        "inetsim_conf_path": inet_conf,
+        "inetsim_log_dir": inet_log,
+        "max_inetsim_log_mb": inet_log_mb,
+        "max_inetsim_events": inet_ev,
+    }
+    for k, v in updates.items():
+        if v is not None:
+            safe_cfg[k] = v
 
     return safe_cfg, errors, "valid" if not errors else "validation_error"
 
@@ -585,6 +626,55 @@ def main(argv: list[str] | None = None) -> int:
                     else "Kernel IP forwarding is enabled (1); Machine 2 must not route traffic directly between Net 1 and Net 2."
                 ),
                 recommended_action="" if fwd_off else "Manually disable IP forwarding: sudo sysctl -w net.ipv4.ip_forward=0",
+            )
+        )
+
+    # 10b. Optional read-only INetSim diagnostic inspection (never starts/modifies INetSim)
+    try:
+        from inetsim_diagnostics import inspect_inetsim_environment  # noqa: E402
+
+        inet_info = inspect_inetsim_environment(cfg)
+    except Exception as exc:
+        inet_info = {"installed": False, "service_state": "error", "error": str(exc), "config": {}, "logs": {}}
+
+    inet_diag_enabled = bool(cfg.get("inetsim_diagnostics_enabled", False))
+    if inet_info.get("installed"):
+        inet_svc = str(inet_info.get("service_state", "unknown"))
+        log_files_cnt = len(inet_info.get("logs", {}).get("files", []))
+        checks.append(
+            make_check(
+                name="inetsim_optional",
+                category="network_sim",
+                required=False,
+                status=STATUS_PASS if (inet_svc == "active" or not inet_diag_enabled) else STATUS_PENDING,
+                detected_version=f"{inet_info.get('version') or 'installed'}, svc={inet_svc}, logs={log_files_cnt}",
+                resolved_path=inet_info.get("binary_path"),
+                installed=True,
+                runtime_verified=bool(inet_info.get("version")),
+                diagnostic_message=(
+                    f"Operator-managed INetSim detected (service={inet_svc}, conf_readable={inet_info.get('config', {}).get('readable')}, "
+                    f"log_dir_readable={inet_info.get('logs', {}).get('readable')}; isolated simulator diagnostics only)."
+                ),
+                recommended_action=(
+                    ""
+                    if inet_svc == "active" or not inet_diag_enabled
+                    else "INetSim installed but inactive; start manually on Machine 2 only when running authorized isolated simulator tests."
+                ),
+            )
+        )
+    else:
+        checks.append(
+            make_check(
+                name="inetsim_optional",
+                category="network_sim",
+                required=False,
+                status=STATUS_OPTIONAL,
+                configured_path=str(cfg.get("inetsim_binary", "/usr/bin/inetsim")),
+                installed=False,
+                runtime_verified=False,
+                diagnostic_message=(
+                    f"Optional INetSim not installed (inetsim_diagnostics_enabled={inet_diag_enabled}; core Gateway HTTP relay works independently)."
+                ),
             )
         )
 

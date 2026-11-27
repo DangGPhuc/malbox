@@ -86,3 +86,14 @@ New-NetFirewallRule -DisplayName "Allow ICMPv4 from Gateway" -Direction Inbound 
    - Start `python gateway.py` on Machine 2 (`10.10.10.20:8000` / `10.10.20.20`).
    - From Machine 2: `curl http://10.10.20.30:8001/status` -> should return `{"state": "READY", ...}`.
    - From Machine 1: `curl http://10.10.10.20:8000/status` -> should show `"gateway": "ok"` and Sandbox `"state": "READY"`.
+
+---
+
+## 4. Optional REMnux INetSim Diagnostic Integration (Strict Isolation)
+
+If REMnux (Machine 2) runs an **operator-managed local INetSim** service listening on Internal Network 2 (`10.10.20.20`), MalBox treats it strictly as an optional isolated diagnostic helper:
+
+- **Zero automated configuration or routing:** MalBox never enables `ip_forward`, never creates NAT rules, never configures Netplan, never forwards DNS outside Internal Network 2, and never starts/modifies INetSim services.
+- **Read-only inspection:** `machine2-gateway/readiness.py` calls `inetsim_diagnostics.inspect_inetsim_environment()` to report binary version, `systemctl is-active inetsim`, selected non-sensitive bind settings in `/etc/inetsim/inetsim.conf`, and log readability in `/var/log/inetsim`.
+- **Separate artifact provenance:** Setting `"inetsim_diagnostics_enabled": true` in `machine2-gateway/config.json` imports strictly window-scoped, credential-stripped DNS and HTTP diagnostic lines into `machine2-gateway/retained_evidence/gateway_netdiag_<job_id>.json` (exposed read-only via `GET /jobs/<job_id>/network-diagnostics`), keeping Machine 3's `evidence_<job_id>.zip` and `X-Archive-SHA256` checksum completely unchanged.
+- **Simulation limit:** INetSim logs show local isolated simulator responses during authorized harmless tests and must never be treated as reproducing real-world external network behavior.

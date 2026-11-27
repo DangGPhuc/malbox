@@ -13,9 +13,9 @@ Install and verify all tools **while Machine 3 has temporary Internet access**, 
 3. Run the setup helper in Windows PowerShell 5.1 or PowerShell 7+:
    ```powershell
    cd C:\malbox\machine3-sandbox
-   Set-ExecutionPolicy -Scope Process Bypass
    .\install.ps1 -CloneGitTools
    ```
+   *(If local PowerShell execution policy restricts unsigned local scripts on the lab guest, verify policy requirements for local scripts cleanly rather than disabling OS security protections.)*
    `-CloneGitTools` clones `capa-rules`, `volatility3`, and `GhidraMCP` into `tools\`, then creates `tools\volatility3\symbols\` afterward so `git clone` never fails on a non-empty folder. `install.ps1` verifies Python/pip/git exit codes and writes JSON configs in UTF-8 without BOM.
 
 ---
@@ -40,11 +40,12 @@ Download official releases into `machine3-sandbox\tools\` (or default install lo
 - Add custom `.yar` rules into `machine3-sandbox\scripts\yara_rules\`.
 
 ### D. NSA Ghidra Headless Analyzer & Export Limits
-- Prerequisite: Install **JDK 17 or JDK 21** (Eclipse Temurin / OpenJDK) and verify `java -version`.
+- Prerequisite: Install a compatible **JDK** (`JDK 17` for Ghidra 11.0–11.1, `JDK 21` for Ghidra 11.2–12.1, or `JDK 25+` for Ghidra 12.2+; check `Ghidra/application.properties` -> `application.java.min`) and verify `java -version`.
 - Source: https://github.com/NationalSecurityAgency/ghidra/releases
 - Extract the official release archive to `machine3-sandbox\tools\ghidra\` so `analyzeHeadless.bat` sits at `machine3-sandbox\tools\ghidra\support\analyzeHeadless.bat` (or re-run `.\install.ps1` to auto-update `config.json`).
-- **Automated Export Limits (`scripts/ghidra_export.py`):** To keep analysis bounded within `ghidra_timeout_seconds` (default `300s`) and avoid oversized evidence ZIPs, headless export caps output to:
-  - Up to `2000` imports, `500` exports, and `3000` defined strings.
+- MalBox v2 uses the Java post-script **`scripts/GhidraExport.java`** (avoiding Ghidra 12.x PyGhidra/Jython initialization issues). `scripts/ghidra_export.py` is kept only as a legacy reference.
+- **Automated Export Limits (`scripts/GhidraExport.java`):** To keep analysis bounded within `ghidra_timeout_seconds` (default `300s`) and avoid oversized evidence ZIPs, headless export caps output to:
+  - Up to `10000` function records in `functions.json` (with `total_function_count` and `functions_truncated` flags), `2000` imports, `500` exports, and `3000` defined strings.
   - Disassembly for up to `80` non-external functions (`200` instructions per function).
   - Decompiled C pseudocode for up to `40` non-thunk/non-external functions (`30s` timeout per function).
   - Very large, packed, or obfuscated binaries may hit these caps or time out; check `ghidra/analysis.log` for full headless details.
@@ -74,7 +75,11 @@ Download official releases into `machine3-sandbox\tools\` (or default install lo
 ### H. Optional Memory Tools (`WinPmem` & `Volatility 3`)
 - **WinPmem:** https://github.com/Velocidex/WinPmem/releases -> `tools\winpmem\winpmem.exe`.
 - **Volatility 3:** Cloned into `tools\volatility3\`. Pre-cache offline Windows ISF symbol tables into `tools\volatility3\symbols\` while online.
-- **Limitations:** `"winpmem_enabled"` is `false` by default in `config.json`. Full physical RAM acquisition requires Administrator privilege, compatible Windows 11 kernel driver support (without disabling Secure Boot/driver signing), and free disk space larger than guest RAM size. Volatility 3 plugins run offline against full physical RAM images (`physical_memory.raw`), **not** against ProcDump user-mode `.dmp` files.
+- **Limitations:** `"winpmem_enabled"` is `false` by default in `config.json`. Full physical RAM acquisition requires Administrator privilege, compatible Windows 11/10 kernel driver support (without disabling Secure Boot/driver signing), and free disk space larger than guest RAM size. Volatility 3 plugins run offline against full physical RAM images (`physical_memory.raw`), **not** against ProcDump user-mode `.dmp` files.
+
+### I. Optional Detect It Easy (`diec.exe`)
+- Download official Detect It Easy Windows release (`die_win64_portable_*.zip`) and extract `diec.exe` + `db/` into `tools\die\`.
+- **Verification & Optionality:** Checked by `readiness.py` (`detect_it_easy_optional`) using `diec.exe --version`. During analysis, `static_analysis.py` runs `diec.exe -j <sample>` to write `static/die.json` (compiler/linker/packer indicators). If `diec.exe` is not installed, MalBox records `detect_it_easy` as `unavailable` (`optional_static`) without degrading mandatory job status.
 
 ---
 

@@ -25,11 +25,149 @@ from collectors.common import (
 )
 
 
+BACKGROUND_MULTICAST_ENDPOINTS = {
+    ("239.255.255.250", 1900),   # SSDP
+    ("239.255.255.250", 3702),   # WS-Discovery
+    ("224.0.0.251", 5353),       # mDNS IPv4
+    ("ff02::fb", 5353),          # mDNS IPv6
+    ("224.0.0.252", 5355),       # LLMNR IPv4
+    ("ff02::1:3", 5355),         # LLMNR IPv6
+}
+BACKGROUND_PORTS = {67, 68, 123, 137, 138, 546, 547, 1900, 3702, 5353, 5355}
+CLASS_CATEGORIES = (
+    "sample_related_traffic",
+    "control_traffic",
+    "background_traffic",
+    "unattributed_traffic",
+)
+
+
 def _safe_int(val: Any) -> int | None:
     try:
         return int(val)
     except (TypeError, ValueError):
         return None
+
+
+def _is_loopback_ip(ip_val: str | None) -> bool:
+    if not ip_val:
+        return False
+    return ip_val == "::1" or ip_val.startswith("127.")
+
+
+def classify_connections(
+    connections: list[dict[str, Any]],
+    tracked_pids: set[int],
+    sandbox_pid: int,
+    control_port: int,
+) -> dict[str, int]:
+    """Classify collected connections without deleting evidence or hard-banning peer IPs."""
+    sample_tuples: set[tuple[str, str, int | None, str, int | None]] = set()
+    for conn in connections:
+        pid = _safe_int(conn.get("pid"))
+        if pid is not None and pid in tracked_pids:
+            proto = str(conn.get("protocol") or "").upper()
+            sip = str(conn.get("src_ip") or "")
+            sp = _safe_int(conn.get("src_port"))
+            dip = str(conn.get("dst_ip") or "")
+            dp = _safe_int(conn.get("dst_port"))
+            sample_tuples.add((proto, sip, sp, dip, dp))
+            sample_tuples.add((proto, dip, dp, sip, sp))
+
+    counts = {cat: 0 for cat in CLASS_CATEGORIES}
+    for conn in connections:
+        pid = _safe_int(conn.get("pid"))
+        proto = str(conn.get("protocol") or "").upper()
+        sip = str(conn.get("src_ip") or "")
+        sp = _safe_int(conn.get("src_port"))
+        dip = str(conn.get("dst_ip") or "")
+        dp = _safe_int(conn.get("dst_port"))
+
+        if pid is not None and pid in tracked_pids:
+            cat = "sample_related_traffic"
+            conf = "high"
+            reason = f"Socket attributed directly to tracked PID {pid}."
+        elif pid is not None and pid == sandbox_pid:
+            cat = "control_traffic"
+            conf = "high"
+            reason = "Socket owned by MalBox Sandbox service PID."
+        elif pid is None and (sp == control_port or dp == control_port):
+            cat = "control_traffic"
+            conf = "medium"
+            reason = f"Packet matches MalBox Sandbox HTTP control port {control_port}."
+        elif pid is None and (proto, sip, sp, dip, dp) in sample_tuples:
+            cat = "sample_related_traffic"
+            conf = "medium"
+            reason = "Packet 4-tuple correlates with tracked sample PID socket."
+        elif (
+            (dip, dp) in BACKGROUND_MULTICAST_ENDPOINTS
+            or (sip, sp) in BACKGROUND_MULTICAST_ENDPOINTS
+            or (pid is None and ((sp in BACKGROUND_PORTS) or (dp in BACKGROUND_PORTS)))
+            or (pid is None and _is_loopback_ip(sip) and _is_loopback_ip(dip))
+            or dip.startswith(("224.", "239.", "ff02:", "ff05:"))
+            or dip == "255.255.255.255"
+        ):
+            cat = "background_traffic"
+            conf = "medium"
+            reason = "Matches Windows discovery/multicast/broadcast/loopback background traffic without tracked PID."
+        else:
+            cat = "unattributed_traffic"
+            conf = "unattributed"
+            reason = "Observed connection without tracked sample PID attribution."
+
+        conn["classification"] = cat
+        conn["attribution_confidence"] = conf
+        conn["attribution_reason"] = reason
+        counts[cat] += 1
+    return counts
+
+
+def classify_dns_queries(
+    dns_queries: list[dict[str, Any]],
+    tracked_pids: set[int],
+    sandbox_pid: int,
+) -> dict[str, int]:
+    """Classify DNS queries conservatively into sample_related, background, or unattributed."""
+    tracked_names = {
+        str(q.get("query_name") or "").strip().lower().rstrip(".")
+        for q in dns_queries
+        if _safe_int(q.get("pid")) in tracked_pids and q.get("query_name")
+    }
+    counts = {cat: 0 for cat in CLASS_CATEGORIES}
+    for q in dns_queries:
+        pid = _safe_int(q.get("pid"))
+        qname = str(q.get("query_name") or "").strip().lower().rstrip(".")
+        if pid is not None and pid in tracked_pids:
+            cat = "sample_related_traffic"
+            conf = "high"
+            reason = f"DNS query attributed directly to tracked PID {pid}."
+        elif pid is not None and pid == sandbox_pid:
+            cat = "control_traffic"
+            conf = "high"
+            reason = "DNS query originated from Sandbox host process."
+        elif pid is None and qname and qname in tracked_names:
+            cat = "sample_related_traffic"
+            conf = "medium"
+            reason = "PCAP DNS query matches domain queried by tracked sample PID."
+        elif (
+            not qname
+            or qname.endswith((".in-addr.arpa", ".ip6.arpa", ".local"))
+            or qname in ("wpad", "localhost")
+            or qname.startswith("wpad.")
+        ):
+            cat = "background_traffic"
+            conf = "medium"
+            reason = "Matches OS background name resolution pattern without tracked PID."
+        else:
+            cat = "unattributed_traffic"
+            conf = "unattributed"
+            reason = "PCAP DNS query without Sysmon PID attribution."
+
+        q["classification"] = cat
+        q["attribution_confidence"] = conf
+        q["attribution_reason"] = reason
+        counts[cat] += 1
+    return counts
 
 
 class NetworkMonitor:
@@ -257,20 +395,66 @@ class NetworkMonitor:
         connections.sort(key=lambda item: str(item.get("timestamp") or ""))
         dns_queries.sort(key=lambda item: str(item.get("timestamp") or ""))
 
+        sandbox_pid = os.getpid()
+        control_port = int(self.config.get("listen_port", 8001))
+        conn_counts = classify_connections(
+            connections=connections,
+            tracked_pids=tracked_pids,
+            sandbox_pid=sandbox_pid,
+            control_port=control_port,
+        )
+        dns_counts = classify_dns_queries(
+            dns_queries=dns_queries,
+            tracked_pids=tracked_pids,
+            sandbox_pid=sandbox_pid,
+        )
+
+        # Keep sample_related and unattributed entries prioritized if total exceeds cap
+        def _cap_prioritized(items: list[dict[str, Any]], cap: int = 5000) -> list[dict[str, Any]]:
+            if len(items) <= cap:
+                return items
+            prio = [x for x in items if x.get("classification") in ("sample_related_traffic", "unattributed_traffic")]
+            rest = [x for x in items if x.get("classification") not in ("sample_related_traffic", "unattributed_traffic")]
+            if len(prio) >= cap:
+                return prio[:cap]
+            kept = prio + rest[: cap - len(prio)]
+            kept.sort(key=lambda item: str(item.get("timestamp") or ""))
+            return kept
+
+        stored_conns = _cap_prioritized(connections, 5000)
+        stored_dns = _cap_prioritized(dns_queries, 5000)
+
         write_json(
             net_dir / "connections.json",
-            {"collected": True, "connection_count": len(connections), "connections": connections[:5000]},
+            {
+                "collected": True,
+                "connection_count": len(connections),
+                "stored_connection_count": len(stored_conns),
+                "classification_summary": conn_counts,
+                "connections": stored_conns,
+            },
         )
         write_json(
             net_dir / "dns.json",
-            {"collected": True, "dns_query_count": len(dns_queries), "queries": dns_queries[:5000]},
+            {
+                "collected": True,
+                "dns_query_count": len(dns_queries),
+                "stored_dns_query_count": len(stored_dns),
+                "classification_summary": dns_counts,
+                "queries": stored_dns,
+            },
         )
         self.result.artifacts.extend(["dynamic/network/connections.json", "dynamic/network/dns.json"])
         has_pcapng = bool(self.pcap_path and self.pcap_path.is_file() and self.pcap_path.stat().st_size > 0)
         self.result.summary = {
             "collected": True,
             "connection_event_count": len(connections),
+            "sample_related_connection_count": conn_counts["sample_related_traffic"],
+            "control_traffic_connection_count": conn_counts["control_traffic"],
+            "background_traffic_connection_count": conn_counts["background_traffic"],
+            "unattributed_connection_count": conn_counts["unattributed_traffic"],
             "dns_query_count": len(dns_queries),
+            "sample_related_dns_count": dns_counts["sample_related_traffic"],
             "has_pcapng": has_pcapng,
             "sysmon_available": sysmon_available,
         }

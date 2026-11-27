@@ -39,6 +39,7 @@ MCP_DIR = BASE_DIR / "mcp"
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_REPORT_PATH = BASE_DIR / "setup_report.json"
 MIN_PYTHON = (3, 10)
+WIN10_MIN_BUILD = 10240
 WIN11_MIN_BUILD = 22000
 
 STATUS_PASS = "PASS"
@@ -253,8 +254,10 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "capa_rules": "./tools/capa-rules",
         "yara": "./tools/yara/yara64.exe",
         "yara_rules_dir": "./scripts/yara_rules",
+        "die": "./tools/die/diec.exe",
         "ghidra_headless": "./tools/ghidra/support/analyzeHeadless.bat",
         "ghidra_script_dir": "./scripts",
+        "ghidra_export_script": "GhidraExport.java",
         "ghidra_mcp_dir": "./tools/GhidraMCP",
         "sysmon": "C:\\Windows\\Sysmon64.exe",
         "procmon": "./tools/sysinternals/Procmon64.exe",
@@ -272,10 +275,21 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
         "evidence_dir": "./evidence",
         "observation_duration_seconds": 120,
         "require_local_approval": True,
+        "poll_sample_interval_seconds": 0.5,
         "ghidra_timeout_seconds": 300,
+        "floss_timeout_seconds": 120.0,
+        "capa_timeout_seconds": 120.0,
+        "die_timeout_seconds": 60,
+        "volatility_timeout_seconds": 180.0,
+        "enable_attack_mapping": True,
+        "chunk_size_bytes": 65536,
         "min_free_disk_mb": 2048,
         "procdump_enabled": True,
         "winpmem_enabled": False,
+        "include_raw_pml": False,
+        "max_raw_pml_mb": 200,
+        "max_procmon_export_rows": 15000,
+        "canary_fixtures_enabled": False,
         "network_interface": "",
         "tools": dict(default_tools),
     }
@@ -308,15 +322,21 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
     obs_dur = _validate_number(parsed, "observation_duration_seconds", errors, min_val=1.0, required=True)
     req_app = _validate_bool(parsed, "require_local_approval", errors, required=True)
     gh_timeout = _validate_number(parsed, "ghidra_timeout_seconds", errors, min_val=1.0, required=True)
+    die_timeout = _validate_number(parsed, "die_timeout_seconds", errors, min_val=1.0, required=False)
+    attack_en = _validate_bool(parsed, "enable_attack_mapping", errors, required=False)
     min_disk = _validate_int(parsed, "min_free_disk_mb", errors, min_val=1, required=True)
 
-    _validate_number(parsed, "poll_sample_interval_seconds", errors, min_val=0.05, required=False)
-    _validate_number(parsed, "floss_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_number(parsed, "capa_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_number(parsed, "volatility_timeout_seconds", errors, min_val=1.0, required=False)
-    _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
+    poll_intv = _validate_number(parsed, "poll_sample_interval_seconds", errors, min_val=0.05, required=False)
+    floss_to = _validate_number(parsed, "floss_timeout_seconds", errors, min_val=1.0, required=False)
+    capa_to = _validate_number(parsed, "capa_timeout_seconds", errors, min_val=1.0, required=False)
+    vol_to = _validate_number(parsed, "volatility_timeout_seconds", errors, min_val=1.0, required=False)
+    chunk_sz = _validate_int(parsed, "chunk_size_bytes", errors, min_val=1024, required=False)
     pd_en = _validate_bool(parsed, "procdump_enabled", errors, required=False)
     wp_en = _validate_bool(parsed, "winpmem_enabled", errors, required=False)
+    raw_pml_en = _validate_bool(parsed, "include_raw_pml", errors, required=False)
+    max_pml_mb = _validate_int(parsed, "max_raw_pml_mb", errors, min_val=1, required=False)
+    max_pml_rows = _validate_int(parsed, "max_procmon_export_rows", errors, min_val=100, required=False)
+    canary_en = _validate_bool(parsed, "canary_fixtures_enabled", errors, required=False)
     net_if = _validate_str(parsed, "network_interface", errors, allow_empty=True, required=False)
 
     safe_tools = dict(default_tools)
@@ -337,28 +357,33 @@ def load_and_validate_config(config_path: Path) -> tuple[dict[str, Any], list[st
                 safe_tools[tkey] = tval.strip()
 
     safe_cfg = dict(defaults)
-    if lhost:
-        safe_cfg["listen_host"] = lhost
-    if lport is not None:
-        safe_cfg["listen_port"] = lport
-    if ws_dir:
-        safe_cfg["workspace_dir"] = ws_dir
-    if ev_dir:
-        safe_cfg["evidence_dir"] = ev_dir
-    if obs_dur is not None:
-        safe_cfg["observation_duration_seconds"] = obs_dur
-    if req_app is not None:
-        safe_cfg["require_local_approval"] = req_app
-    if gh_timeout is not None:
-        safe_cfg["ghidra_timeout_seconds"] = gh_timeout
-    if min_disk is not None:
-        safe_cfg["min_free_disk_mb"] = min_disk
-    if pd_en is not None:
-        safe_cfg["procdump_enabled"] = pd_en
-    if wp_en is not None:
-        safe_cfg["winpmem_enabled"] = wp_en
-    if net_if is not None:
-        safe_cfg["network_interface"] = net_if
+    updates: dict[str, Any] = {
+        "listen_host": lhost,
+        "listen_port": lport,
+        "workspace_dir": ws_dir,
+        "evidence_dir": ev_dir,
+        "observation_duration_seconds": obs_dur,
+        "require_local_approval": req_app,
+        "poll_sample_interval_seconds": poll_intv,
+        "ghidra_timeout_seconds": gh_timeout,
+        "floss_timeout_seconds": floss_to,
+        "capa_timeout_seconds": capa_to,
+        "die_timeout_seconds": die_timeout,
+        "volatility_timeout_seconds": vol_to,
+        "enable_attack_mapping": attack_en,
+        "chunk_size_bytes": chunk_sz,
+        "min_free_disk_mb": min_disk,
+        "procdump_enabled": pd_en,
+        "winpmem_enabled": wp_en,
+        "include_raw_pml": raw_pml_en,
+        "max_raw_pml_mb": max_pml_mb,
+        "max_procmon_export_rows": max_pml_rows,
+        "canary_fixtures_enabled": canary_en,
+        "network_interface": net_if,
+    }
+    for k, v in updates.items():
+        if v is not None:
+            safe_cfg[k] = v
     safe_cfg["tools"] = safe_tools
 
     return safe_cfg, errors, "valid" if not errors else "validation_error"
@@ -458,16 +483,54 @@ def parse_java_major(raw_text: str) -> int | None:
     return first
 
 
-def get_ghidra_version(headless_bin: Path | None) -> str | None:
+def get_ghidra_props(headless_bin: Path | None) -> tuple[str | None, int | None]:
     if not headless_bin:
-        return None
+        return None, None
     ghidra_root = headless_bin.parent.parent
     props = ghidra_root / "Ghidra" / "application.properties"
+    ver: str | None = None
+    java_min: int | None = None
     if props.is_file():
         for line in props.read_text(encoding="utf-8", errors="replace").splitlines():
             if line.startswith("application.version="):
-                return line.split("=", 1)[1].strip()
-    return None
+                ver = line.split("=", 1)[1].strip()
+            elif line.startswith("application.java.min="):
+                try:
+                    java_min = int(line.split("=", 1)[1].strip().split(".", 1)[0])
+                except ValueError:
+                    pass
+    return ver, java_min
+
+
+def check_ghidra_script_syntax(script_path: Path) -> tuple[bool, str | None]:
+    """Perform static non-executing structure check on .java or .py Ghidra post-script."""
+    if script_path.suffix.lower() != ".java":
+        return check_python_syntax_ast(script_path)
+    try:
+        src = script_path.read_text(encoding="utf-8-sig", errors="replace")
+        # Strip line/block comments and char/string literals before checking brace balance and class header
+        stripped = re.sub(r"//[^\n]*|/\*.*?\*/", "", src, flags=re.DOTALL)
+        stripped = re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', '""', stripped)
+        expected_class = script_path.stem
+        if not re.search(rf"\bclass\s+{re.escape(expected_class)}\s+extends\s+GhidraScript\b", stripped):
+            return False, f"Missing 'class {expected_class} extends GhidraScript' matching script filename."
+        if "public void run()" not in stripped:
+            return False, "Missing 'public void run()' entry method."
+        depth = 0
+        saw_brace = False
+        for ch in stripped:
+            if ch == "{":
+                depth += 1
+                saw_brace = True
+            elif ch == "}":
+                depth -= 1
+                if depth < 0:
+                    return False, "Unbalanced closing brace '}' in Java source."
+        if not saw_brace or depth != 0:
+            return False, "Unbalanced curly braces in Java source."
+        return True, None
+    except OSError as exc:
+        return False, str(exc)
 
 
 def check_python_syntax_ast(script_path: Path) -> tuple[bool, str | None]:
@@ -574,8 +637,10 @@ def main(argv: list[str] | None = None) -> int:
     manual_actions: list[str] = []
     cloned_repos: dict[str, str | None] = {}
 
-    # === 1. Windows OS Detection vs Windows 11 Build/Version Verification ===
+    # === 1. Windows OS Detection vs Supported Windows 10 x64 / Windows 11 Build Verification ===
     is_win = sys.platform.startswith("win")
+    arch_raw = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine()).upper()
+    is_x64_os = arch_raw in ("AMD64", "X86_64", "ARM64")
     win_build_int: int | None = None
     win_ubr: str | None = None
     win_display: str | None = None
@@ -592,6 +657,7 @@ def main(argv: list[str] | None = None) -> int:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") as key:
                 for reg_name, setter in (
                     ("DisplayVersion", "disp"),
+                    ("ReleaseId", "relid"),
                     ("EditionID", "ed"),
                     ("ProductName", "prod"),
                     ("CurrentBuildNumber", "build"),
@@ -599,7 +665,9 @@ def main(argv: list[str] | None = None) -> int:
                 ):
                     try:
                         val, _ = winreg.QueryValueEx(key, reg_name)
-                        if setter == "disp":
+                        if setter == "disp" and str(val).strip():
+                            win_display = str(val)
+                        elif setter == "relid" and not win_display and str(val).strip():
                             win_display = str(val)
                         elif setter == "ed":
                             win_edition = str(val)
@@ -614,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-    os_desc = f"{platform.system()} {platform.release()} (arch={platform.machine()})"
+    os_desc = f"{platform.system()} {platform.release()} (arch={arch_raw})"
     checks.append(
         make_check(
             name="windows_os",
@@ -626,75 +694,84 @@ def main(argv: list[str] | None = None) -> int:
             runtime_verified=is_win,
             feature_verified=is_win,
             diagnostic_message=f"Detected host OS: {os_desc}",
-            recommended_action="" if is_win else "Machine 3 Sandbox must run on Windows 11 VM.",
+            recommended_action="" if is_win else "Machine 3 Sandbox must run on Windows 10 x64 (e.g. REMWin) or Windows 11 x64 VM.",
         )
     )
 
-    win11_verified = bool(is_win and win_build_int is not None and win_build_int >= WIN11_MIN_BUILD)
-    win11_ver_label = (
-        f"build={win_build_int}.{win_ubr or '0'}, display={win_display or 'N/A'}, edition={win_edition or 'N/A'}"
+    win_family = None
+    if is_win and win_build_int is not None:
+        if win_build_int >= WIN11_MIN_BUILD:
+            win_family = "Windows 11"
+        elif win_build_int >= WIN10_MIN_BUILD:
+            win_family = "Windows 10"
+        else:
+            win_family = f"Legacy Windows (build {win_build_int})"
+
+    win_supported = bool(is_win and is_x64_os and win_build_int is not None and win_build_int >= WIN10_MIN_BUILD)
+    win_ver_label = (
+        f"{win_family or 'Windows'} build={win_build_int}.{win_ubr or '0'}, arch={arch_raw}, display={win_display or 'N/A'}, edition={win_edition or 'N/A'}"
         if is_win and win_build_int is not None
         else None
     )
     if not is_win:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_SKIPPED,
                 installed=False,
                 runtime_verified=False,
                 feature_verified=False,
-                diagnostic_message="Skipped Windows 11 version/build verification: host OS is not Windows.",
-                recommended_action="Run setup.ps1 inside a Windows 11 VM.",
+                diagnostic_message="Skipped Windows 10/11 build verification: host OS is not Windows.",
+                recommended_action="Run setup.ps1 inside a Windows 10 x64 (REMWin) or Windows 11 x64 VM.",
             )
         )
-    elif win11_verified:
+    elif win_supported:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_PASS,
-                detected_version=win11_ver_label,
+                detected_version=win_ver_label,
                 installed=True,
                 runtime_verified=True,
                 feature_verified=True,
                 diagnostic_message=(
-                    f"Verified Windows 11 (build {win_build_int} >= {WIN11_MIN_BUILD}, {win_display or 'N/A'}, {win_edition or win_product or 'Windows'})."
+                    f"Verified supported {win_family} x64 environment (build {win_build_int}, {win_display or 'N/A'}, {win_edition or win_product or 'Windows'})."
                 ),
             )
         )
     elif win_build_int is not None:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_FAIL,
-                detected_version=win11_ver_label,
+                detected_version=win_ver_label,
                 installed=True,
                 runtime_verified=True,
                 feature_verified=False,
                 diagnostic_message=(
-                    f"Windows detected (build {win_build_int}), which is below Windows 11 minimum build {WIN11_MIN_BUILD}."
+                    f"Windows detected (build={win_build_int}, arch={arch_raw}), but MalBox requires Windows 10 x64 (build >= {WIN10_MIN_BUILD}) or Windows 11 x64 (build >= {WIN11_MIN_BUILD})."
                 ),
-                recommended_action="Deploy Machine 3 Sandbox on a Windows 11 (build >= 22000) x64 VM.",
+                recommended_action="Deploy Machine 3 Sandbox on a 64-bit Windows 10 (e.g. REMWin) or Windows 11 VM.",
             )
         )
     else:
         checks.append(
             make_check(
-                name="windows_11_version",
+                name="windows_version_compat",
                 category="os",
                 required=True,
                 status=STATUS_FAIL,
                 installed=True,
                 runtime_verified=False,
                 feature_verified=False,
-                diagnostic_message="Windows OS detected, but build number could not be read to verify Windows 11.",
-                recommended_action="Verify Windows version (winver) is Windows 11 build >= 22000.",
+                diagnostic_message="Windows OS detected, but build number could not be read to verify Windows 10/11.",
+                recommended_action="Verify OS version (winver) is 64-bit Windows 10 (build >= 10240) or Windows 11.",
             )
         )
 
@@ -1291,6 +1368,52 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    # Optional Detect It Easy (diec)
+    die_cli = resolve_tool(tools_cfg.get("die"), ["diec.exe", "diec"])
+    if die_cli:
+        dc = run_bounded([str(die_cli), "--version"], timeout=10.0)
+        dc_ver = dc["stdout"].splitlines()[0] if dc["stdout"] else None
+        checks.append(
+            make_check(
+                name="detect_it_easy_optional",
+                category="static",
+                required=False,
+                status=STATUS_PASS if dc["returncode"] == 0 else STATUS_FAIL,
+                detected_version=dc_ver,
+                configured_path=str(tools_cfg.get("die")),
+                resolved_path=str(die_cli),
+                installed=True,
+                runtime_verified=dc["returncode"] == 0,
+                diagnostic_message=(
+                    f"Optional Detect It Easy CLI {dc_ver}"
+                    if dc["returncode"] == 0
+                    else f"Detect It Easy probe failed: {dc['stderr']}"
+                ),
+                unavailable_evidence_if_missing=(
+                    "Optional DIE compiler/packer signatures (static/die.json) unavailable; "
+                    "PE metadata and file signatures remain active."
+                ),
+            )
+        )
+    else:
+        checks.append(
+            make_check(
+                name="detect_it_easy_optional",
+                category="static",
+                required=False,
+                status=STATUS_OPTIONAL,
+                configured_path=str(tools_cfg.get("die")),
+                diagnostic_message=(
+                    "Optional Detect It Easy CLI (diec) not installed "
+                    "(static/hashes.json and static/pe_info.json remain active)."
+                ),
+                unavailable_evidence_if_missing=(
+                    "Optional DIE compiler/packer signatures (static/die.json) unavailable; "
+                    "PE metadata and file signatures remain active."
+                ),
+            )
+        )
+
     # Java runtime + Separated Ghidra Headless checks (installation vs version/JDK compat vs launcher/functional verification)
     java_bin = shutil.which("java")
     java_ver_str = None
@@ -1320,9 +1443,10 @@ def main(argv: list[str] | None = None) -> int:
 
     ghidra_bin = resolve_tool(tools_cfg.get("ghidra_headless"), ["analyzeHeadless.bat", "analyzeHeadless"])
     ghidra_script_dir = resolve_cfg_path(tools_cfg.get("ghidra_script_dir")) or (BASE_DIR / "scripts")
-    ghidra_script = ghidra_script_dir / "ghidra_export.py"
+    ghidra_export_name = str(tools_cfg.get("ghidra_export_script") or "GhidraExport.java").strip()
+    ghidra_script = ghidra_script_dir / ghidra_export_name
     ghidra_script_exists = ghidra_script.is_file()
-    ghidra_script_syntax_ok, ghidra_script_err = check_python_syntax_ast(ghidra_script) if ghidra_script_exists else (False, "missing")
+    ghidra_script_syntax_ok, ghidra_script_err = check_ghidra_script_syntax(ghidra_script) if ghidra_script_exists else (False, "missing")
     ghidra_root_valid = bool(ghidra_bin and (ghidra_bin.parent.parent / "Ghidra").is_dir())
     ghidra_installed = bool(ghidra_bin) and ghidra_root_valid and ghidra_script_exists
 
@@ -1343,11 +1467,12 @@ def main(argv: list[str] | None = None) -> int:
                     "binary_present": True,
                     "ghidra_home_present": True,
                     "export_script_present": True,
-                    "export_script_syntax_valid": True,
+                    "export_script_name": ghidra_export_name,
+                    "export_script_structure_valid": True,
                 },
                 diagnostic_message=(
-                    f"Ghidra headless binary and scripts/ghidra_export.py exist with valid Python syntax "
-                    "(installation check only; execution not yet verified)."
+                    f"Ghidra headless binary and scripts/{ghidra_export_name} exist with valid static structure "
+                    "(installation check only; compilation and export require Ghidra Headless execution on VM)."
                 ),
             )
         )
@@ -1363,8 +1488,8 @@ def main(argv: list[str] | None = None) -> int:
                 installed=True,
                 runtime_verified=False,
                 feature_verified=False,
-                diagnostic_message=f"scripts/ghidra_export.py syntax check failed: {ghidra_script_err}",
-                recommended_action="Restore scripts/ghidra_export.py from repository.",
+                diagnostic_message=f"scripts/{ghidra_export_name} structure/syntax check failed: {ghidra_script_err}",
+                recommended_action=f"Restore scripts/{ghidra_export_name} from repository.",
             )
         )
     else:
@@ -1374,7 +1499,7 @@ def main(argv: list[str] | None = None) -> int:
         elif not ghidra_root_valid:
             missing_parts.append("Ghidra/ layout directory next to support/")
         if not ghidra_script_exists:
-            missing_parts.append("scripts/ghidra_export.py")
+            missing_parts.append(f"scripts/{ghidra_export_name}")
         checks.append(
             make_check(
                 name="ghidra_headless_install",
@@ -1387,12 +1512,12 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_verified=False,
                 feature_verified=False,
                 diagnostic_message=f"Ghidra Headless installation incomplete: missing {', '.join(missing_parts)}.",
-                recommended_action="Extract official Ghidra release to tools\\ghidra\\ (with scripts\\ghidra_export.py present).",
+                recommended_action=f"Extract official Ghidra release to tools\\ghidra\\ (with scripts\\{ghidra_export_name} present).",
             )
         )
 
-    # Stage B: Ghidra version detection & JDK compatibility
-    ghidra_ver = get_ghidra_version(ghidra_bin)
+    # Stage B: Ghidra version detection & JDK compatibility (supports Ghidra 10/11/12 + application.java.min)
+    ghidra_ver, ghidra_prop_java_min = get_ghidra_props(ghidra_bin)
     compat_ok = False
     compat_msg = ""
     if not ghidra_bin:
@@ -1422,12 +1547,16 @@ def main(argv: list[str] | None = None) -> int:
                 compat_msg = f"Unrecognized Ghidra version '{ghidra_ver}'; JDK compatibility unverified."
             else:
                 g_maj, g_min = int(m.group(1)), int(m.group(2))
-                if (g_maj > 11 or (g_maj == 11 and g_min >= 2)) and java_major < 21:
-                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 21+, detected JDK {java_major}."
-                elif g_maj == 11 and java_major < 17:
-                    compat_msg = f"Ghidra {ghidra_ver} requires JDK 17+, detected JDK {java_major}."
-                elif g_maj < 11 and java_major < 17:
-                    compat_msg = f"Ghidra {ghidra_ver} detected with JDK {java_major}; JDK 17+ recommended."
+                req_jdk = ghidra_prop_java_min
+                if req_jdk is None:
+                    if (g_maj > 12) or (g_maj == 12 and g_min >= 2):
+                        req_jdk = 25
+                    elif (g_maj == 12) or (g_maj == 11 and g_min >= 2):
+                        req_jdk = 21
+                    else:
+                        req_jdk = 17
+                if java_major < req_jdk:
+                    compat_msg = f"Ghidra {ghidra_ver} requires JDK {req_jdk}+, detected JDK {java_major}."
                 else:
                     compat_ok = True
 
@@ -1448,7 +1577,7 @@ def main(argv: list[str] | None = None) -> int:
                     if compat_ok
                     else compat_msg
                 ),
-                recommended_action="" if compat_ok else (compat_msg or "Verify Ghidra version and JDK 17/21 installation."),
+                recommended_action="" if compat_ok else (compat_msg or "Verify Ghidra version and compatible JDK installation."),
             )
         )
 
@@ -1522,10 +1651,10 @@ def main(argv: list[str] | None = None) -> int:
                         "functional_export_verified": False,
                     },
                     diagnostic_message=(
-                        "analyzeHeadless -help exited 0 and displayed HeadlessAnalyzer options, but end-to-end binary "
-                        "import, auto-analysis, and scripts/ghidra_export.py export remain UNVERIFIED until VM testing."
+                        f"analyzeHeadless -help exited 0 and displayed HeadlessAnalyzer options, but end-to-end binary "
+                        f"import, auto-analysis, and scripts/{ghidra_export_name} export remain UNVERIFIED until VM testing."
                     ),
-                    recommended_action="Verify full Ghidra Headless export on Windows 11 VM using a harmless test binary.",
+                    recommended_action="Verify full Ghidra Headless export on VM using a harmless test binary.",
                     unavailable_evidence_if_missing="If Ghidra Headless fails at runtime, ghidra/functions.json, disassembly.txt, and decompiled/*.c are unavailable.",
                 )
             )
@@ -1552,9 +1681,9 @@ def main(argv: list[str] | None = None) -> int:
                     },
                     diagnostic_message=(
                         f"analyzeHeadless -help exited {rc} (unsuccessful exit code; normal for Ghidra CLI usage banner, "
-                        "NOT proof of verified execution). Runtime execution and ghidra_export.py export remain UNVERIFIED until VM testing."
+                        f"NOT proof of verified execution). Runtime execution and scripts/{ghidra_export_name} export remain UNVERIFIED until VM testing."
                     ),
-                    recommended_action="Verify full Ghidra Headless export on Windows 11 VM using a harmless test binary.",
+                    recommended_action="Verify full Ghidra Headless export on VM using a harmless test binary.",
                     unavailable_evidence_if_missing="If Ghidra Headless fails at runtime, ghidra/functions.json, disassembly.txt, and decompiled/*.c are unavailable.",
                 )
             )
@@ -2549,7 +2678,9 @@ def main(argv: list[str] | None = None) -> int:
         "config_validation_state": cfg_state,
         "environment": {
             "os": os_desc,
-            "windows_11_verified": win11_verified,
+            "windows_supported": win_supported,
+            "windows_family": win_family,
+            "windows_11_verified": bool(is_win and win_build_int is not None and win_build_int >= WIN11_MIN_BUILD),
             "windows_build": str(win_build_int) if win_build_int is not None else None,
             "windows_ubr": win_ubr,
             "windows_display_version": win_display,

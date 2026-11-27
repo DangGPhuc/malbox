@@ -48,6 +48,7 @@ class MemoryMonitor:
 
         self.ram_samples: list[dict[str, Any]] = []
         self.process_dumps: list[dict[str, Any]] = []
+        self.procdump_note: str | None = None
         self.full_memory_info: dict[str, Any] = {
             "status": "skipped",
             "reason": "Full physical RAM acquisition not executed yet.",
@@ -90,11 +91,11 @@ class MemoryMonitor:
         dumps_dir.mkdir(parents=True, exist_ok=True)
 
         if not bool(self.config.get("procdump_enabled", True)):
-            self.result.limitations.append("Process memory dumping disabled in config.json.")
+            self.result.summary["procdump_disabled_by_config"] = True
             return
 
         if not live_pids:
-            self.result.limitations.append("No live tracked processes remained at dump checkpoint.")
+            self.procdump_note = "No live tracked processes remained at dump checkpoint; RAM telemetry still recorded."
             return
 
         if not self.procdump_bin:
@@ -143,10 +144,9 @@ class MemoryMonitor:
         if not bool(self.config.get("winpmem_enabled", False)):
             self.full_memory_info = {
                 "dump_type": "full_physical_memory_dump",
-                "status": "skipped",
+                "status": "disabled_by_config",
                 "reason": "Optional winpmem_enabled is false in config.json; relying on RAM telemetry and process dumps.",
             }
-            self.result.limitations.append(self.full_memory_info["reason"])
             return
 
         if not sys.platform.startswith("win") or not self.winpmem_bin:
@@ -248,6 +248,7 @@ class MemoryMonitor:
             "peak_tracked_process_rss_bytes": {str(k): v for k, v in peak_proc_rss.items()},
             "ram_usage_samples": self.ram_samples[:1000],
             "process_memory_dumps": self.process_dumps,
+            "procdump_note": self.procdump_note,
             "full_physical_memory_dump": self.full_memory_info,
             "volatility_outputs": self.volatility_outputs,
         }
@@ -257,10 +258,19 @@ class MemoryMonitor:
             "collected": True,
             "ram_sample_count": len(self.ram_samples),
             "process_dump_count": sum(1 for d in self.process_dumps if d.get("status") == "completed"),
+            "procdump_note": self.procdump_note,
             "full_memory_status": self.full_memory_info.get("status"),
             "volatility_output_count": len(self.volatility_outputs),
+            "procdump_enabled": bool(self.config.get("procdump_enabled", True)),
+            "winpmem_enabled": bool(self.config.get("winpmem_enabled", False)),
         }
 
-        if self.result.limitations or self.result.errors:
+        has_dump_failure = any(d.get("status") == "failed" for d in self.process_dumps)
+        if not self.ram_samples:
+            self.result.limitations.append("No RAM telemetry samples were captured.")
+            return self.result.finish(STATUS_PARTIAL)
+        if self.full_memory_info.get("status") in ("failed", "unavailable"):
+            has_dump_failure = True
+        if self.result.errors or has_dump_failure or self.result.limitations:
             return self.result.finish(STATUS_PARTIAL)
         return self.result.finish(STATUS_COMPLETED)

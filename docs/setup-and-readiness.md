@@ -27,8 +27,8 @@ Each MalBox machine includes a one-command setup and readiness verification entr
 | Machine | Default Setup Command | Offline Check-Only Command | Output Report |
 | --- | --- | --- | --- |
 | **Machine 1 (Kali)** | `cd malbox/machine1-client && bash setup.sh` | `bash setup.sh --check-only` | `machine1-client/setup_report.json` |
-| **Machine 2 (Gateway)** | `cd malbox/machine2-gateway && bash setup.sh` | `bash setup.sh --check-only` | `machine2-gateway/setup_report.json` |
-| **Machine 3 (Windows 11)** | `cd malbox\machine3-sandbox; .\setup.ps1` | `.\setup.ps1 -CheckOnly` | `machine3-sandbox/setup_report.json` |
+| **Machine 2 (REMnux)** | `cd malbox/machine2-gateway && bash setup.sh` | `bash setup.sh --check-only` | `machine2-gateway/setup_report.json` |
+| **Machine 3 (REMWin Win10 x64 / Win11 x64)** | `cd malbox\machine3-sandbox; .\setup.ps1` | `.\setup.ps1 -CheckOnly` | `machine3-sandbox/setup_report.json` |
 
 ### Behavior of `--check-only` / `-CheckOnly`
 - Runs strictly offline without `pip install`, `git clone`, `git pull`, or file downloads.
@@ -56,12 +56,12 @@ All three setup wrappers (`setup.sh`, `setup.ps1`) and readiness checkers (`read
 - **Mandatory:** Linux OS, Python `>= 3.10`, `.venv` (`>= 3.10`), `pip`, `requests` (and `Flask` on Machine 2) passing `pip check`, valid `config.json`, writable `evidence`/`tmp`/`retained_evidence` directories, `doctor --help` (Machine 1), `ip_forward=0` (Machine 2), sufficient disk space.
 - **Peer/Network (not counted against `LOCAL_READINESS`):** Reachable peer HTTP `/health` and `/status` endpoints, loopback safety on `listen_host`, and host NIC static IP checks.
 
-### Machine 3 (Windows 11 Sandbox)
+### Machine 3 (Windows 10 x64 REMWin / Windows 11 x64 Sandbox)
 - **Mandatory (`LOCAL_READINESS` becomes `NOT_READY` if missing or failing):**
-  - **OS & Build:** Windows OS (`windows_os`) and verified **Windows 11 build >= 22000** (`windows_11_version`).
+  - **OS & Build:** Windows OS (`windows_os`) and verified **64-bit Windows 10 (build >= 10240, e.g. REMWin)** or **Windows 11 x64 (build >= 22000)** (`windows_version_compat`).
   - **Runtimes:** PowerShell (`5.1` or `7+`), **64-bit Python `>= 3.10`** (`python_runtime` & `.venv`), `pip`, all `requirements.txt` packages (`Flask`, `requests`, `psutil`, `pefile`, `yara-python`, `python-evtx`, `mcp`) passing `pip check`.
   - **Config & State:** Strictly valid `config.json`, writable `workspace`/`evidence` directories, free disk `>= min_free_disk_mb`, no `.dirty_state` marker (`sandbox_snapshot_state`).
-  - **Static Tools:** `hashlib`, `pefile`, `floss.exe`, `capa.exe`, `capa-rules`, `yara-python` + compiled `.yar` rules, `Java` (`>= 17` / `21`), `Ghidra Headless` installation (`analyzeHeadless` + `scripts/ghidra_export.py`), and compatible Ghidra/JDK version metadata (`ghidra_version_compat`).
+  - **Static Tools:** `hashlib`, `pefile`, `floss.exe`, `capa.exe`, `capa-rules`, `yara-python` + compiled `.yar` rules, `Java` (matching Ghidra's `application.java.min`, e.g. `17`/`21`/`25`), `Ghidra Headless` installation (`analyzeHeadless` + `scripts/GhidraExport.java`), and compatible Ghidra/JDK version metadata (`ghidra_version_compat`).
   - **Dynamic & MCP:** `Sysmon64.exe` + running `Sysmon64` Windows service + readable `Microsoft-Windows-Sysmon/Operational`, `System`/`Application` Event Log readability (`wevtutil`), `psutil`, Wireshark `dumpcap.exe` + `tshark.exe` + running `Npcap` driver, and `MalBox MCP` (`mcp/server.py` + `mcp/config.json` + live `stdio` handshake registering all 16 read-only tools).
 
 - **Optional or Setup-Unverified Checks (`LOCAL_READINESS` becomes `LIMITED` when missing, disabled, unprivileged, or unverified offline):**
@@ -69,6 +69,7 @@ All three setup wrappers (`setup.sh`, `setup.ps1`) and readiness checkers (`read
 | Component | Mandatory? | Evidence / Feature Unavailable When Missing, Disabled, or Unverified | Fallback Still Collected |
 | --- | --- | --- | --- |
 | `yara_cli_optional` (`yara64.exe`) | Optional | External YARA CLI fallback only | `static/yara.json` via `yara-python` |
+| `detect_it_easy_optional` (`diec.exe`) | Optional | Compiler, linker, and packer signature indicators (`static/die.json`) | `static/hashes.json` (`file_identification`), `static/pe_info.json`, YARA, and FLOSS continue normally |
 | `procmon_optional` (`Procmon64.exe`) | Optional | `raw/procmon.pml` raw Sysinternals capture and Procmon-sourced rows in `dynamic/filesystem/changes.json` and `dynamic/registry/changes.json` (also skipped when `sandbox.py` runs unprivileged without kernel driver rights) | Sysmon EID `11`, `12`, `13`, `14`, `23` filesystem and registry events |
 | `procdump_optional` (`procdump64.exe`) | Optional | Full user-mode process minidumps (`dynamic/memory/dumps/proc_<pid>.dmp`); processes that exit early or are protected also cannot be dumped | `psutil` system/process RAM usage telemetry (`dynamic/memory/memory_usage.json`) |
 | `winpmem_optional` (`winpmem.exe`) | Optional (`false` by default) | Full physical RAM image (`dynamic/memory/dumps/physical_memory.raw`); Windows 11 kernel driver compatibility is never verified by executable presence alone | `psutil` telemetry + optional ProcDump process dumps |
@@ -103,5 +104,5 @@ MalBox never equates file existence, version banners, generic CLI output, unsucc
 - **`installed_only`**: Files/packages exist on disk (e.g. `analyzeHeadless.bat`, `WinPmem`, `Procmon64`, cloned `GhidraMCP`).
 - **`version_detected`**: Version metadata and compatibility checked (e.g. `ghidra_version_compat`: `Ghidra 11.x` + `JDK 21`), without running functional pipelines.
 - **`runtime_verified`**: Non-destructive command exited `0` or service/handshake succeeded (`doctor --help`, `java -version`, `sc query Sysmon64`, `dumpcap -D`, MalBox MCP `stdio` `initialize` + `tools/list`). Note: `analyzeHeadless -help` typically exits `1` for CLI usage banners — an unsuccessful exit code is **never** marked `runtime_verified` or `PASS`.
-- **`feature_verified`**: Real functional probe succeeded on safe fixture data or local OS facilities (`windows_11_version` build check `>= 22000`, `pefile.PE(data=...)`, `yara.compile(...)` on harmless `MZ` bytes, `wevtutil` read probe, directory read/write test).
-- **`not_verified`**: Functionality unverified during offline checks (e.g. full Ghidra `ghidra_export.py` execution, WinPmem Windows 11 driver loading, Procmon kernel driver capture, interactive `GhidraMCP` GUI bridge even if port `8080` answers HTTP `200`).
+- **`feature_verified`**: Real functional probe succeeded on safe fixture data or local OS facilities (`windows_version_compat` build check `>= 10240` for Win10 x64 / `>= 22000` for Win11 x64, `pefile.PE(data=...)`, `yara.compile(...)` on harmless `MZ` bytes, `wevtutil` read probe, directory read/write test).
+- **`not_verified`**: Functionality unverified during offline checks (e.g. full Ghidra `scripts/GhidraExport.java` Java compilation and headless execution, WinPmem Windows kernel driver loading, Procmon kernel driver capture, interactive `GhidraMCP` GUI bridge even if port `8080` answers HTTP `200`).

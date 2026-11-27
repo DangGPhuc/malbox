@@ -49,3 +49,20 @@ doctor /path/to/file.exe
 ```
 
 Evidence is stored under `machine1-client/evidence/<job_id>/` without overwriting previous runs.
+
+## Post-Collection LLM Analysis & Reporting
+
+After a job finishes and verified evidence is saved under `machine1-client/evidence/<job_id>/`, you can generate an evidence-backed DFIR report using the prompt template included at:
+
+- [prompts/evidence-analysis-report.md](prompts/evidence-analysis-report.md)
+
+Recommended workflow on Machine 1:
+
+1. Copy `evidence/<job_id>/` to a separate, read-only workspace so the collected archive stays untouched:
+   ```bash
+   mkdir -p ~/malbox_reviews
+   cp -a ~/malbox/machine1-client/evidence/<JOB_ID> ~/malbox_reviews/<JOB_ID>
+   chmod -R a-w ~/malbox_reviews/<JOB_ID>
+   ```
+2. Supply [prompts/evidence-analysis-report.md](prompts/evidence-analysis-report.md) along with the authorized read-only copy `~/malbox_reviews/<JOB_ID>` to your approved local or authorized LLM.
+3. Save the generated Markdown output outside the evidence folder (for example `~/malbox_reviews/<JOB_ID>_analysis_report.md`) — never overwrite MalBox's original `report.md`.

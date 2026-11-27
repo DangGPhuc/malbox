@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,9 +27,18 @@ from collectors.common import (
 
 def _safe_int(val: Any) -> int | None:
     try:
+        if isinstance(val, bool):
+            return None
         return int(val)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_cfg_int(config: dict[str, Any], key: str, default: int, min_val: int) -> int:
+    raw = config.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return default
+    return max(min_val, raw)
 
 
 class ProcmonSession:
@@ -88,6 +98,7 @@ class ProcmonSession:
         """Read an already-exported Procmon CSV filtered to the current tracked_pids set."""
         if not self.csv_path or not self.csv_path.is_file():
             return []
+        row_cap = _safe_cfg_int(self.config, "max_procmon_export_rows", 15000, min_val=100)
         filtered_rows: list[dict[str, str]] = []
         try:
             with self.csv_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
@@ -96,7 +107,10 @@ class ProcmonSession:
                     pid = _safe_int(row.get("PID"))
                     if pid in tracked_pids:
                         filtered_rows.append(dict(row))
-                        if len(filtered_rows) >= 15000:
+                        if len(filtered_rows) >= row_cap:
+                            self.notes.append(
+                                f"Procmon CSV row export reached configured limit ({row_cap} rows)."
+                            )
                             break
         except OSError as exc:
             self.notes.append(f"Failed reading Procmon CSV export: {exc}")
@@ -122,6 +136,17 @@ class ProcmonSession:
         if not self.pml_path or not self.pml_path.is_file():
             self.notes.append("Procmon backing file raw/procmon.pml was not created.")
             return []
+
+        pml_size_mb = self.pml_path.stat().st_size / (1024 * 1024)
+        try:
+            free_mb = shutil.disk_usage(workspace_dir).free / (1024 * 1024)
+            if free_mb < max(128.0, pml_size_mb * 1.25):
+                self.notes.append(
+                    f"Skipped Procmon CSV conversion due to low free disk space ({int(free_mb)} MB free vs {int(pml_size_mb)} MB PML)."
+                )
+                return []
+        except OSError:
+            pass
 
         self.csv_path = workspace_dir / "procmon_export.csv"
         conv_res = run_subprocess_safe(
@@ -154,6 +179,83 @@ class FilesystemMonitor:
         self.base_dir = base_dir
         self.logger = logger
         self.result = CollectorResult(name="filesystem_monitor")
+        self.canary_baseline: list[dict[str, Any]] = []
+        self.canary_dir: Path | None = None
+
+    def deploy_canary_fixtures(self, run_dir: Path) -> None:
+        """Optionally create strictly synthetic non-sensitive canary files to verify FS monitoring."""
+        if not bool(self.config.get("canary_fixtures_enabled", False)):
+            return
+        self.canary_dir = run_dir / "canary_fixtures"
+        self.canary_dir.mkdir(parents=True, exist_ok=True)
+        fixtures = {
+            "malbox_canary_note.txt": "MALBOX_SYNTHETIC_CANARY_FIXTURE_NOT_SENSITIVE\nfixture_id=canary_note\n",
+            "malbox_canary_matrix.csv": "id,label,status\n1,synthetic_fixture,placeholder\n",
+            "malbox_canary_sample.log": "[CANARY] Harmless synthetic integrity verification file\n",
+        }
+        self.canary_baseline = []
+        for fname, content in fixtures.items():
+            fpath = self.canary_dir / fname
+            fpath.write_text(content, encoding="utf-8")
+            meta = compute_file_hashes(fpath)
+            meta["path"] = str(fpath)
+            self.canary_baseline.append(meta)
+
+    def _verify_canary_fixtures(self, fs_dir: Path) -> dict[str, Any] | None:
+        """Compare synthetic canary files against baseline and write canary_integrity.json."""
+        if not self.canary_baseline or self.canary_dir is None:
+            return None
+        results: list[dict[str, Any]] = []
+        baseline_names = set()
+        modified = 0
+        deleted = 0
+        for base in self.canary_baseline:
+            fpath = Path(base["path"])
+            baseline_names.add(fpath.name)
+            if not fpath.is_file():
+                deleted += 1
+                results.append(
+                    {
+                        "filename": fpath.name,
+                        "path": str(fpath),
+                        "before_sha256": base["sha256"],
+                        "after_sha256": None,
+                        "status": "deleted",
+                    }
+                )
+            else:
+                after = compute_file_hashes(fpath)
+                changed = after["sha256"] != base["sha256"]
+                if changed:
+                    modified += 1
+                results.append(
+                    {
+                        "filename": fpath.name,
+                        "path": str(fpath),
+                        "before_sha256": base["sha256"],
+                        "after_sha256": after["sha256"],
+                        "status": "modified" if changed else "unchanged",
+                    }
+                )
+        extra_files: list[str] = []
+        if self.canary_dir.is_dir():
+            for item in sorted(self.canary_dir.iterdir()):
+                if item.is_file() and item.name not in baseline_names:
+                    extra_files.append(item.name)
+
+        report = {
+            "enabled": True,
+            "synthetic_only": True,
+            "canary_dir": str(self.canary_dir),
+            "total_canaries": len(results),
+            "modified_count": modified,
+            "deleted_count": deleted,
+            "new_files_in_canary_dir": extra_files,
+            "entries": results,
+        }
+        write_json(fs_dir / "canary_integrity.json", report)
+        self.result.artifacts.append("dynamic/filesystem/canary_integrity.json")
+        return report
 
     def finalize(
         self,
@@ -271,6 +373,31 @@ class FilesystemMonitor:
             except OSError:
                 continue
 
+        include_raw_pml = bool(self.config.get("include_raw_pml", False))
+        max_raw_pml_mb = _safe_cfg_int(self.config, "max_raw_pml_mb", 200, min_val=1)
+        raw_pml_generated = bool(procmon_session.pml_path and procmon_session.pml_path.is_file())
+        raw_pml_size_bytes = procmon_session.pml_path.stat().st_size if raw_pml_generated and procmon_session.pml_path else 0
+        raw_pml_archived = False
+        raw_pml_omitted_reason = ""
+
+        if raw_pml_generated:
+            self.result.tool_versions["procmon"] = str(procmon_session.procmon_bin)
+            if not include_raw_pml:
+                raw_pml_omitted_reason = (
+                    "raw/procmon.pml omitted from evidence archive by configuration (include_raw_pml=false); "
+                    "filtered filesystem, registry, and process evidence preserved."
+                )
+            elif raw_pml_size_bytes > max_raw_pml_mb * 1024 * 1024:
+                raw_pml_omitted_reason = (
+                    f"raw/procmon.pml ({raw_pml_size_bytes // (1024 * 1024)} MB) exceeded max_raw_pml_mb "
+                    f"limit ({max_raw_pml_mb} MB) and was omitted from the evidence archive."
+                )
+            else:
+                raw_pml_archived = True
+                self.result.artifacts.append("raw/procmon.pml")
+
+        canary_report = self._verify_canary_fixtures(fs_dir)
+
         changes.sort(key=lambda item: str(item.get("timestamp") or ""))
         write_json(
             fs_dir / "changes.json",
@@ -279,13 +406,30 @@ class FilesystemMonitor:
                 "change_count": len(changes),
                 "dropped_artifact_metadata_count": len(dropped_artifacts),
                 "dropped_artifact_metadata": dropped_artifacts,
+                "canary_integrity_enabled": bool(canary_report),
+                "canary_integrity_summary": (
+                    {
+                        "total_canaries": canary_report["total_canaries"],
+                        "modified_count": canary_report["modified_count"],
+                        "deleted_count": canary_report["deleted_count"],
+                    }
+                    if canary_report
+                    else None
+                ),
+                "raw_pml_policy": {
+                    "include_raw_pml": include_raw_pml,
+                    "max_raw_pml_mb": max_raw_pml_mb,
+                    "raw_pml_generated": raw_pml_generated,
+                    "raw_pml_size_bytes": raw_pml_size_bytes,
+                    "raw_pml_archived": raw_pml_archived,
+                    "omitted_reason": raw_pml_omitted_reason or None,
+                },
                 "changes": changes[:5000],
             },
         )
         self.result.artifacts.append("dynamic/filesystem/changes.json")
-        if procmon_session.pml_path and procmon_session.pml_path.is_file():
-            self.result.artifacts.append("raw/procmon.pml")
-            self.result.tool_versions["procmon"] = str(procmon_session.procmon_bin)
+        if raw_pml_omitted_reason:
+            self.result.limitations.append(raw_pml_omitted_reason)
 
         self.result.limitations.extend(procmon_session.notes)
         self.result.summary = {
@@ -294,6 +438,8 @@ class FilesystemMonitor:
             "dropped_artifact_count": len(dropped_artifacts),
             "sysmon_available": sysmon_available,
             "procmon_available": procmon_session.exported_ok,
+            "raw_pml_archived": raw_pml_archived,
+            "raw_pml_size_bytes": raw_pml_size_bytes,
         }
 
         if not sysmon_available and not procmon_session.exported_ok:

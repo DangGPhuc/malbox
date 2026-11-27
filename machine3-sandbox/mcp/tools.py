@@ -93,6 +93,7 @@ class EvidenceStore:
             "floss": self._read_json(static_dir / "floss.json"),
             "capa": self._read_json(static_dir / "capa.json"),
             "yara": self._read_json(static_dir / "yara.json"),
+            "die": self._read_json(static_dir / "die.json"),
             "strings_preview": strings_preview,
         }
 
@@ -178,9 +179,32 @@ class EvidenceStore:
 
         result: dict[str, Any] = {
             "job_id": job_id,
+            "export_script": funcs_doc.get("export_script") if isinstance(funcs_doc, dict) else None,
             "program_name": funcs_doc.get("program_name") if isinstance(funcs_doc, dict) else None,
             "entry_points": funcs_doc.get("entry_points", []) if isinstance(funcs_doc, dict) else [],
-            "function_count": len(funcs_doc.get("functions", [])) if isinstance(funcs_doc, dict) else 0,
+            "function_count": (
+                funcs_doc.get("total_function_count", len(funcs_doc.get("functions", [])))
+                if isinstance(funcs_doc, dict)
+                else 0
+            ),
+            "total_function_count": (
+                funcs_doc.get("total_function_count", len(funcs_doc.get("functions", [])))
+                if isinstance(funcs_doc, dict)
+                else 0
+            ),
+            "functions_truncated": bool(funcs_doc.get("functions_truncated", False)) if isinstance(funcs_doc, dict) else False,
+            "total_import_count": funcs_doc.get("total_import_count") if isinstance(funcs_doc, dict) else None,
+            "imports_truncated": bool(funcs_doc.get("imports_truncated", False)) if isinstance(funcs_doc, dict) else False,
+            "total_export_count": funcs_doc.get("total_export_count") if isinstance(funcs_doc, dict) else None,
+            "exports_truncated": bool(funcs_doc.get("exports_truncated", False)) if isinstance(funcs_doc, dict) else False,
+            "total_string_count": funcs_doc.get("total_string_count") if isinstance(funcs_doc, dict) else None,
+            "strings_truncated": bool(funcs_doc.get("strings_truncated", False)) if isinstance(funcs_doc, dict) else False,
+            "disassembled_function_count": funcs_doc.get("disassembled_function_count") if isinstance(funcs_doc, dict) else None,
+            "disassembly_truncated": bool(funcs_doc.get("disassembly_truncated", False)) if isinstance(funcs_doc, dict) else False,
+            "disassembly_available": (ghidra_dir / "disassembly.txt").is_file(),
+            "decompiled_function_count": funcs_doc.get("decompiled_function_count") if isinstance(funcs_doc, dict) else None,
+            "decompiled_truncated": bool(funcs_doc.get("decompiled_truncated", False)) if isinstance(funcs_doc, dict) else False,
+            "export_caps": funcs_doc.get("export_caps") if isinstance(funcs_doc, dict) else None,
             "functions": selected_functions[:100],
             "imports": (funcs_doc.get("imports", []) if isinstance(funcs_doc, dict) else [])[:150],
             "exports": (funcs_doc.get("exports", []) if isinstance(funcs_doc, dict) else [])[:150],
@@ -230,5 +254,6 @@ class EvidenceStore:
         return {
             "job_id": job_id,
             "summary": self._read_json(job_dir / "summary.json"),
+            "attack_mapping": self._read_json(job_dir / "attack_mapping.json"),
             "report_markdown": report_md,
         }

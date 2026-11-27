@@ -28,6 +28,8 @@ bash setup.sh --check-only
 
 ```bash
 cd machine2-gateway
+./run_gateway.sh
+# or:
 source .venv/bin/activate
 python gateway.py
 ```

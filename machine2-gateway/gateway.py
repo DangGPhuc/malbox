@@ -17,6 +17,9 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
+import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +27,10 @@ import requests
 from flask import Flask, Response, jsonify, request
 
 BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from inetsim_diagnostics import collect_session_inetsim_evidence  # noqa: E402
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 
 
@@ -40,12 +47,63 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     return logging.getLogger("malbox.gateway")
 
 
+def _cfg_bool(config: dict[str, Any], key: str, default: bool) -> bool:
+    val = config.get(key, default)
+    if isinstance(val, bool):
+        return val
+    raise ValueError(f"Gateway config '{key}' must be a boolean (got {type(val).__name__}).")
+
+
+def _cfg_int(
+    config: dict[str, Any],
+    key: str,
+    default: int,
+    min_val: int = 1,
+    max_val: int | None = None,
+) -> int:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(f"Gateway config '{key}' must be an integer (got {type(val).__name__}).")
+    if val < min_val or (max_val is not None and val > max_val):
+        raise ValueError(f"Gateway config '{key}' out of range: {val}.")
+    return val
+
+
+def _cfg_float(config: dict[str, Any], key: str, default: float, min_val: float = 0.1) -> float:
+    val = config.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"Gateway config '{key}' must be a finite number (got {type(val).__name__}).")
+    fval = float(val)
+    if fval != fval or fval in (float("inf"), float("-inf")) or fval < min_val:
+        raise ValueError(f"Gateway config '{key}' must be finite and >= {min_val}.")
+    return fval
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load Machine 2 Gateway configuration from JSON (UTF-8 with/without BOM)."""
+    """Load and validate Machine 2 Gateway configuration from JSON (UTF-8 with/without BOM)."""
     if not config_path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     with config_path.open("r", encoding="utf-8-sig") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"Gateway config root must be a JSON object (got {type(data).__name__}).")
+    _cfg_int(data, "listen_port", 8000, min_val=1, max_val=65535)
+    _cfg_int(data, "sandbox_port", 8001, min_val=1, max_val=65535)
+    _cfg_bool(data, "retain_evidence_archives", True)
+    _cfg_float(data, "connect_timeout_seconds", 5.0, min_val=0.1)
+    _cfg_float(data, "request_timeout_seconds", 30.0, min_val=0.1)
+    _cfg_float(data, "poll_interval_seconds", 3.0, min_val=0.1)
+    _cfg_float(data, "analysis_timeout_seconds", 1800.0, min_val=1.0)
+    _cfg_int(data, "chunk_size_bytes", 65536, min_val=1024)
+    _cfg_float(data, "max_sample_size_mb", 200.0, min_val=1.0)
+    _cfg_int(data, "max_evidence_archive_mb", 512, min_val=1)
+    _cfg_int(data, "max_extracted_size_mb", 1024, min_val=1)
+    _cfg_int(data, "max_single_file_mb", 256, min_val=1)
+    _cfg_int(data, "max_archive_entries", 5000, min_val=10)
+    _cfg_bool(data, "inetsim_diagnostics_enabled", False)
+    _cfg_int(data, "max_inetsim_log_mb", 5, min_val=1)
+    _cfg_int(data, "max_inetsim_events", 1000, min_val=10)
+    return data
 
 
 def resolve_dir(raw_path: str, base_dir: Path) -> Path:
@@ -82,6 +140,160 @@ def safe_unlink(path: Path | None) -> None:
         pass
 
 
+def _is_valid_sha256_hex(val: Any) -> bool:
+    return isinstance(val, str) and len(val) == 64 and all(ch in "0123456789abcdefABCDEF" for ch in val)
+
+
+def _is_valid_manifest_relpath(raw_path: Any) -> bool:
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or "\x00" in raw_path
+        or "\\" in raw_path
+        or raw_path.startswith("/")
+        or raw_path.endswith("/")
+    ):
+        return False
+    parts = raw_path.split("/")
+    if any(part in ("", ".", "..") or ":" in part for part in parts):
+        return False
+    return raw_path != "manifest.json"
+
+
+def verify_evidence_zip_manifest(
+    zf: zipfile.ZipFile,
+    max_single_file_bytes: int,
+    max_total_bytes: int,
+) -> None:
+    """Validate manifest.json presence, schema, bidirectional paths, sizes, and SHA-256 digests."""
+    try:
+        m_info = zf.getinfo("manifest.json")
+    except KeyError as exc:
+        raise ValueError("Evidence archive lacks manifest.json.") from exc
+    if m_info.is_dir():
+        raise ValueError("Evidence archive manifest.json cannot be a directory.")
+
+    manifest_cap = min(max_single_file_bytes, 32 * 1024 * 1024)
+    if m_info.file_size < 0 or m_info.file_size > manifest_cap:
+        raise ValueError("Archive manifest.json exceeds bounded inspection size.")
+
+    raw = bytearray()
+    with zf.open(m_info, "r") as src:
+        while True:
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > manifest_cap:
+                raise ValueError("Decompressed manifest.json exceeds bounded inspection size.")
+    if len(raw) != m_info.file_size:
+        raise ValueError("Archive manifest.json decompressed length mismatch.")
+
+    try:
+        manifest = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(f"Malformed manifest.json in evidence archive: {exc}") from exc
+
+    if not isinstance(manifest, dict):
+        raise ValueError("Malformed manifest.json: root is not a JSON object.")
+    inventory = manifest.get("evidence_file_inventory")
+    if not isinstance(inventory, list) or len(inventory) == 0:
+        raise ValueError("Missing, invalid, or empty manifest evidence_file_inventory.")
+
+    declared_map: dict[str, tuple[int, str]] = {}
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid non-object entry in manifest evidence_file_inventory.")
+        rel = entry.get("path")
+        if not _is_valid_manifest_relpath(rel):
+            raise ValueError(f"Invalid manifest inventory path: {rel!r}")
+        if rel in declared_map:
+            raise ValueError(f"Duplicate manifest inventory entry: {rel}")
+        expected_size = entry.get("size_bytes")
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+            raise ValueError(f"Invalid size_bytes in manifest for {rel}: {expected_size!r}")
+        expected_sha = entry.get("sha256")
+        if not _is_valid_sha256_hex(expected_sha):
+            raise ValueError(f"Missing or invalid sha256 digest in manifest for {rel}")
+        declared_map[rel] = (expected_size, expected_sha.lower())
+
+    zip_members = {info.filename: info for info in zf.infolist() if not info.is_dir()}
+    actual_paths = {name for name in zip_members if name != "manifest.json"}
+    missing = sorted(set(declared_map) - actual_paths)
+    undeclared = sorted(actual_paths - set(declared_map))
+    if missing:
+        raise ValueError(f"Manifest entry missing from archive ({missing[0]}).")
+    if undeclared:
+        raise ValueError(f"Undeclared file in archive ({undeclared[0]}).")
+
+    total_streamed = len(raw)
+    if total_streamed > max_total_bytes:
+        raise ValueError("Total streamed archive verification bytes exceeded limit.")
+
+    for rel, (expected_size, expected_sha) in declared_map.items():
+        member = zip_members[rel]
+        if member.file_size != expected_size:
+            raise ValueError(f"Manifest size mismatch for archive member '{rel}'.")
+        entry_digest = hashlib.sha256()
+        entry_bytes = 0
+        with zf.open(member, "r") as src:
+            while True:
+                chunk = src.read(65536)
+                if not chunk:
+                    break
+                entry_bytes += len(chunk)
+                total_streamed += len(chunk)
+                if entry_bytes > max_single_file_bytes:
+                    raise ValueError(f"Decompressed archive entry '{rel}' exceeds single-file cap.")
+                if total_streamed > max_total_bytes:
+                    raise ValueError("Total decompressed archive verification size exceeded safety limit.")
+                entry_digest.update(chunk)
+        if entry_bytes != expected_size:
+            raise ValueError(f"Streamed size mismatch for archive member '{rel}'.")
+        if entry_digest.hexdigest().lower() != expected_sha:
+            raise ValueError(f"Manifest SHA-256 mismatch for archive member '{rel}'.")
+
+
+def validate_evidence_zip(
+    zf: zipfile.ZipFile,
+    max_entries: int,
+    max_single_file_bytes: int,
+    max_total_bytes: int,
+) -> None:
+    """Reject unsafe archive metadata before CRC checks or retention."""
+    infos = zf.infolist()
+    if len(infos) > max_entries:
+        raise ValueError(f"Archive entry count ({len(infos)}) exceeds safety limit ({max_entries}).")
+    seen: set[str] = set()
+    total_bytes = 0
+    for member in infos:
+        name = member.filename
+        if "\x00" in name:
+            raise ValueError(f"Archive entry contains null byte: {name!r}")
+        parts = name.rstrip("/").split("/")
+        if (
+            not name
+            or "\\" in name
+            or name.startswith("/")
+            or any(part in ("", ".", "..") or ":" in part for part in parts)
+        ):
+            raise ValueError(f"Unsafe archive entry path detected: {name}")
+        normalized = "/".join(parts)
+        if normalized in seen:
+            raise ValueError(f"Duplicate archive entry: {name}")
+        seen.add(normalized)
+        mode = (member.external_attr >> 16) & 0o170000
+        if mode not in (0, 0o040000, 0o100000):
+            raise ValueError(f"Unsupported archive member type: {name}")
+        if member.flag_bits & 1:
+            raise ValueError(f"Encrypted evidence member is unsupported: {name}")
+        if member.file_size < 0 or member.file_size > max_single_file_bytes:
+            raise ValueError(f"Archive entry {name} exceeds max single file size limit.")
+        total_bytes += member.file_size
+        if total_bytes > max_total_bytes:
+            raise ValueError("Total declared archive size exceeds safety expansion limit.")
+
+
 class GatewayState:
     """Thread-safe single-job state holder for the Gateway relay."""
 
@@ -111,27 +323,43 @@ class GatewayState:
 
     @property
     def connect_timeout(self) -> float:
-        return float(self.config.get("connect_timeout_seconds", 5))
+        return max(0.1, float(self.config.get("connect_timeout_seconds", 5)))
 
     @property
     def request_timeout(self) -> float:
-        return float(self.config.get("request_timeout_seconds", 30))
+        return max(0.1, float(self.config.get("request_timeout_seconds", 30)))
 
     @property
     def poll_interval(self) -> float:
-        return float(self.config.get("poll_interval_seconds", 3))
+        return max(0.1, float(self.config.get("poll_interval_seconds", 3)))
 
     @property
     def analysis_timeout(self) -> float:
-        return float(self.config.get("analysis_timeout_seconds", 1800))
+        return max(1.0, float(self.config.get("analysis_timeout_seconds", 1800)))
 
     @property
     def chunk_size(self) -> int:
-        return int(self.config.get("chunk_size_bytes", 65536))
+        return max(1024, int(self.config.get("chunk_size_bytes", 65536)))
 
     @property
     def max_sample_bytes(self) -> int:
-        return int(self.config.get("max_sample_size_mb", 200)) * 1024 * 1024
+        return max(1, int(float(self.config.get("max_sample_size_mb", 200)) * 1024 * 1024))
+
+    @property
+    def max_archive_bytes(self) -> int:
+        return max(1, int(self.config.get("max_evidence_archive_mb", 512))) * 1024 * 1024
+
+    @property
+    def max_extracted_bytes(self) -> int:
+        return max(1, int(self.config.get("max_extracted_size_mb", 1024))) * 1024 * 1024
+
+    @property
+    def max_single_file_bytes(self) -> int:
+        return max(1, int(self.config.get("max_single_file_mb", 256))) * 1024 * 1024
+
+    @property
+    def max_archive_entries(self) -> int:
+        return max(10, int(self.config.get("max_archive_entries", 5000)))
 
 
 def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger) -> Flask:
@@ -140,6 +368,12 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
     archive_dir = resolve_dir(str(config.get("evidence_archive_dir", "./retained_evidence")), config_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        for d in (temp_dir, archive_dir):
+            try:
+                os.chmod(d, 0o750)
+            except OSError:
+                pass
 
     state = GatewayState(config=config, temp_dir=temp_dir, archive_dir=archive_dir, logger=logger)
     app = Flask(__name__)
@@ -173,6 +407,13 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
         consecutive_errors = 0
         max_consecutive_errors = 5
 
+        def _fail_job(err_msg: str, err_code: str) -> None:
+            with state.lock:
+                if state.active_job and state.active_job.get("job_id") == job_id:
+                    state.active_job["status"] = "FAILED"
+                    state.active_job["error"] = err_msg
+                    state.active_job["error_code"] = err_code
+
         while time.monotonic() < deadline:
             try:
                 resp = requests.get(
@@ -180,6 +421,20 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     timeout=(state.connect_timeout, state.request_timeout),
                 )
                 consecutive_errors = 0
+            except requests.Timeout as exc:
+                consecutive_errors += 1
+                logger.warning(
+                    "[WARN] Sandbox status poll timeout (%d/%d): %s",
+                    consecutive_errors,
+                    max_consecutive_errors,
+                    exc,
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    _fail_job("Sandbox connection timed out repeatedly during analysis.", "connection_timeout")
+                    logger.error("[ERROR] Sandbox became unreachable during job %s.", job_id)
+                    return
+                time.sleep(state.poll_interval)
+                continue
             except requests.RequestException as exc:
                 consecutive_errors += 1
                 logger.warning(
@@ -189,26 +444,37 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     exc,
                 )
                 if consecutive_errors >= max_consecutive_errors:
-                    with state.lock:
-                        if state.active_job and state.active_job.get("job_id") == job_id:
-                            state.active_job["status"] = "FAILED"
-                            state.active_job["error"] = "Sandbox unavailable during analysis."
+                    _fail_job("Sandbox service unavailable during analysis.", "service_unavailable")
                     logger.error("[ERROR] Sandbox became unreachable during job %s.", job_id)
                     return
                 time.sleep(state.poll_interval)
                 continue
 
+            if resp.status_code == 404:
+                _fail_job("Sandbox job interrupted or no longer present (HTTP 404).", "interrupted_job")
+                logger.error("[ERROR] Sandbox job interrupted or unknown (HTTP 404).")
+                return
+
             if resp.status_code != 200:
-                with state.lock:
-                    if state.active_job and state.active_job.get("job_id") == job_id:
-                        state.active_job["status"] = "FAILED"
-                        state.active_job["error"] = f"Sandbox returned HTTP {resp.status_code}"
+                _fail_job(f"Sandbox returned unexpected HTTP {resp.status_code}", "unexpected_http_response")
                 logger.error("[ERROR] Sandbox job query error (HTTP %s).", resp.status_code)
                 return
 
             try:
                 job_info = resp.json()
+                if not isinstance(job_info, dict):
+                    raise ValueError("JSON root is not an object")
             except ValueError:
+                consecutive_errors += 1
+                logger.warning(
+                    "[WARN] Sandbox returned non-JSON status payload (%d/%d).",
+                    consecutive_errors,
+                    max_consecutive_errors,
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    _fail_job("Sandbox returned repeated invalid HTTP status responses.", "unexpected_http_response")
+                    logger.error("[ERROR] Sandbox returned invalid payloads repeatedly on job %s.", job_id)
+                    return
                 time.sleep(state.poll_interval)
                 continue
 
@@ -218,23 +484,35 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     state.active_job["job_status"] = job_info.get("job_status", "")
 
             if job_info.get("evidence_ready"):
-                zip_path = state.archive_dir / f"evidence_{job_id}.zip"
-                tmp_download_path = state.temp_dir / f".dl_evidence_{job_id}.zip"
+                safe_id = sanitize_job_id(job_id)
+                zip_path = state.archive_dir / f"evidence_{safe_id}.zip"
+                tmp_download_path = state.temp_dir / f".dl_evidence_{safe_id}.zip"
                 try:
                     with requests.get(
-                        f"{state.sandbox_base_url}/jobs/{job_id}/evidence",
+                        f"{state.sandbox_base_url}/jobs/{safe_id}/evidence",
                         stream=True,
                         timeout=(state.connect_timeout, max(state.request_timeout, 300)),
                     ) as dl:
+                        if dl.status_code == 404 or dl.status_code == 409:
+                            raise FileNotFoundError(f"evidence_unavailable: HTTP {dl.status_code}: {dl.text.strip()}")
                         if dl.status_code != 200:
-                            raise RuntimeError(f"HTTP {dl.status_code}: {dl.text.strip()}")
+                            raise RuntimeError(f"unexpected_http_response: HTTP {dl.status_code}: {dl.text.strip()}")
                         expected_sha256 = dl.headers.get("X-Archive-SHA256", "").strip().lower()
                         digest = hashlib.sha256()
+                        total_zip_bytes = 0
                         with tmp_download_path.open("wb") as fh:
                             for chunk in dl.iter_content(chunk_size=state.chunk_size):
                                 if chunk:
+                                    total_zip_bytes += len(chunk)
+                                    if total_zip_bytes > state.max_archive_bytes:
+                                        raise ValueError(
+                                            f"Evidence archive exceeds max_evidence_archive_mb limit ({state.max_archive_bytes // (1024 * 1024)} MB)."
+                                        )
                                     fh.write(chunk)
                                     digest.update(chunk)
+
+                    if total_zip_bytes == 0:
+                        raise ValueError("evidence_unavailable: Downloaded evidence archive is empty.")
 
                     actual_sha256 = digest.hexdigest().lower()
                     if expected_sha256 and actual_sha256 != expected_sha256:
@@ -242,13 +520,79 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             f"Evidence checksum mismatch ({actual_sha256} != {expected_sha256})"
                         )
 
+                    # Validate ZIP metadata limits and safety BEFORE CRC checks, manifest check, or retention.
+                    with zipfile.ZipFile(tmp_download_path, "r") as zf:
+                        validate_evidence_zip(
+                            zf,
+                            max_entries=state.max_archive_entries,
+                            max_single_file_bytes=state.max_single_file_bytes,
+                            max_total_bytes=state.max_extracted_bytes,
+                        )
+                        bad_member = zf.testzip()
+                        if bad_member is not None:
+                            raise zipfile.BadZipFile(f"Corrupt ZIP entry from sandbox: {bad_member}")
+                        verify_evidence_zip_manifest(
+                            zf,
+                            max_single_file_bytes=state.max_single_file_bytes,
+                            max_total_bytes=state.max_extracted_bytes,
+                        )
+
                     tmp_download_path.replace(zip_path)
 
-                    # Acknowledge transfer so Sandbox moves to RESTORE_REQUIRED.
+                    # Optionally save Machine 2 isolated network-simulation diagnostics as a SEPARATE artifact
+                    # without modifying evidence_<job_id>.zip or blocking verified Sandbox archive transfer.
+                    if bool(state.config.get("inetsim_diagnostics_enabled", False)):
+                        netdiag_path = state.archive_dir / f"gateway_netdiag_{safe_id}.json"
+                        netdiag_tmp = state.temp_dir / f".gateway_netdiag_{safe_id}.json.tmp"
+                        try:
+                            with state.lock:
+                                started_utc = (
+                                    state.active_job.get("started_at_utc")
+                                    if state.active_job and state.active_job.get("job_id") == job_id
+                                    else None
+                                )
+                            sess_start = started_utc or datetime.now(timezone.utc)
+                            sess_end = datetime.now(timezone.utc)
+                            netdiag_doc = collect_session_inetsim_evidence(
+                                job_id=safe_id,
+                                session_start_utc=sess_start,
+                                session_end_utc=sess_end,
+                                config=state.config,
+                            )
+                            netdiag_tmp.write_text(json.dumps(netdiag_doc, indent=2), encoding="utf-8")
+                            netdiag_tmp.replace(netdiag_path)
+                        except Exception as diag_exc:
+                            safe_unlink(netdiag_tmp)
+                            logger.warning(
+                                "[WARN] Optional Machine 2 network diagnostics failed for job %s (%s); continuing with verified Sandbox archive.",
+                                safe_id,
+                                diag_exc,
+                            )
+                            try:
+                                fallback_diag = {
+                                    "schema_version": "1.0",
+                                    "job_id": safe_id,
+                                    "source_machine": "machine2-gateway",
+                                    "source_component": "inetsim_diagnostics",
+                                    "separate_from_sandbox_zip": True,
+                                    "sandbox_archive_integrity_preserved": True,
+                                    "log_import_status": "unavailable",
+                                    "log_import_note": f"Optional diagnostic collection failed: {diag_exc}",
+                                    "dns_event_count": 0,
+                                    "http_event_count": 0,
+                                    "dns_events": [],
+                                    "http_events": [],
+                                }
+                                netdiag_tmp.write_text(json.dumps(fallback_diag, indent=2), encoding="utf-8")
+                                netdiag_tmp.replace(netdiag_path)
+                            except OSError:
+                                safe_unlink(netdiag_tmp)
+
+                    # Acknowledge transfer only after full validation so Sandbox moves to RESTORE_REQUIRED.
                     sandbox_ack_ok = False
                     try:
                         ack_resp = requests.post(
-                            f"{state.sandbox_base_url}/jobs/{job_id}/ack",
+                            f"{state.sandbox_base_url}/jobs/{safe_id}/ack",
                             timeout=(state.connect_timeout, state.request_timeout),
                         )
                         if ack_resp.status_code == 200:
@@ -271,13 +615,28 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                             state.active_job["archive_sha256"] = actual_sha256
                             state.active_job["sandbox_ack_confirmed"] = sandbox_ack_ok
                     return
-                except (requests.RequestException, OSError, RuntimeError, ValueError) as exc:
+                except (
+                    requests.RequestException,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    UnicodeError,
+                    EOFError,
+                    zipfile.BadZipFile,
+                    NotImplementedError,
+                    zlib.error,
+                ) as exc:
                     safe_unlink(tmp_download_path)
                     logger.error("[ERROR] Evidence transfer from sandbox failed: %s", exc)
-                    with state.lock:
-                        if state.active_job and state.active_job.get("job_id") == job_id:
-                            state.active_job["status"] = "FAILED"
-                            state.active_job["error"] = f"Evidence transfer failed: {exc}"
+                    err_cat = (
+                        "evidence_unavailable"
+                        if isinstance(
+                            exc,
+                            (FileNotFoundError, zipfile.BadZipFile, ValueError, UnicodeError, EOFError, NotImplementedError, zlib.error),
+                        )
+                        else "unexpected_http_response"
+                    )
+                    _fail_job(f"Evidence transfer failed: {exc}", err_cat)
                     return
 
             if str(job_info.get("job_status", "")).lower() == "failed" and not job_info.get(
@@ -285,19 +644,13 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
             ):
                 err = job_info.get("error") or "Sandbox analysis failed."
                 logger.error("[ERROR] Sandbox analysis failed: %s", err)
-                with state.lock:
-                    if state.active_job and state.active_job.get("job_id") == job_id:
-                        state.active_job["status"] = "FAILED"
-                        state.active_job["error"] = err
+                _fail_job(err, "interrupted_job")
                 return
 
             time.sleep(state.poll_interval)
 
         logger.error("[ERROR] Timed out waiting for sandbox evidence on job %s.", job_id)
-        with state.lock:
-            if state.active_job and state.active_job.get("job_id") == job_id:
-                state.active_job["status"] = "FAILED"
-                state.active_job["error"] = "Timed out waiting for sandbox evidence."
+        _fail_job("Timed out waiting for sandbox evidence.", "connection_timeout")
 
     @app.get("/health")
     def health() -> tuple[Response, int]:
@@ -481,6 +834,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                     "job_id": job_id,
                     "filename": filename,
                     "sha256": actual_sha256,
+                    "started_at_utc": datetime.now(timezone.utc),
                     "status": "ANALYZING",
                     "job_status": "running",
                     "stage": "submitted",
@@ -533,6 +887,7 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
                 "evidence_ready": bool(job.get("evidence_ready")),
                 "archive_sha256": job.get("archive_sha256", ""),
                 "error": job.get("error"),
+                "error_code": job.get("error_code"),
             }
         return jsonify(payload), 200
 
@@ -607,6 +962,32 @@ def create_app(config: dict[str, Any], config_dir: Path, logger: logging.Logger)
         }
         return Response(stream_evidence(), status=200, mimetype="application/zip", headers=headers)
 
+    @app.get("/jobs/<job_id>/network-diagnostics")
+    def get_network_diagnostics(job_id: str) -> tuple[Response, int]:
+        """Return separate Machine 2 isolated network diagnostic JSON without modifying Sandbox ZIP."""
+        try:
+            safe_id = sanitize_job_id(job_id)
+        except ValueError as exc:
+            return jsonify({"error_code": "INVALID_JOB_ID", "error": str(exc)}), 400
+
+        netdiag_path = state.archive_dir / f"gateway_netdiag_{safe_id}.json"
+        if not netdiag_path.is_file():
+            return (
+                jsonify(
+                    {
+                        "error_code": "DIAGNOSTICS_UNAVAILABLE",
+                        "error": "No Machine 2 INetSim diagnostics artifact recorded for this job.",
+                        "inetsim_diagnostics_enabled": bool(state.config.get("inetsim_diagnostics_enabled", False)),
+                    }
+                ),
+                404,
+            )
+        try:
+            doc = json.loads(netdiag_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            return jsonify({"error_code": "DIAGNOSTICS_READ_ERROR", "error": str(exc)}), 500
+        return jsonify(doc), 200
+
     @app.post("/jobs/<job_id>/ack")
     def ack_client_receipt(job_id: str) -> tuple[Response, int]:
         try:
@@ -658,7 +1039,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config).resolve()
     try:
         config = load_config(config_path)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         logger.error("[ERROR] Failed to load gateway config: %s", exc)
         return 1
 

@@ -11,5 +11,15 @@
   "poll_interval_seconds": 3,
   "analysis_timeout_seconds": 1800,
   "chunk_size_bytes": 65536,
-  "max_sample_size_mb": 200
+  "max_sample_size_mb": 200,
+  "max_evidence_archive_mb": 512,
+  "max_extracted_size_mb": 1024,
+  "max_single_file_mb": 256,
+  "max_archive_entries": 5000,
+  "inetsim_diagnostics_enabled": false,
+  "inetsim_binary": "/usr/bin/inetsim",
+  "inetsim_conf_path": "/etc/inetsim/inetsim.conf",
+  "inetsim_log_dir": "/var/log/inetsim",
+  "max_inetsim_log_mb": 5,
+  "max_inetsim_events": 1000
 }
